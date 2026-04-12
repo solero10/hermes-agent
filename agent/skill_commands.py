@@ -183,7 +183,7 @@ def _build_skill_message(
         for sf in supporting:
             parts.append(f"- {sf}")
         parts.append(
-            f'\nTo view any of these, use: skill_view(name="{skill_view_target}", file_path="<path>")'
+            f"\nTo view any of these, use: skill_view(name=\"{skill_view_target}\", file_path=\"<path>\")"
         )
 
     if user_instruction:
@@ -197,11 +197,30 @@ def _build_skill_message(
     return "\n".join(parts)
 
 
+def resolve_skill_command_key(cmd_key: str) -> str | None:
+    """Resolve a skill command key, tolerating Telegram underscore variants.
+
+    Skill commands are stored canonically with hyphens (for example
+    ``/cust-skills``). Telegram menus and typed commands often use underscores
+    instead (``/cust_skills``). This helper maps either form back to the
+    registered key so gateway/CLI dispatch stays consistent.
+    """
+    commands = get_skill_commands()
+    if cmd_key in commands:
+        return cmd_key
+
+    normalized = "/" + cmd_key.lstrip("/").replace("_", "-")
+    if normalized in commands:
+        return normalized
+
+    return None
+
+
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     """Scan ~/.hermes/skills/ and return a mapping of /command -> skill info.
 
     Returns:
-        Dict mapping "/skill-name" to {name, description, skill_md_path, skill_dir}.
+        Dict mapping \"/skill-name\" to {name, description, skill_md_path, skill_dir}.
     """
     global _skill_commands
     _skill_commands = {}
@@ -235,7 +254,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
                         continue
                     description = frontmatter.get('description', '')
                     if not description:
-                        for line in body.strip().split('\n'):
+                        for line in body.strip().split('\\n'):
                             line = line.strip()
                             if line and not line.startswith('#'):
                                 description = line[:80]
@@ -299,12 +318,15 @@ def build_skill_invocation_message(
     Args:
         cmd_key: The command key including leading slash (e.g., "/gif-search").
         user_instruction: Optional text the user typed after the command.
+        task_id: Optional task ID for context.
+        runtime_note: Optional runtime note to include.
 
     Returns:
         The formatted message string, or None if the skill wasn't found.
     """
     commands = get_skill_commands()
-    skill_info = commands.get(cmd_key)
+    resolved_cmd_key = resolve_skill_command_key(cmd_key)
+    skill_info = commands.get(resolved_cmd_key or cmd_key)
     if not skill_info:
         return None
 

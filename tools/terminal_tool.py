@@ -53,7 +53,12 @@ logger = logging.getLogger(__name__)
 # long-running subprocesses immediately instead of blocking until timeout.
 # ---------------------------------------------------------------------------
 from tools.interrupt import is_interrupted, _interrupt_event  # noqa: F401 — re-exported
+from hermes_cli.env_loader import load_hermes_dotenv
 # display_hermes_home imported lazily at call site (stale-module safety during hermes update)
+
+# Load Hermes env defaults as soon as the terminal tool is imported so spawned
+# shells and subprocesses inherit ~/.hermes/.env without requiring manual sourcing.
+load_hermes_dotenv()
 
 
 def ensure_minisweagent_on_path(_repo_root: Path | None = None) -> None:

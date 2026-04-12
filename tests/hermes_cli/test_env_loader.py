@@ -68,3 +68,17 @@ def test_main_import_applies_user_env_over_shell_values(tmp_path, monkeypatch):
 
     assert os.getenv("OPENAI_BASE_URL") == "https://new.example/v1"
     assert os.getenv("HERMES_INFERENCE_PROVIDER") == "custom"
+
+
+def test_terminal_tool_import_applies_user_env_over_shell_values(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / ".env").write_text("OPENROUTER_API_KEY=test-key\n", encoding="utf-8")
+
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    sys.modules.pop("tools.terminal_tool", None)
+    importlib.import_module("tools.terminal_tool")
+
+    assert os.getenv("OPENROUTER_API_KEY") == "test-key"
