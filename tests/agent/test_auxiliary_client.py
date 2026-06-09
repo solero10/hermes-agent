@@ -981,7 +981,8 @@ class TestAuxiliaryPoolAwareness:
             client, model = _try_nous()
 
         assert client is not None
-        assert model == "google/gemini-3-flash-preview"
+        from agent.auxiliary_client import _NOUS_MODEL
+        assert model == _NOUS_MODEL
         assert mock_openai.call_args.kwargs["api_key"] == pooled_token
         assert mock_openai.call_args.kwargs["base_url"] == "https://inference.pool.example/v1"
 
@@ -1032,7 +1033,8 @@ class TestAuxiliaryPoolAwareness:
             client, model = _try_nous()
 
         assert client is not None
-        assert model == "google/gemini-3-flash-preview"
+        from agent.auxiliary_client import _NOUS_MODEL
+        assert model == _NOUS_MODEL
 
     def test_call_llm_retries_nous_after_401(self):
         class _Auth401(Exception):
@@ -1379,7 +1381,8 @@ class TestRefreshNousRecommendedModel:
         )
         out = _refresh_nous_recommended_model(
             vision=True, stale_model="openai/gpt-5.4-mini")
-        assert out == "google/gemini-3-flash-preview"
+        from agent.auxiliary_client import _NOUS_MODEL
+        assert out == _NOUS_MODEL
 
     def test_falls_back_to_default_when_portal_unavailable(self, monkeypatch):
         def _boom(**kw):
@@ -1388,17 +1391,19 @@ class TestRefreshNousRecommendedModel:
             "hermes_cli.models.get_nous_recommended_aux_model", _boom)
         out = _refresh_nous_recommended_model(
             vision=False, stale_model="some/dead-model")
-        assert out == "google/gemini-3-flash-preview"
+        from agent.auxiliary_client import _NOUS_MODEL
+        assert out == _NOUS_MODEL
 
     def test_returns_none_when_no_distinct_alternative(self, monkeypatch):
         """When the failed model IS the default and the Portal has nothing
         else, there's no usable alternative."""
+        from agent.auxiliary_client import _NOUS_MODEL
         monkeypatch.setattr(
             "hermes_cli.models.get_nous_recommended_aux_model",
-            lambda **kw: "google/gemini-3-flash-preview",
+            lambda **kw: _NOUS_MODEL,
         )
         out = _refresh_nous_recommended_model(
-            vision=False, stale_model="google/gemini-3-flash-preview")
+            vision=False, stale_model=_NOUS_MODEL)
         assert out is None
 
 
