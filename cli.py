@@ -1938,6 +1938,17 @@ def _rich_text_from_ansi(text: str) -> _RichText:
     return _RichText.from_ansi(text or "")
 
 
+def _dim_rich_text(text: str) -> _RichText:
+    """Return dim/italic text without feeding ANSI escapes into Rich markup.
+
+    ``_DIM`` is an ANSI sequence, not a Rich style tag. Wrapping it as
+    ``f"[{_DIM}]...[/]"`` makes Rich parse an invalid opening tag and can raise
+    ``MarkupError: closing tag '[/]' has nothing to close``. Convert the ANSI
+    sequence to a Rich ``Text`` renderable instead.
+    """
+    return _rich_text_from_ansi(f"{_DIM}{text or ''}{_RST}")
+
+
 def _strip_markdown_syntax(text: str) -> str:
     """Best-effort markdown marker removal for plain-text display."""
     plain = _rich_text_from_ansi(text or "").plain
@@ -5143,9 +5154,11 @@ class HermesCLI:
                 resolved_id = self.session_id
             if resolved_id and resolved_id != self.session_id:
                 ChatConsole().print(
-                    f"[{_DIM}]Session {_escape(self.session_id)} was compressed into "
-                    f"{_escape(resolved_id)}; resuming the descendant with your "
-                    f"transcript.[/]"
+                    _dim_rich_text(
+                        f"Session {self.session_id} was compressed into "
+                        f"{resolved_id}; resuming the descendant with your "
+                        "transcript."
+                    )
                 )
                 self.session_id = resolved_id
                 resolved_meta = self._session_db.get_session(self.session_id)
@@ -5424,7 +5437,7 @@ class HermesCLI:
             if quiet:
                 print(msg, file=sys.stderr)
             else:
-                self._console_print(f"[{_DIM}]{_escape(msg)}[/]")
+                self._console_print(_dim_rich_text(msg))
             return
 
         try:
@@ -5434,7 +5447,7 @@ class HermesCLI:
             if quiet:
                 print(msg, file=sys.stderr)
             else:
-                self._console_print(f"[{_DIM}]{_escape(msg)}[/]")
+                self._console_print(_dim_rich_text(msg))
             return
 
         # Retarget the terminal/code-exec tools to match the process cwd.
@@ -5444,7 +5457,7 @@ class HermesCLI:
         if quiet:
             print(msg, file=sys.stderr)
         else:
-            self._console_print(f"[{_DIM}]{_escape(msg)}[/]")
+            self._console_print(_dim_rich_text(msg))
 
     def _preload_resumed_session(self) -> bool:
         """Load a resumed session's history from the DB early (before first chat).
