@@ -499,6 +499,40 @@ def test_save_platform_tools_handles_invalid_existing_config():
     assert "web" in saved_toolsets
 
 
+def test_save_platform_tools_mirrors_cli_selection_to_legacy_root_toolsets():
+    """CLI tool saves keep the legacy root alias in sync.
+
+    Some older runtime checks and launch paths still read config["toolsets"].
+    If this aliases stale ``["hermes-cli"]`` while platform_toolsets.cli has
+    explicit opt-ins, tools like bitwarden_safe disappear from those sessions.
+    """
+    config = {
+        "toolsets": ["hermes-cli"],
+        "platform_toolsets": {"cli": ["hermes-cli"]},
+    }
+    new_selection = {"bitwarden_safe", "terminal", "web"}
+
+    with patch("hermes_cli.tools_config.save_config"):
+        _save_platform_tools(config, "cli", new_selection)
+
+    saved = ["bitwarden_safe", "terminal", "web"]
+    assert config["platform_toolsets"]["cli"] == saved
+    assert config["toolsets"] == saved
+
+
+def test_save_platform_tools_does_not_mirror_non_cli_platform_to_root_toolsets():
+    config = {
+        "toolsets": ["bitwarden_safe", "terminal"],
+        "platform_toolsets": {"telegram": ["web"]},
+    }
+
+    with patch("hermes_cli.tools_config.save_config"):
+        _save_platform_tools(config, "telegram", {"web", "terminal"})
+
+    assert config["toolsets"] == ["bitwarden_safe", "terminal"]
+    assert config["platform_toolsets"]["telegram"] == ["terminal", "web"]
+
+
 def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
     """Platform default toolsets (hermes-cli, hermes-telegram, etc.) must NOT
     be preserved across saves.

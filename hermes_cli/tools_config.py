@@ -1514,8 +1514,15 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     # by hand could never re-enable MCP servers through the UI.
     preserved_entries.discard("no_mcp")
 
-    # Merge preserved entries with new enabled toolsets
-    config["platform_toolsets"][platform] = sorted(enabled_toolset_keys | preserved_entries)
+    # Merge preserved entries with new enabled toolsets.
+    saved_toolsets = sorted(enabled_toolset_keys | preserved_entries)
+    config["platform_toolsets"][platform] = saved_toolsets
+
+    # Root-level ``toolsets`` is a legacy CLI alias. Keep it in sync so
+    # older launch paths and check_fns that still read config["toolsets"] do
+    # not silently lose opt-in CLI toolsets like bitwarden_safe.
+    if platform == "cli":
+        config["toolsets"] = list(saved_toolsets)
 
     # Track which plugin toolsets are "known" for this platform so we can
     # distinguish "new plugin, default enabled" from "user disabled it".

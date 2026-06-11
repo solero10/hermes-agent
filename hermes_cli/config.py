@@ -5058,6 +5058,31 @@ def load_config_readonly() -> Dict[str, Any]:
     return _load_config_impl(want_deepcopy=False)
 
 
+def _sync_legacy_toolsets_alias(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Mirror ``platform_toolsets.cli`` into legacy root ``toolsets``.
+
+    ``platform_toolsets`` is the canonical tool configuration, but some older
+    call sites and third-party launchers still read ``config["toolsets"]``.
+    If the two drift, CLI sessions can silently lose opt-in toolsets such as
+    ``bitwarden_safe`` even though ``hermes tools list`` shows them enabled.
+
+    Treat the root key as a read-time compatibility alias for the CLI platform
+    so every runtime path sees the same effective toolset list. Preserve an
+    explicit empty CLI list too: ``platform_toolsets.cli: []`` means no legacy
+    fallback should resurrect ``hermes-cli``.
+    """
+    platform_toolsets = config.get("platform_toolsets")
+    if not isinstance(platform_toolsets, dict):
+        return config
+
+    cli_toolsets = platform_toolsets.get("cli")
+    if not isinstance(cli_toolsets, list):
+        return config
+
+    config["toolsets"] = [str(ts) for ts in cli_toolsets if str(ts).strip()]
+    return config
+
+
 def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
     with _CONFIG_LOCK:
         ensure_hermes_home()
@@ -5092,7 +5117,9 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
             except Exception as e:
                 _warn_config_parse_failure(config_path, e)
 
-        normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
+        normalized = _sync_legacy_toolsets_alias(
+            _normalize_root_model_keys(_normalize_max_turns_config(config))
+        )
         expanded = _expand_env_vars(normalized)
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_key is not None:
@@ -5202,9 +5229,13 @@ def save_config(config: Dict[str, Any]):
 
         ensure_hermes_home()
         config_path = get_config_path()
-        current_normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
+        current_normalized = _sync_legacy_toolsets_alias(
+            _normalize_root_model_keys(_normalize_max_turns_config(config))
+        )
         normalized = current_normalized
-        raw_existing = _normalize_root_model_keys(_normalize_max_turns_config(read_raw_config()))
+        raw_existing = _sync_legacy_toolsets_alias(
+            _normalize_root_model_keys(_normalize_max_turns_config(read_raw_config()))
+        )
         if raw_existing:
             normalized = _preserve_env_ref_templates(
                 normalized,

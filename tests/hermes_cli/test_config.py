@@ -82,6 +82,55 @@ class TestLoadConfigDefaults:
             assert config["agent"]["max_turns"] == 42
             assert "max_turns" not in config
 
+    def test_platform_cli_toolsets_mirror_to_legacy_root_toolsets(self, tmp_path):
+        """Root ``toolsets`` is a legacy CLI alias for platform_toolsets.cli.
+
+        Without this, launch paths that still read config["toolsets"] can miss
+        tools shown as enabled by `hermes tools list`, including
+        bitwarden_safe.
+        """
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "toolsets:\n"
+                "  - hermes-cli\n"
+                "platform_toolsets:\n"
+                "  cli:\n"
+                "    - bitwarden_safe\n"
+                "    - terminal\n"
+            )
+
+            config = load_config()
+            assert config["toolsets"] == ["bitwarden_safe", "terminal"]
+
+    def test_empty_platform_cli_toolsets_mirror_to_empty_legacy_root(self, tmp_path):
+        """An explicit empty CLI toolset list must not fall back to hermes-cli."""
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(
+                "toolsets:\n"
+                "  - hermes-cli\n"
+                "platform_toolsets:\n"
+                "  cli: []\n"
+            )
+
+            config = load_config()
+            assert config["toolsets"] == []
+
+    def test_save_config_persists_legacy_toolsets_alias_from_platform_cli(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_config(
+                {
+                    "toolsets": ["hermes-cli"],
+                    "platform_toolsets": {
+                        "cli": ["bitwarden_safe", "terminal"],
+                    },
+                }
+            )
+
+            raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
+            assert raw["toolsets"] == ["bitwarden_safe", "terminal"]
+
 
 class TestLoadConfigParseFailure:
     """A YAML parse failure must NOT silently fall back to defaults.
