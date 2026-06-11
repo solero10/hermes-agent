@@ -166,6 +166,17 @@ TOOLSETS = {
         "tools": ["skills_list", "skill_view", "skill_manage"],
         "includes": []
     },
+
+    "bitwarden_safe": {
+        "description": "Secure Bitwarden Password Manager operations through local secret capture",
+        "tools": [
+            "bitwarden_safe_status",
+            "bitwarden_list_website_aliases",
+            "bitwarden_set_website_password",
+            "bitwarden_prepare_website_login",
+        ],
+        "includes": []
+    },
     
     "browser": {
         "description": "Browser automation for web interaction (navigate, click, type, scroll, iframes, hold-click) with web search for finding URLs",

@@ -2095,6 +2095,7 @@ def _wire_callbacks(sid: str):
     set_sudo_password_callback(lambda: _block("sudo.request", sid, {}, timeout=120))
 
     def secret_cb(env_var, prompt, metadata=None):
+        metadata = metadata or {}
         pl = {"prompt": prompt, "env_var": env_var}
         if metadata:
             pl["metadata"] = metadata
@@ -2106,6 +2107,16 @@ def _wire_callbacks(sid: str):
                 "validated": False,
                 "skipped": True,
                 "message": "skipped",
+            }
+        if metadata.get("transient"):
+            return {
+                "success": True,
+                "stored_as": env_var,
+                "validated": False,
+                "skipped": False,
+                "transient": True,
+                "value": val,
+                "message": "captured for one-time use",
             }
         from hermes_cli.config import save_env_value_secure
 

@@ -149,6 +149,25 @@ def set_secret_capture_callback(callback) -> None:
     _secret_capture_callback = callback
 
 
+def capture_transient_secret(var_name: str, prompt: str, metadata: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Capture a one-time secret without persisting it to .env.
+
+    This is for trusted in-process tools that need to hand a secret directly to
+    a local helper (for example updating a Bitwarden item). The caller must
+    consume the returned value immediately and must never include it in tool
+    output, logs, memory, or transcripts.
+    """
+    if _secret_capture_callback is None:
+        return {
+            "success": False,
+            "skipped": True,
+            "message": "Secure local secret capture is not available in this session.",
+        }
+    md = dict(metadata or {})
+    md["transient"] = True
+    return _secret_capture_callback(var_name, prompt, md)
+
+
 def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
     """Check if a skill is compatible with the current OS platform.
 

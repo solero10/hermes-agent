@@ -67,8 +67,13 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
     """Prompt for a secret value through the TUI (e.g. API keys for skills).
 
     Returns a dict with keys: success, stored_as, validated, skipped, message.
-    The secret is stored in ~/.hermes/.env and never exposed to the model.
+    By default the secret is stored in ~/.hermes/.env and never exposed to the
+    model. When metadata includes {"transient": True}, the value is returned
+    only to the trusted in-process caller for immediate use and is not stored.
+    Transient callers must never include the returned value in tool output.
     """
+    metadata = metadata or {}
+    transient = bool(metadata.get("transient"))
     if not getattr(cli, "_app", None):
         if not hasattr(cli, "_secret_state"):
             cli._secret_state = None
@@ -88,6 +93,18 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
                 "validated": False,
                 "skipped": True,
                 "message": "Secret setup was skipped.",
+            }
+
+        if transient:
+            cprint(f"\n{_DIM}  ✓ Secret captured for one-time use; not stored{_RST}")
+            return {
+                "success": True,
+                "stored_as": var_name,
+                "validated": False,
+                "skipped": False,
+                "transient": True,
+                "value": value,
+                "message": "Secret captured for one-time use. The secret value was not exposed to the model.",
             }
 
         stored = save_env_value_secure(var_name, value)
@@ -141,6 +158,18 @@ def prompt_for_secret(cli, var_name: str, prompt: str, metadata=None) -> dict:
                     "validated": False,
                     "skipped": True,
                     "message": "Secret setup was skipped.",
+                }
+
+            if transient:
+                cprint(f"\n{_DIM}  ✓ Secret captured for one-time use; not stored{_RST}")
+                return {
+                    "success": True,
+                    "stored_as": var_name,
+                    "validated": False,
+                    "skipped": False,
+                    "transient": True,
+                    "value": value,
+                    "message": "Secret captured for one-time use. The secret value was not exposed to the model.",
                 }
 
             stored = save_env_value_secure(var_name, value)
