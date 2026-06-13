@@ -868,7 +868,7 @@ export const ToolTrail = memo(function ToolTrail({
         : [],
       content: (
         <>
-          <Spinner color={t.color.accent} variant="tool" /> {label}
+          {tool.name.startsWith('mcp_cortexdb_') ? '🧠' : <Spinner color={t.color.accent} variant="tool" />} {label}
           {tool.startedAt ? ` (${fmtElapsed(now - tool.startedAt)})` : ''}
         </>
       )

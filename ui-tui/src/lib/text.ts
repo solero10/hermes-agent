@@ -187,16 +187,39 @@ const countNewlines = (text: string, end: number) => {
 
 export const stripTrailingPasteNewlines = (text: string) => (/[^\n]/.test(text) ? text.replace(/\n+$/, '') : text)
 
-export const toolTrailLabel = (name: string) =>
-  name
-    .split('_')
-    .filter(Boolean)
-    .map(p => p[0]!.toUpperCase() + p.slice(1))
-    .join(' ') || name
+const FRIENDLY_TOOL_LABELS: Record<string, string> = {
+  mcp_cortexdb_capture_thought: 'OpenBrain save note',
+  mcp_cortexdb_fetch: 'OpenBrain fetch',
+  mcp_cortexdb_list_thoughts: 'OpenBrain list',
+  mcp_cortexdb_search: 'OpenBrain search',
+  mcp_cortexdb_search_thoughts: 'OpenBrain search',
+  mcp_cortexdb_thought_stats: 'OpenBrain stats'
+}
+
+export const toolTrailLabel = (name: string) => {
+  const friendly = FRIENDLY_TOOL_LABELS[name]
+
+  if (friendly) {
+    return friendly
+  }
+
+  return (
+    name
+      .split('_')
+      .filter(Boolean)
+      .map(p => p[0]!.toUpperCase() + p.slice(1))
+      .join(' ') || name
+  )
+}
 
 export const formatToolCall = (name: string, context = '') => {
+  const friendly = FRIENDLY_TOOL_LABELS[name]
   const label = toolTrailLabel(name)
   const preview = compactPreview(context, 64)
+
+  if (friendly) {
+    return preview ? `${friendly}: "${preview}"` : friendly
+  }
 
   return preview ? `${label}("${preview}")` : label
 }
@@ -240,6 +263,7 @@ export const buildVerboseToolTrailLine = (
   const detail = [verboseToolBlock('Args', argsText), verboseToolBlock(error ? 'Error' : 'Result', resultText)]
     .filter(Boolean)
     .join('\n')
+
   const took = duration !== undefined ? ` (${duration.toFixed(1)}s)` : ''
 
   return `${formatToolCall(name, context)}${took}${detail ? ` :: ${detail}` : ''} ${error ? '✗' : '✓'}`

@@ -6,6 +6,7 @@ Used by AIAgent._execute_tool_calls for CLI feedback.
 
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -100,6 +101,20 @@ class LocalEditSnapshot:
 # =========================================================================
 _tool_preview_max_len: int = 0  # 0 = unlimited
 
+_OPENBRAIN_TOOL_LABELS = {
+    "mcp_cortexdb_search_thoughts": "OpenBrain search",
+    "mcp_cortexdb_search": "OpenBrain search",
+    "mcp_cortexdb_fetch": "OpenBrain fetch",
+    "mcp_cortexdb_capture_thought": "OpenBrain save note",
+    "mcp_cortexdb_list_thoughts": "OpenBrain list",
+    "mcp_cortexdb_thought_stats": "OpenBrain stats",
+}
+
+
+def openbrain_tool_label(tool_name: str) -> str | None:
+    """Return a user-facing label for Ken's CortexDB/OpenBrain MCP tools."""
+    return _OPENBRAIN_TOOL_LABELS.get(str(tool_name or ""))
+
 
 def set_tool_preview_max_len(n: int) -> None:
     """Set the global max length for tool call previews. 0 = no limit."""
@@ -147,6 +162,8 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
         override = skin.tool_emojis.get(tool_name)
         if override:
             return override
+    if openbrain_tool_label(tool_name):
+        return "🧠"
     # 2. Registry default
     try:
         from tools.registry import registry
@@ -168,6 +185,118 @@ def _oneline(text: str) -> str:
     return " ".join(text.split())
 
 
+def _apply_preview_limit(preview: str, max_len: int) -> str:
+    if max_len > 0 and len(preview) > max_len:
+        return preview[:max_len - 3] + "..."
+    return preview
+
+
+def _openbrain_tool_preview(tool_name: str, args: dict, max_len: int) -> str | None:
+    if not isinstance(args, dict):
+        return None
+
+    value = None
+    if tool_name in {"mcp_cortexdb_search_thoughts", "mcp_cortexdb_search"}:
+        value = args.get("query")
+    elif tool_name == "mcp_cortexdb_fetch":
+        value = args.get("id")
+    elif tool_name == "mcp_cortexdb_list_thoughts":
+        parts = []
+        for key in ("type", "topic", "person", "days", "limit"):
+            val = args.get(key)
+            if val not in (None, ""):
+                parts.append(f"{key}={val}")
+        value = ", ".join(parts) or "recent thoughts"
+    elif tool_name == "mcp_cortexdb_capture_thought":
+        # Do not echo note contents while saving private memory.
+        return None
+
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    preview = _oneline(str(value or ""))
+    return _apply_preview_limit(preview, max_len) if preview else None
+
+
+def build_tool_status_preview(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
+    """Build a short, human-facing status label for live tool spinners."""
+    if max_len is None:
+        max_len = _tool_preview_max_len
+
+    label = openbrain_tool_label(tool_name)
+    if label:
+        preview = _openbrain_tool_preview(tool_name, args, max_len)
+        if preview and "search" in label:
+            return f'{label}: "{preview}"'
+        if preview:
+            return f"{label}: {preview}"
+        return label
+
+    return build_tool_preview(tool_name, args, max_len=max_len)
+
+
+def _openbrain_result_count(result: str | None) -> int | None:
+    if result is None:
+        return None
+
+    data = safe_json_loads(result)
+    texts: list[str] = []
+
+    if isinstance(data, list):
+        return len(data)
+    if isinstance(data, dict):
+        for key in ("thoughts", "results", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return len(value)
+        nested = data.get("data")
+        if isinstance(nested, dict):
+            for key in ("thoughts", "results", "items"):
+                value = nested.get(key)
+                if isinstance(value, list):
+                    return len(value)
+        for key in ("result", "content", "message", "text"):
+            value = data.get(key)
+            if isinstance(value, str):
+                texts.append(value)
+
+    if isinstance(result, str):
+        texts.append(result)
+
+    for text in texts:
+        match = re.search(r"\bFound\s+(\d+)\s+thought", text, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        markers = len(re.findall(r"^---\s+Result\s+\d+", text, re.MULTILINE))
+        if markers:
+            return markers
+
+    return None
+
+
+def summarize_openbrain_tool_result(tool_name: str, result: str | None) -> str | None:
+    """Return a privacy-safe completion summary for OpenBrain MCP tools."""
+    label = openbrain_tool_label(tool_name)
+    if not label:
+        return None
+
+    if "search" in label:
+        count = _openbrain_result_count(result)
+        return f"{count} found" if count is not None else None
+    if tool_name == "mcp_cortexdb_list_thoughts":
+        count = _openbrain_result_count(result)
+        return f"{count} shown" if count is not None else None
+    if tool_name == "mcp_cortexdb_capture_thought":
+        data = safe_json_loads(result) if result is not None else None
+        if isinstance(data, dict) and data.get("success") is False:
+            return None
+        return "saved"
+    if tool_name == "mcp_cortexdb_fetch":
+        return "fetched"
+    if tool_name == "mcp_cortexdb_thought_stats":
+        return "loaded"
+    return None
+
+
 def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
     """Build a short preview of a tool call's primary argument for display.
 
@@ -178,6 +307,10 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
         max_len = _tool_preview_max_len
     if not args:
         return None
+
+    if openbrain_tool_label(tool_name):
+        return _openbrain_tool_preview(tool_name, args, max_len)
+
     primary_args = {
         "terminal": "command", "web_search": "query", "web_extract": "urls",
         "read_file": "path", "write_file": "path", "patch": "path",
@@ -973,6 +1106,12 @@ def get_cute_tool_message(
             if total > 0 and done > 0:
                 return _wrap(f"┊ 📋 plan      {done}/{total} task(s)  {dur}")
             return _wrap(f"┊ 📋 plan      {len(todos_arg)} task(s)  {dur}")
+    label = openbrain_tool_label(tool_name)
+    if label:
+        summary = summarize_openbrain_tool_result(tool_name, result)
+        detail = f"{label}: {summary}" if summary else (build_tool_status_preview(tool_name, args) or label)
+        mark = "✗" if is_failure else "✓"
+        return _wrap(f"┊ {mark} {detail}  {dur}")
     if tool_name == "session_search":
         return _wrap(f"┊ 🔍 recall    \"{_trunc(args.get('query', ''), 35)}\"  {dur}")
     if tool_name == "memory":

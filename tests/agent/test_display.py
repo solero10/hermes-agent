@@ -6,10 +6,14 @@ from unittest.mock import MagicMock
 
 from agent.display import (
     build_tool_preview,
+    build_tool_status_preview,
     capture_local_edit_snapshot,
     extract_edit_diff,
     get_cute_tool_message,
+    get_tool_emoji,
+    openbrain_tool_label,
     set_tool_preview_max_len,
+    summarize_openbrain_tool_result,
     _render_inline_unified_diff,
     _summarize_rendered_diff_sections,
     render_edit_diff_with_delta,
@@ -104,6 +108,32 @@ class TestBuildToolPreview:
         assert result is not None
         assert "find something" in result
 
+    def test_openbrain_search_preview_is_query_only(self):
+        result = build_tool_preview(
+            "mcp_cortexdb_search_thoughts",
+            {"query": "Hermes tool progress display"},
+        )
+
+        assert result == "Hermes tool progress display"
+
+    def test_openbrain_status_preview_adds_friendly_label(self):
+        result = build_tool_status_preview(
+            "mcp_cortexdb_search_thoughts",
+            {"query": "Hermes tool progress display"},
+        )
+
+        assert result == 'OpenBrain search: "Hermes tool progress display"'
+
+    def test_openbrain_capture_preview_hides_note_content(self):
+        content = "private note contents should not be echoed"
+
+        assert build_tool_preview("mcp_cortexdb_capture_thought", {"content": content}) is None
+        assert build_tool_status_preview("mcp_cortexdb_capture_thought", {"content": content}) == "OpenBrain save note"
+
+    def test_openbrain_tool_emoji_and_label(self):
+        assert openbrain_tool_label("mcp_cortexdb_search_thoughts") == "OpenBrain search"
+        assert get_tool_emoji("mcp_cortexdb_search_thoughts") == "🧠"
+
     def test_false_like_args_zero(self):
         """Non-dict falsy values should return None, not crash."""
         assert build_tool_preview("terminal", 0) is None
@@ -169,6 +199,46 @@ class TestCuteToolMessagePreviewLength:
         line = get_cute_tool_message("patch", {"path": "/tmp/a.py"}, 0.1, result=result)
 
         assert "[error]" not in line
+
+    def test_openbrain_search_completion_summarizes_found_count(self):
+        result = json.dumps({
+            "result": "Found 3 thought(s):\n\n--- Result 1 ---\n--- Result 2 ---\n--- Result 3 ---"
+        })
+
+        line = get_cute_tool_message(
+            "mcp_cortexdb_search_thoughts",
+            {"query": "short query preview"},
+            6.4,
+            result=result,
+        )
+
+        assert "✓ OpenBrain search: 3 found" in line
+        assert "6.4s" in line
+        assert "mcp_corte" not in line
+        assert summarize_openbrain_tool_result("mcp_cortexdb_search_thoughts", result) == "3 found"
+
+    def test_openbrain_search_completion_falls_back_to_query_preview(self):
+        line = get_cute_tool_message(
+            "mcp_cortexdb_search_thoughts",
+            {"query": "short query preview"},
+            6.0,
+            result=None,
+        )
+
+        assert '✓ OpenBrain search: "short query preview"' in line
+        assert "6.0s" in line
+
+    def test_openbrain_save_completion_hides_note_content(self):
+        content = "private note contents should not be echoed"
+        line = get_cute_tool_message(
+            "mcp_cortexdb_capture_thought",
+            {"content": content},
+            1.2,
+            result=json.dumps({"success": True, "id": "thought-1"}),
+        )
+
+        assert "✓ OpenBrain save note: saved" in line
+        assert content not in line
 
 
 class TestEditDiffPreview:
