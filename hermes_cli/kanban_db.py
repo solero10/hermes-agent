@@ -97,11 +97,8 @@ _log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-VALID_STATUSES = {
-    "backlog", "triage", "todo", "scheduled", "ready", "running",
-    "blocked", "review", "human_review", "done", "archived",
-}
-VALID_INITIAL_STATUSES = {"running", "blocked", "backlog"}
+VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
+VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
@@ -2082,9 +2079,7 @@ def create_task(
     parents (or all parents already ``done``), otherwise ``todo``.
     If ``triage=True``, status is forced to ``triage`` regardless of
     parents — a specifier/triager is expected to promote the task to
-    ``todo`` once the spec is fleshed out. If ``initial_status='backlog'``,
-    status is forced to ``backlog`` as a human-only intake lane; dispatchers
-    do not claim backlog tasks.
+    ``todo`` once the spec is fleshed out.
 
     If ``idempotency_key`` is provided and a non-archived task with the
     same key already exists, returns the existing task's id instead of
@@ -2204,16 +2199,10 @@ def create_task(
         try:
             with write_txn(conn):
                 # Determine task status from parent status, unless the caller
-                # parks it directly in blocked/backlog for human-ops review or
-                # in triage for a specifier.
+                # parks it directly in blocked for human-ops review or in
+                # triage for a specifier.
                 if initial_status == "blocked":
                     task_status = "blocked"
-                    if parents:
-                        missing = _find_missing_parents(conn, parents)
-                        if missing:
-                            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
-                elif initial_status == "backlog":
-                    task_status = "backlog"
                     if parents:
                         missing = _find_missing_parents(conn, parents)
                         if missing:
@@ -3849,6 +3838,27 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         kind: Optional[str] = row["workspace_kind"]
         path: Optional[str] = row["workspace_path"]
         if kind != "scratch" or not path:
+            # This task's own workspace isn't a removable scratch dir, but its
+            # completion may still unblock a deferred parent scratch cleanup
+            # (e.g. a 'dir' child whose scratch parent was waiting on it). #33774
+            _try_cleanup_parent_workspaces(conn, task_id)
+            return
+        # Check if this task has children that still need the workspace.
+        # If any child is not yet done/archived, defer cleanup so the
+        # child can read handoff artifacts from the scratch dir (#33774).
+        _active_children = conn.execute(
+            "SELECT 1 FROM task_links l "
+            "JOIN tasks t ON t.id = l.child_id "
+            "WHERE l.parent_id = ? AND t.status NOT IN ('done', 'archived', 'failed', 'cancelled') "
+            "LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if _active_children:
+            _log.debug(
+                "Deferring scratch workspace cleanup for task %s: "
+                "active children still need workspace at %s",
+                task_id, path,
+            )
             return
         import shutil
         wp = Path(path)
@@ -3871,8 +3881,52 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         # Also kill the tmux session for the worker that owned this task,
         # if the tmux session is now dead (worker process exited).
         _cleanup_worker_tmux(conn, task_id)
+        # After cleaning up this task's workspace, check if any parent
+        # tasks now have all children done — their deferred cleanup can
+        # proceed (#33774).
+        _try_cleanup_parent_workspaces(conn, task_id)
     except Exception:
         pass  # best-effort — never block completion
+
+
+def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> None:
+    """Clean up parent scratch workspaces now that *task_id* completed.
+
+    When a parent task's cleanup was deferred because it had active children,
+    this function is called after each child completes.  If all children of a
+    parent are now done/archived/failed/cancelled, the parent's scratch
+    workspace is removed (#33774).
+    """
+    try:
+        parents = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ?",
+            (task_id,),
+        ).fetchall()
+        for (parent_id,) in parents:
+            row = conn.execute(
+                "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+            if not row or row["workspace_kind"] != "scratch" or not row["workspace_path"]:
+                continue
+            # Check if ALL children of this parent are terminal
+            active = conn.execute(
+                "SELECT 1 FROM task_links l "
+                "JOIN tasks t ON t.id = l.child_id "
+                "WHERE l.parent_id = ? AND t.status NOT IN ('done', 'archived', 'failed', 'cancelled') "
+                "LIMIT 1",
+                (parent_id,),
+            ).fetchone()
+            if active:
+                continue  # still has active children
+            # All children done — safe to clean up parent workspace
+            import shutil
+            wp = Path(row["workspace_path"])
+            if wp.is_dir() and _is_managed_scratch_path(wp):
+                shutil.rmtree(wp, ignore_errors=True)
+                _log.debug("Deferred cleanup: removed parent %s scratch workspace: %s", parent_id, wp)
+    except Exception:
+        pass  # best-effort
 
 
 def _cleanup_worker_tmux(conn: sqlite3.Connection, task_id: str) -> None:
@@ -5944,12 +5998,27 @@ def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
 
 
 def has_spawnable_review(conn: sqlite3.Connection) -> bool:
-    """Review columns are human-hold gates, not auto-dispatch lanes.
+    """Return True iff there is at least one review+assigned+unclaimed task
+    whose assignee maps to a real Hermes profile.
 
-    Ken uses ``review`` and legacy ``human_review`` cards to inspect worker
-    output before approving follow-up movement. Assigned cards in those lanes
-    must not make gateway/dispatcher health checks believe work is spawnable.
+    Mirror of :func:`has_spawnable_ready` for the review column —
+    used by the health telemetry to decide whether the dispatcher
+    should have spawned a review agent.
     """
+    rows = conn.execute(
+        "SELECT DISTINCT assignee FROM tasks "
+        "WHERE status = 'review' AND assignee IS NOT NULL "
+        "    AND claim_lock IS NULL"
+    ).fetchall()
+    if not rows:
+        return False
+    try:
+        from hermes_cli.profiles import profile_exists  # local import: avoids cycle
+    except Exception:
+        return True
+    for row in rows:
+        if profile_exists(row["assignee"]):
+            return True
     return False
 
 
@@ -6266,8 +6335,80 @@ def dispatch_once(
             if auto:
                 result.auto_blocked.append(claimed.id)
 
-    # Review/human_review are Ken's manual approval gates. Do not auto-claim
-    # or spawn review agents from these lanes; operators move cards onward.
+    # ---- review column dispatch ----
+    # Review tasks are tasks that a worker moved to 'review' after
+    # creating a PR.  The dispatcher spawns a review agent (loading
+    # sdlc-review skill) that verifies the PR and either merges (→ done)
+    # or rejects (→ back to running for the worker to fix).
+    #
+    # Same concurrency model as ready dispatch: review spawns count
+    # against max_spawn alongside ready tasks, so the total number of
+    # running workers stays bounded.
+    review_rows = conn.execute(
+        "SELECT id, assignee FROM tasks "
+        "WHERE status = 'review' AND claim_lock IS NULL "
+        "ORDER BY priority DESC, created_at ASC"
+    ).fetchall()
+    for row in review_rows:
+        if max_spawn is not None and running_count + spawned >= max_spawn:
+            break
+        if not row["assignee"]:
+            result.skipped_unassigned.append(row["id"])
+            continue
+        try:
+            from hermes_cli.profiles import profile_exists
+        except Exception:
+            profile_exists = None  # type: ignore[assignment]
+        if profile_exists is not None and not profile_exists(row["assignee"]):
+            result.skipped_nonspawnable.append(row["id"])
+            continue
+        if dry_run:
+            result.spawned.append((row["id"], row["assignee"], ""))
+            continue
+        claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
+        if claimed is None:
+            continue
+        try:
+            workspace = resolve_workspace(claimed, board=board)
+        except Exception as exc:
+            auto = _record_spawn_failure(
+                conn, claimed.id, f"workspace: {exc}",
+                failure_limit=failure_limit,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
+            continue
+        # Persist the resolved workspace path so the worker can cd there.
+        set_workspace_path(conn, claimed.id, str(workspace))
+        _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        # Force-load sdlc-review skill for review agents.  The
+        # _default_spawn function already auto-loads kanban-worker, and
+        # appends task.skills via --skills.  Setting task.skills here
+        # means the review agent gets both kanban-worker (lifecycle)
+        # and sdlc-review (review logic: AC verification, merge, etc.).
+        claimed.skills = ["sdlc-review"]
+        _spawn = spawn_fn if spawn_fn is not None else _default_spawn
+        try:
+            import inspect
+            try:
+                sig = inspect.signature(_spawn)
+                if "board" in sig.parameters:
+                    pid = _spawn(claimed, str(workspace), board=board)
+                else:
+                    pid = _spawn(claimed, str(workspace))
+            except (TypeError, ValueError):
+                pid = _spawn(claimed, str(workspace))
+            if pid:
+                _set_worker_pid(conn, claimed.id, int(pid))
+            result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
+            spawned += 1
+        except Exception as exc:
+            auto = _record_spawn_failure(
+                conn, claimed.id, str(exc),
+                failure_limit=failure_limit,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
     return result
 
 
@@ -6534,6 +6675,40 @@ def _worker_terminal_timeout_env(
     return str(desired)
 
 
+def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[str]]:
+    """Return the assigned profile's effective CLI toolsets for a worker.
+
+    Dispatcher-spawned workers are launched from a long-lived gateway process,
+    then the child re-enters the CLI with ``-p <assignee>``. Resolve the
+    assignee profile's CLI tool surface at dispatch time and pass it as an
+    explicit ``--toolsets`` pin so worker startup cannot fall back to a stale
+    root/active-profile config or a profile whose top-level ``toolsets`` entry
+    is only the kanban orchestrator surface. ``model_tools`` still appends the
+    task-scoped kanban lifecycle tools when ``HERMES_KANBAN_TASK`` is set.
+    """
+    if not hermes_home:
+        return None
+    try:
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
+
+        token = set_hermes_home_override(hermes_home)
+        try:
+            cfg = load_config()
+            toolsets = sorted(_get_platform_tools(cfg, "cli"))
+        finally:
+            reset_hermes_home_override(token)
+        return toolsets or None
+    except Exception as exc:
+        _log.debug(
+            "kanban worker: could not resolve CLI toolsets for HERMES_HOME=%r (%s)",
+            hermes_home,
+            exc,
+        )
+        return None
+
+
 def _default_spawn(
     task: Task,
     workspace: str,
@@ -6667,6 +6842,9 @@ def _default_spawn(
                 cmd.extend(["--skills", sk])
     if task.model_override:
         cmd.extend(["-m", task.model_override])
+    worker_toolsets = _resolve_worker_cli_toolsets(env.get("HERMES_HOME"))
+    if worker_toolsets:
+        cmd.extend(["--toolsets", ",".join(worker_toolsets)])
     cmd.extend([
         "chat",
         "-q", prompt,

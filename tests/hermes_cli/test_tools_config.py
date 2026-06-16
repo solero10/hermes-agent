@@ -499,40 +499,6 @@ def test_save_platform_tools_handles_invalid_existing_config():
     assert "web" in saved_toolsets
 
 
-def test_save_platform_tools_mirrors_cli_selection_to_legacy_root_toolsets():
-    """CLI tool saves keep the legacy root alias in sync.
-
-    Some older runtime checks and launch paths still read config["toolsets"].
-    If this aliases stale ``["hermes-cli"]`` while platform_toolsets.cli has
-    explicit opt-ins, tools like bitwarden_safe disappear from those sessions.
-    """
-    config = {
-        "toolsets": ["hermes-cli"],
-        "platform_toolsets": {"cli": ["hermes-cli"]},
-    }
-    new_selection = {"bitwarden_safe", "terminal", "web"}
-
-    with patch("hermes_cli.tools_config.save_config"):
-        _save_platform_tools(config, "cli", new_selection)
-
-    saved = ["bitwarden_safe", "terminal", "web"]
-    assert config["platform_toolsets"]["cli"] == saved
-    assert config["toolsets"] == saved
-
-
-def test_save_platform_tools_does_not_mirror_non_cli_platform_to_root_toolsets():
-    config = {
-        "toolsets": ["bitwarden_safe", "terminal"],
-        "platform_toolsets": {"telegram": ["web"]},
-    }
-
-    with patch("hermes_cli.tools_config.save_config"):
-        _save_platform_tools(config, "telegram", {"web", "terminal"})
-
-    assert config["toolsets"] == ["bitwarden_safe", "terminal"]
-    assert config["platform_toolsets"]["telegram"] == ["terminal", "web"]
-
-
 def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
     """Platform default toolsets (hermes-cli, hermes-telegram, etc.) must NOT
     be preserved across saves.
@@ -1231,10 +1197,16 @@ def test_get_platform_tools_recovers_non_configurable_toolsets_from_composite():
     """Non-configurable toolsets whose tools are in the composite but not in
     CONFIGURABLE_TOOLSETS should still appear in the result.
     """
-    from toolsets import TOOLSETS
+    from toolsets import TOOLSETS, resolve_toolset
     from hermes_cli.tools_config import PLATFORMS
     from unittest.mock import patch as mock_patch
 
+    # Build the fake composite from the currently resolved configurable
+    # toolsets.  Importing model_tools before this test discovers runtime-gated
+    # tools such as read_terminal, which are registered under the terminal
+    # toolset.  Keeping the composite in sync makes the test order-independent:
+    # it still exercises platform-tool recovery without accidentally making the
+    # terminal toolset only partially present.
     fake_toolsets = dict(TOOLSETS)
     fake_toolsets["_test_platform_tool"] = {
         "description": "test",
@@ -1243,7 +1215,7 @@ def test_get_platform_tools_recovers_non_configurable_toolsets_from_composite():
     }
     fake_toolsets["hermes-_test_platform"] = {
         "description": "test composite",
-        "tools": ["web_search", "web_extract", "terminal", "process", "_test_special_tool"],
+        "tools": [*resolve_toolset("web"), *resolve_toolset("terminal"), "_test_special_tool"],
         "includes": [],
     }
 

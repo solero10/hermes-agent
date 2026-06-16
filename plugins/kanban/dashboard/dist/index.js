@@ -87,33 +87,25 @@
   }
 
   // Order matches BOARD_COLUMNS in plugin_api.py.
-  const COLUMN_ORDER = ["backlog", "triage", "todo", "scheduled", "ready", "running", "blocked", "review", "human_review", "done"];
+  const COLUMN_ORDER = ["triage", "todo", "ready", "running", "blocked", "done"];
   // English fallback dictionaries — used when the i18n catalog is missing
   // a key, and as defaults for the get*() helpers below so callers running
   // outside any React component (where there's no `t`) still get sane text.
   const FALLBACK_COLUMN_LABEL = {
-    backlog: "Backlog",
     triage: "Triage",
     todo: "Todo",
-    scheduled: "Scheduled",
     ready: "Ready",
     running: "In Progress",
     blocked: "Blocked",
-    review: "Review",
-    human_review: "Human Review",
     done: "Done",
     archived: "Archived",
   };
   const FALLBACK_COLUMN_HELP = {
-    backlog: "Human-only intake — not dispatched",
     triage: "Raw ideas — a specifier will flesh out the spec",
     todo: "Waiting on dependencies or unassigned",
-    scheduled: "Waiting for a scheduled follow-up time",
     ready: "Dependencies satisfied; assign a profile to dispatch",
     running: "Claimed by a worker — in-flight",
     blocked: "Worker asked for human input",
-    review: "Manual review gate — not dispatched",
-    human_review: "Legacy manual review gate — not dispatched",
     done: "Completed",
     archived: "Archived",
   };
@@ -160,15 +152,11 @@
   }
 
   const COLUMN_DOT = {
-    backlog: "hermes-kanban-dot-backlog",
     triage: "hermes-kanban-dot-triage",
     todo: "hermes-kanban-dot-todo",
-    scheduled: "hermes-kanban-dot-scheduled",
     ready: "hermes-kanban-dot-ready",
     running: "hermes-kanban-dot-running",
     blocked: "hermes-kanban-dot-blocked",
-    review: "hermes-kanban-dot-review",
-    human_review: "hermes-kanban-dot-human-review",
     done: "hermes-kanban-dot-done",
     archived: "hermes-kanban-dot-archived",
   };
@@ -254,30 +242,6 @@
     if (!board) return url;
     const sep = url.indexOf("?") >= 0 ? "&" : "?";
     return `${url}${sep}board=${encodeURIComponent(board)}`;
-  }
-
-  function buildKanbanWsUrl(path, params) {
-    if (SDK.buildWsUrl) return SDK.buildWsUrl(path, params);
-
-    // Compatibility with older dashboard hosts that do not expose the newer
-    // async WS URL helper. Loopback dashboards still accept the injected
-    // session token as ?token=; gated deployments may require the helper's
-    // ticket flow, but this fallback keeps the board rendering instead of
-    // crashing the entire route.
-    try {
-      const url = new URL(path, window.location.origin);
-      url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      for (const k in (params || {})) {
-        if (params[k] != null) url.searchParams.set(k, params[k]);
-      }
-      const token = window.__HERMES_SESSION_TOKEN__;
-      if (token && !url.searchParams.has("token") && !url.searchParams.has("ticket")) {
-        url.searchParams.set("token", token);
-      }
-      return Promise.resolve(url.toString());
-    } catch (err) {
-      return Promise.reject(err);
-    }
   }
 
   // The SDK's Select component fires ``onValueChange(value)`` directly
@@ -638,7 +602,7 @@
         // ``current`` file — same rationale as ``withBoard()`` above.
         // Regression: #20879.
         if (board) wsParams.board = board;
-        buildKanbanWsUrl(`${API}/events`, wsParams).then(function (url) {
+        SDK.buildWsUrl(`${API}/events`, wsParams).then(function (url) {
           if (wsClosedRef.current) return;
           let ws;
           try { ws = new WebSocket(url); } catch (_e) { return; }
@@ -1690,6 +1654,8 @@
             ),
             h("div", { className: "text-[10px] text-muted-foreground" },
               "Resolved: " + (settings.resolved_orchestrator_profile || "default")),
+            h("div", { className: "text-[10px] text-muted-foreground" },
+              "Owns the root task after fan-out (wakes back up to judge completion). Does not drive how tasks split — configure the decomposer model under auxiliary.kanban_decomposer."),
           ),
           h("div", { className: "flex flex-col gap-1" },
             h(Label, { className: "text-xs text-muted-foreground" },
@@ -1731,7 +1697,7 @@
           h(Label, { className: "text-xs text-muted-foreground" },
             "Profile descriptions"),
           h("div", { className: "text-[10px] text-muted-foreground pb-2" },
-            "Descriptions guide the orchestrator's routing. Click ⚗ to auto-generate, or edit and save."),
+            "Descriptions guide the decomposer's routing. Click ⚗ to auto-generate, or edit and save."),
           profiles.length === 0
             ? h("div", { className: "text-xs text-muted-foreground" }, "No profiles installed.")
             : h("div", { className: "flex flex-col gap-2" },
@@ -3780,9 +3746,9 @@
         }, specifyBusy ? "Specifying…" : "✨ Specify")
       : null;
 
-    // "Decompose" is the orchestrator-driven fan-out. Like Specify, only
+    // "Decompose" is the built-in decomposer fan-out. Like Specify, only
     // makes sense on triage-column tasks — elsewhere the backend short-
-    // circuits with ok:false. When the orchestrator returns fanout:false
+    // circuits with ok:false. When the decomposer returns fanout:false
     // we render the same single-task message as Specify; when it fans
     // out we report the child count for quick at-a-glance verification.
     const decomposeButton = (task.status === "triage" && props.onDecompose)

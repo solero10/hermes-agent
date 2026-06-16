@@ -953,8 +953,8 @@ KANBAN_LIST_SCHEMA = {
             "status": {
                 "type": "string",
                 "enum": [
-                    "backlog", "triage", "todo", "scheduled", "ready", "running",
-                    "blocked", "review", "human_review", "done", "archived",
+                    "triage", "todo", "ready", "running",
+                    "blocked", "done", "archived",
                 ],
                 "description": "Optional task status filter.",
             },
@@ -1256,14 +1256,12 @@ KANBAN_CREATE_SCHEMA = {
             },
             "initial_status": {
                 "type": "string",
-                "enum": ["running", "blocked", "backlog"],
+                "enum": ["running", "blocked"],
                 "description": (
                     "Initial card status. Use 'blocked' for tasks that "
                     "require immediate human ops (R3 gate) to skip the "
-                    "brief running-to-blocked transition, or 'backlog' "
-                    "for human-only intake cards that must not dispatch. "
-                    "Defaults to 'running', which preserves the usual "
-                    "dispatch path."
+                    "brief running-to-blocked transition. Defaults to "
+                    "'running', which preserves the usual dispatch path."
                 ),
             },
             "skills": {

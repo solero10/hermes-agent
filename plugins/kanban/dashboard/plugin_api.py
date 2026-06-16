@@ -148,8 +148,7 @@ def _conn(board: Optional[str] = None):
 # tasks into ``todo`` and makes the dashboard look like the Scheduled column
 # disappeared.
 BOARD_COLUMNS: list[str] = [
-    "backlog", "triage", "todo", "scheduled", "ready", "running",
-    "blocked", "review", "human_review", "done",
+    "triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done",
 ]
 
 
@@ -588,7 +587,6 @@ class CreateTaskBody(BaseModel):
     workspace_path: Optional[str] = None
     parents: list[str] = Field(default_factory=list)
     triage: bool = False
-    status: Optional[str] = None
     idempotency_key: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
     skills: Optional[list[str]] = None
@@ -601,16 +599,6 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if payload.status is not None and payload.status not in {"backlog", "triage"}:
-            raise HTTPException(
-                status_code=400,
-                detail="status on create must be 'backlog' or 'triage' when provided",
-            )
-        if payload.status == "backlog" and payload.triage:
-            raise HTTPException(
-                status_code=400,
-                detail="status='backlog' cannot be combined with triage=true",
-            )
         task_id = kanban_db.create_task(
             conn,
             title=payload.title,
@@ -622,8 +610,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             tenant=payload.tenant,
             priority=payload.priority,
             parents=payload.parents,
-            triage=payload.triage or payload.status == "triage",
-            initial_status="backlog" if payload.status == "backlog" else "running",
+            triage=payload.triage,
             idempotency_key=payload.idempotency_key,
             max_runtime_seconds=payload.max_runtime_seconds,
             skills=payload.skills,
@@ -874,8 +861,6 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 else:
                     # Direct status write for drag-drop (todo -> ready etc).
                     ok = _set_status_direct(conn, task_id, "ready")
-            elif s in {"review", "human_review"}:
-                ok = _set_status_direct(conn, task_id, s)
             elif s == "archived":
                 ok = kanban_db.archive_task(conn, task_id)
             elif s == "running":
@@ -883,7 +868,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     status_code=400,
                     detail="Cannot set status to 'running' directly; use the dispatcher/claim path",
                 )
-            elif s in ("backlog", "todo", "triage", "scheduled"):
+            elif s in ("todo", "triage", "scheduled"):
                 ok = _set_status_direct(conn, task_id, s)
             else:
                 raise HTTPException(status_code=400, detail=f"unknown status: {s}")
@@ -1225,11 +1210,9 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                         )
                         results.append(entry)
                         continue
-                    elif s in {"review", "human_review"}:
-                        ok = _set_status_direct(conn, tid, s)
                     elif s == "scheduled":
                         ok = kanban_db.schedule_task(conn, tid)
-                    elif s in {"backlog", "todo", "triage"}:
+                    elif s in {"todo", "triage"}:
                         ok = _set_status_direct(conn, tid, s)
                     else:
                         entry.update(ok=False, error=f"unknown status {s!r}")
@@ -2221,7 +2204,7 @@ def auto_describe_profile(profile_name: str, payload: DescribeAutoBody):
 
 
 # ---------------------------------------------------------------------------
-# Decompose endpoint (orchestrator-driven fan-out)
+# Decompose endpoint (built-in decomposer fan-out)
 # ---------------------------------------------------------------------------
 
 class DecomposeBody(BaseModel):

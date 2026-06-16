@@ -588,35 +588,6 @@ class TestPreloadResumedSession:
         assert "Test Session" in output
         assert "2 user messages" in output
 
-    def test_restore_session_cwd_message_does_not_parse_ansi_as_markup(self, tmp_path):
-        cli = _make_cli(resume="cwd_session")
-        buf = StringIO()
-        cli.console.file = buf
-        original_cwd = os.getcwd()
-        target = tmp_path / "session-cwd"
-        target.mkdir()
-
-        try:
-            cli._restore_session_cwd({"cwd": str(target)})
-        finally:
-            os.chdir(original_cwd)
-
-        output = buf.getvalue()
-        assert "Working directory" in output
-        assert str(target) in output
-
-    def test_restore_session_cwd_missing_directory_warning_does_not_parse_ansi_as_markup(self, tmp_path):
-        cli = _make_cli(resume="missing_cwd_session")
-        buf = StringIO()
-        cli.console.file = buf
-        missing = tmp_path / "gone[repo]"
-
-        cli._restore_session_cwd({"cwd": str(missing)})
-
-        output = buf.getvalue()
-        assert "working directory is gone" in output
-        assert str(missing) in output
-
     def test_reopens_session_in_db(self):
         cli = _make_cli(resume="reopen_session")
         messages = [{"role": "user", "content": "hi"}]

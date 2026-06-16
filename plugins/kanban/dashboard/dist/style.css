@@ -161,15 +161,11 @@
   border-radius: 999px;
   background: var(--color-muted-foreground);
 }
-.hermes-kanban-dot-backlog  { background: #8a8f98; }  /* human-only intake */
 .hermes-kanban-dot-triage   { background: #b47dd6; }  /* lilac — fresh/unspecified */
 .hermes-kanban-dot-todo     { background: var(--color-muted-foreground); }
-.hermes-kanban-dot-scheduled { background: #d08a3f; } /* orange */
 .hermes-kanban-dot-ready    { background: #d4b348; }  /* amber */
 .hermes-kanban-dot-running  { background: #3fb97d; }  /* green */
 .hermes-kanban-dot-blocked  { background: var(--color-destructive, #d14a4a); }
-.hermes-kanban-dot-review   { background: #7c6ee6; }  /* manual review gate */
-.hermes-kanban-dot-human-review { background: #9a6ee6; } /* legacy manual review gate */
 .hermes-kanban-dot-done     { background: #4a8cd1; }  /* blue */
 .hermes-kanban-dot-archived { background: var(--color-border); }
 

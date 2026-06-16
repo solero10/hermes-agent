@@ -2006,6 +2006,91 @@ def test_cleanup_workspace_honors_workspaces_root_env_override(tmp_path, monkeyp
     assert not scratch_dir.exists(), "Override-root scratch dir should be cleaned up"
 
 
+# ---------------------------------------------------------------------------
+# Deferred scratch cleanup for parent/child handoff (#33774)
+# ---------------------------------------------------------------------------
+
+def test_cleanup_workspace_deferred_while_child_active(kanban_home):
+    """A scratch parent's workspace survives completion while a child is still active.
+
+    The dependency chain (parents=[A]) must guarantee child B can read A's
+    handoff artifacts. The old cleanup deleted A's scratch dir immediately on
+    A's completion, before B ever ran.
+    """
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child")
+        kb.link_tasks(conn, parent, child)  # child depends on parent
+        p_task = kb.get_task(conn, parent)
+        parent_ws = kb.resolve_workspace(p_task)
+        kb.set_workspace_path(conn, parent, parent_ws)
+        assert parent_ws.is_dir()
+        # Parent completes; child is still 'todo' -> cleanup must be deferred.
+        kb.complete_task(conn, parent, result="handoff written")
+
+    assert parent_ws.exists(), (
+        "Parent scratch workspace must survive while a linked child is active"
+    )
+
+
+def test_cleanup_workspace_swept_after_last_child_completes(kanban_home):
+    """Once all children are terminal, the deferred parent scratch dir is removed."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child")
+        kb.link_tasks(conn, parent, child)
+        p_task = kb.get_task(conn, parent)
+        parent_ws = kb.resolve_workspace(p_task)
+        kb.set_workspace_path(conn, parent, parent_ws)
+        # Give the child its own scratch dir too.
+        c_task = kb.get_task(conn, child)
+        child_ws = kb.resolve_workspace(c_task)
+        kb.set_workspace_path(conn, child, child_ws)
+
+        kb.complete_task(conn, parent, result="ok")
+        assert parent_ws.exists(), "deferred while child active"
+
+        # Child completes -> recompute promotes nothing new; the child's
+        # cleanup sweep should now reap the parent's deferred workspace.
+        kb.complete_task(conn, child, result="done")
+
+    assert not parent_ws.exists(), (
+        "Parent scratch workspace should be swept once all children are terminal"
+    )
+    assert not child_ws.exists(), "Child scratch workspace should be cleaned up too"
+
+
+def test_dir_child_completion_unblocks_deferred_scratch_parent(kanban_home, tmp_path):
+    """A non-scratch ('dir') child completing must still sweep its scratch parent.
+
+    Regression for the gap where ``_cleanup_workspace`` returned early for a
+    non-scratch task and never ran the parent sweep — leaking the parent's
+    deferred scratch dir forever.
+    """
+    child_dir = tmp_path / "persistent-child"
+    child_dir.mkdir()
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="scratch parent")
+        child = kb.create_task(
+            conn, title="dir child", workspace_kind="dir",
+            workspace_path=str(child_dir),
+        )
+        kb.link_tasks(conn, parent, child)
+        p_task = kb.get_task(conn, parent)
+        parent_ws = kb.resolve_workspace(p_task)
+        kb.set_workspace_path(conn, parent, parent_ws)
+
+        kb.complete_task(conn, parent, result="handoff")
+        assert parent_ws.exists(), "deferred while dir child active"
+
+        kb.complete_task(conn, child, result="built")
+
+    assert not parent_ws.exists(), (
+        "A 'dir' child completing must trigger the parent scratch sweep"
+    )
+    assert child_dir.exists(), "Non-scratch 'dir' child workspace is never deleted"
+
+
 def test_is_managed_scratch_path_accepts_per_board_workspaces(kanban_home, tmp_path):
     """Per-board scratch dirs under ``<kanban_home>/kanban/boards/<slug>/workspaces`` are managed."""
     board_scratch = kanban_home / "kanban" / "boards" / "my-board" / "workspaces" / "task-1"
@@ -3224,21 +3309,22 @@ def test_claim_review_task_fails_when_already_claimed(kanban_home):
 
 
 def test_dispatch_review_dry_run(kanban_home, all_assignees_spawnable):
-    """Ken-safe review tasks are manual gates and are not dry-run spawned."""
+    """dispatch_once dry-run sees review tasks and reports them as spawned."""
     with kb.connect() as conn:
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, dry_run=True)
-    assert not res.spawned
+    assert len(res.spawned) == 1
+    assert res.spawned[0][0] == t
     # Dry run must NOT mutate status.
     with kb.connect() as conn:
         assert kb.get_task(conn, t).status == "review"
 
 
-def test_dispatch_review_does_not_spawn_or_force_review_skills(
+def test_dispatch_review_spawns_with_correct_skills(
     kanban_home, all_assignees_spawnable,
 ):
-    """Review is a human approval hold, not an automatic sdlc-review agent."""
+    """Review tasks get sdlc-review skill set before spawning."""
     spawned_tasks = []
 
     def capture_spawn(task, workspace, board=None):
@@ -3249,26 +3335,25 @@ def test_dispatch_review_does_not_spawn_or_force_review_skills(
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, spawn_fn=capture_spawn)
-    assert not res.spawned
-    assert not spawned_tasks
-    with kb.connect() as conn:
-        assert kb.get_task(conn, t).status == "review"
+    assert len(res.spawned) == 1
+    assert len(spawned_tasks) == 1
+    assert spawned_tasks[0].skills == ["sdlc-review"]
 
 
-def test_dispatch_review_ignores_unassigned_manual_gate(kanban_home):
-    """Unassigned review tasks remain untouched manual-gate cards."""
+def test_dispatch_review_skips_unassigned(kanban_home):
+    """Unassigned review tasks go to skipped_unassigned, not spawned."""
     with kb.connect() as conn:
         t = kb.create_task(conn, title="review floater")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, dry_run=True)
-    assert t not in res.skipped_unassigned
+    assert t in res.skipped_unassigned
     assert not res.spawned
 
 
-def test_dispatch_review_does_not_count_toward_max_spawn(
+def test_dispatch_review_counts_toward_max_spawn(
     kanban_home, all_assignees_spawnable,
 ):
-    """Only ready work consumes dispatcher max_spawn; review stays manual."""
+    """Review spawns count against max_spawn alongside ready tasks."""
     spawns = []
 
     def fake_spawn(task, workspace, board=None):
@@ -3282,14 +3367,15 @@ def test_dispatch_review_does_not_count_toward_max_spawn(
         t3 = kb.create_task(conn, title="review", assignee="alice")
         _set_task_status(conn, t3, "review")
         res = kb.dispatch_once(conn, spawn_fn=fake_spawn, max_spawn=2)
+    # Only 2 should spawn (ready tasks get priority in the loop)
     assert len(res.spawned) == 2
-    assert set(spawns) == {t1, t2}
+    assert len(spawns) == 2
 
 
-def test_dispatch_review_does_not_spawn_when_ready_empty(
+def test_dispatch_review_spawns_when_ready_empty(
     kanban_home, all_assignees_spawnable,
 ):
-    """When only review tasks exist, dispatcher leaves them for a human."""
+    """When only review tasks exist, they still get dispatched."""
     spawns = []
 
     def fake_spawn(task, workspace, board=None):
@@ -3300,18 +3386,17 @@ def test_dispatch_review_does_not_spawn_when_ready_empty(
         t = kb.create_task(conn, title="review me", assignee="alice")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
-    assert not res.spawned
-    assert not spawns
-    with kb.connect() as conn:
-        assert kb.get_task(conn, t).status == "review"
+    assert len(res.spawned) == 1
+    assert spawns[0] == t
 
 
-def test_has_spawnable_review_false_even_with_assigned_review(kanban_home):
-    """has_spawnable_review is false because review is a manual gate."""
+def test_has_spawnable_review_true(kanban_home):
+    """has_spawnable_review returns True when review tasks exist with real profiles."""
     with kb.connect() as conn:
         t = kb.create_task(conn, title="review me", assignee="default")
         _set_task_status(conn, t, "review")
-        assert kb.has_spawnable_review(conn) is False
+        # default profile should exist in the test env
+        assert kb.has_spawnable_review(conn) is True
 
 
 def test_has_spawnable_review_false_on_empty(kanban_home):
@@ -3323,7 +3408,7 @@ def test_has_spawnable_review_false_on_empty(kanban_home):
 def test_has_spawnable_review_false_when_only_terminal_lanes(
     kanban_home, monkeypatch,
 ):
-    """has_spawnable_review returns False for review manual gates."""
+    """has_spawnable_review returns False when review tasks are terminal lanes."""
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
     with kb.connect() as conn:
@@ -3332,15 +3417,15 @@ def test_has_spawnable_review_false_when_only_terminal_lanes(
         assert kb.has_spawnable_review(conn) is False
 
 
-def test_dispatch_review_ignores_nonspawnable_manual_gate(kanban_home, monkeypatch):
-    """Review tasks with non-existent profiles are still just manual gates."""
+def test_dispatch_review_skips_nonspawnable(kanban_home, monkeypatch):
+    """Review tasks with non-existent profiles go to skipped_nonspawnable."""
     from hermes_cli import profiles
     monkeypatch.setattr(profiles, "profile_exists", lambda name: False)
     with kb.connect() as conn:
         t = kb.create_task(conn, title="review", assignee="orion-cc")
         _set_task_status(conn, t, "review")
         res = kb.dispatch_once(conn, dry_run=True)
-    assert t not in res.skipped_nonspawnable
+    assert t in res.skipped_nonspawnable
     assert not res.spawned
 
 
