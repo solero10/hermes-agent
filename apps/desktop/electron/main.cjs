@@ -5309,10 +5309,14 @@ ipcMain.handle('hermes:connection:revalidate', async () => {
 
   const base = conn.baseUrl.replace(/\/+$/, '')
   try {
-    await fetchPublicJson(`${base}/api/status`, { timeoutMs: 2_500 })
+    if (conn.authMode === 'oauth') {
+      await fetchPublicJson(`${base}/api/status`, { timeoutMs: 2_500 })
+    } else {
+      await fetchJson(`${base}/api/status`, conn.token, { timeoutMs: 2_500 })
+    }
     return { ok: true, rebuilt: false }
   } catch {
-    // Unreachable remote: drop the stale cache so the renderer's next reconnect
+    // Unreachable or unauthorized remote: drop the stale cache so the renderer's next reconnect
     // tick rebuilds a fresh, reachable descriptor. resetHermesConnection only
     // nulls connectionPromise for a remote (no child to SIGTERM).
     rememberLog('Cached remote Hermes backend failed liveness probe; dropping stale connection.')
