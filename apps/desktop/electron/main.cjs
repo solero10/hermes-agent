@@ -5270,6 +5270,12 @@ function createWindow() {
     restorePersistedZoomLevel(mainWindow)
     broadcastBootProgress()
     sendWindowStateChanged()
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+        rememberLog('[window] ready-to-show did not fire after did-finish-load; showing main window')
+        mainWindow.show()
+      }
+    }, 750)
     startHermes().catch(error => rememberLog(error.stack || error.message))
   })
 }
