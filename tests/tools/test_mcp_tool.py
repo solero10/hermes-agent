@@ -580,6 +580,49 @@ class TestToolHandler:
         assert "error" in result
         assert "not connected" in result["error"]
 
+    def test_dead_server_lazy_reconnects_before_calling_tool(self):
+        import tools.mcp_tool as mcp_tool
+        from tools.mcp_tool import MCPServerTask, _make_tool_handler, _servers
+
+        stale = MCPServerTask("srv")
+        stale.session = None
+        stale._registered_tool_names = ["mcp_srv_ping"]
+        stale._task = MagicMock()
+        stale._task.done.return_value = True
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result("reconnected", is_error=False)
+        )
+        mock_tools = [_make_mcp_tool("ping", "Ping")]
+
+        async def fake_connect(name, config):
+            server = MCPServerTask(name)
+            server.session = mock_session
+            server._tools = mock_tools
+            return server
+
+        _servers["srv"] = stale
+        mcp_tool._server_error_counts["srv"] = mcp_tool._CIRCUIT_BREAKER_THRESHOLD
+        mcp_tool._server_breaker_opened_at["srv"] = 0.0
+
+        try:
+            handler = _make_tool_handler("srv", "ping", 120)
+            with self._patch_mcp_loop(), \
+                 patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+                 patch("tools.mcp_tool._load_mcp_config", return_value={"srv": {"url": "https://example.test/mcp"}}), \
+                 patch("tools.mcp_tool._connect_server", side_effect=fake_connect):
+                result = json.loads(handler({}))
+
+            assert result["result"] == "reconnected"
+            mock_session.call_tool.assert_called_once_with("ping", arguments={})
+            assert _servers["srv"] is not stale
+            assert mcp_tool._server_error_counts.get("srv", 0) == 0
+        finally:
+            _servers.pop("srv", None)
+            mcp_tool._server_error_counts.pop("srv", None)
+            mcp_tool._server_breaker_opened_at.pop("srv", None)
+
     def test_exception_during_call(self):
         from tools.mcp_tool import _make_tool_handler, _servers
 
@@ -1195,6 +1238,78 @@ class TestToolsetInjection:
             assert "mcp_good_ping" in result2
             assert "mcp_broken_ping" in result2
             assert call_count == 1  # Only broken retried
+
+    def test_dead_server_record_retried_on_subsequent_discovery(self):
+        """A server whose background task gave up must not block rediscovery.
+
+        Repro from the CortexDB incident: the server connected and registered
+        tools earlier, then DNS/network failure exhausted reconnect attempts.
+        The stale ``_servers[name]`` entry remained with ``session=None`` and a
+        completed task, so idempotent discovery skipped it forever.
+        """
+        from tools.mcp_tool import MCPServerTask
+
+        stale = MCPServerTask("cortexdb")
+        stale.session = None
+        stale._registered_tool_names = ["mcp_cortexdb_search_thoughts"]
+        stale._task = MagicMock()
+        stale._task.done.return_value = True
+
+        fresh_servers = {"cortexdb": stale}
+        mock_tools = [_make_mcp_tool("search_thoughts", "Search thoughts")]
+        mock_session = MagicMock()
+        call_count = 0
+
+        async def fake_connect(name, config):
+            nonlocal call_count
+            call_count += 1
+            server = MCPServerTask(name)
+            server.session = mock_session
+            server._tools = mock_tools
+            return server
+
+        fake_config = {"cortexdb": {"url": "https://example.test/mcp"}}
+        fake_toolsets = {
+            "hermes-cli": {"tools": [], "description": "CLI", "includes": []},
+        }
+
+        with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+             patch("tools.mcp_tool._servers", fresh_servers), \
+             patch("tools.mcp_tool._load_mcp_config", return_value=fake_config), \
+             patch("tools.mcp_tool._connect_server", side_effect=fake_connect), \
+             patch("toolsets.TOOLSETS", fake_toolsets):
+            from tools.mcp_tool import discover_mcp_tools
+
+            result = discover_mcp_tools()
+
+        assert call_count == 1
+        assert "mcp_cortexdb_search_thoughts" in result
+        assert fresh_servers["cortexdb"] is not stale
+        assert fresh_servers["cortexdb"].session is mock_session
+
+    def test_running_reconnect_task_not_duplicated_by_discovery(self):
+        """Discovery must not race a server task that is already reconnecting."""
+        from tools.mcp_tool import MCPServerTask
+
+        reconnecting = MCPServerTask("cortexdb")
+        reconnecting.session = None
+        reconnecting._registered_tool_names = ["mcp_cortexdb_search_thoughts"]
+        reconnecting._task = MagicMock()
+        reconnecting._task.done.return_value = False
+
+        fresh_servers = {"cortexdb": reconnecting}
+        fake_config = {"cortexdb": {"url": "https://example.test/mcp"}}
+
+        with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+             patch("tools.mcp_tool._servers", fresh_servers), \
+             patch("tools.mcp_tool._load_mcp_config", return_value=fake_config), \
+             patch("tools.mcp_tool._connect_server") as connect:
+            from tools.mcp_tool import discover_mcp_tools
+
+            result = discover_mcp_tools()
+
+        connect.assert_not_called()
+        assert result == ["mcp_cortexdb_search_thoughts"]
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,11 @@
+{
+  "name": "codex_usage_monitor",
+  "label": "Codex Usage",
+  "description": "Real-time ChatGPT/Codex OAuth account usage monitor with 5-hour and weekly quota charts",
+  "icon": "Activity",
+  "version": "0.1.0",
+  "tab": { "path": "/codex-usage", "position": "after:analytics" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

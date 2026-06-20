@@ -1,0 +1,5 @@
+name: codex_usage_monitor
+kind: dashboard
+version: 0.1.0
+description: Real-time ChatGPT/Codex OAuth account usage monitor for the Hermes Dashboard
+author: Hermes Agent

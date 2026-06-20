@@ -2124,6 +2124,79 @@ def _reset_server_error(server_name: str) -> None:
     _server_error_counts[server_name] = 0
     _server_breaker_opened_at.pop(server_name, None)
 
+
+def _mcp_server_needs_connect(server: Any) -> bool:
+    """Return True when ``server`` is missing or its long-lived task is dead.
+
+    A healthy connected server has ``session`` populated. During a transient
+    reconnect, ``session`` can be ``None`` while the background task is still
+    alive and retrying; starting a second connection then would race the
+    existing task. The stale state this guards against is different: the task
+    has exited/given up, ``session`` is ``None``, and the dead server record is
+    still present in ``_servers``. That stale record used to prevent
+    ``discover_mcp_tools()`` from retrying the server for the rest of the
+    process lifetime.
+    """
+    if server is None:
+        return True
+    if getattr(server, "session", None) is not None:
+        return False
+
+    task = getattr(server, "_task", None)
+    done = getattr(task, "done", None)
+    if callable(done):
+        try:
+            return bool(done())
+        except Exception:
+            return True
+
+    return True
+
+
+def _reconnect_mcp_server_if_dead(server_name: str) -> Optional["MCPServerTask"]:
+    """Best-effort lazy reconnect for a previously-registered dead server.
+
+    Tool handlers are long-lived closures. If a remote MCP server loses DNS or
+    network long enough for its background task to exhaust reconnect attempts,
+    those closures remain callable but ``_servers[server_name].session`` is
+    ``None``. A fresh Hermes process can connect, yet the live process keeps
+    returning "not connected" because ordinary discovery is idempotent on the
+    mere presence of the stale record.
+
+    This helper lets the next half-open tool call retry the configured server
+    in-place. It does nothing while an existing background task is still alive
+    and reconnecting, and it respects disabled/missing config.
+    """
+    with _lock:
+        server = _servers.get(server_name)
+        if not _mcp_server_needs_connect(server):
+            return server
+        if server_name in _server_connecting:
+            return None
+
+    config = _load_mcp_config().get(server_name)
+    if not config or not _parse_boolish(config.get("enabled", True), default=True):
+        return None
+
+    logger.info(
+        "MCP server '%s' is disconnected with no live reconnect task; "
+        "attempting lazy reconnect",
+        server_name,
+    )
+    try:
+        register_mcp_servers({server_name: config})
+    except Exception as exc:
+        logger.warning(
+            "MCP server '%s' lazy reconnect failed: %s",
+            server_name, exc,
+        )
+
+    with _lock:
+        server = _servers.get(server_name)
+        if not _mcp_server_needs_connect(server):
+            return server
+    return None
+
 # ---------------------------------------------------------------------------
 # Auth-failure detection helpers (Task 6 of MCP OAuth consolidation)
 # ---------------------------------------------------------------------------
@@ -2800,6 +2873,8 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
 
         with _lock:
             server = _servers.get(server_name)
+        if not server or not server.session:
+            server = _reconnect_mcp_server_if_dead(server_name)
         if not server or not server.session:
             _bump_server_error(server_name)
             return json.dumps({
@@ -3648,6 +3723,7 @@ async def _discover_and_register_server(name: str, config: dict) -> List[str]:
         _server_connecting.discard(name)
         _server_connect_errors.pop(name, None)
         _servers[name] = server
+        _reset_server_error(name)
 
     registered_names = _register_server_tools(name, server, config)
     server._registered_tool_names = list(registered_names)
@@ -3692,7 +3768,9 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
         new_servers = {
             k: v
             for k, v in servers.items()
-            if k not in _servers and _parse_boolish(v.get("enabled", True), default=True)
+            if _mcp_server_needs_connect(_servers.get(k))
+            and k not in _server_connecting
+            and _parse_boolish(v.get("enabled", True), default=True)
         }
         _server_connecting.update(new_servers)
         for srv_name in new_servers:
