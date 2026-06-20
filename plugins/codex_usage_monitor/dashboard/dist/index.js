@@ -60,11 +60,46 @@
     });
   }
 
-  function formatReset(windowData) {
+  function secondsLeft(windowData) {
+    const explicit = toNumber(windowData && windowData.seconds_left);
+    if (explicit !== null) return Math.max(0, explicit);
+    const resetDate = parseDate(windowData && windowData.reset_at);
+    if (!resetDate) return null;
+    return Math.max(0, (resetDate.getTime() - Date.now()) / 1000);
+  }
+
+  function trimOneDecimal(value) {
+    const rounded = Math.round(value * 10) / 10;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  }
+
+  function formatHoursLeft(seconds) {
+    const value = toNumber(seconds);
+    if (value === null) return null;
+    const hours = Math.max(0, value) / 3600;
+    return trimOneDecimal(hours) + " " + (Math.round(hours * 10) / 10 === 1 ? "hour" : "hours") + " left";
+  }
+
+  function formatDaysTimeLeft(seconds) {
+    const value = toNumber(seconds);
+    if (value === null) return null;
+    const totalMinutes = Math.max(0, Math.round(value / 60));
+    const days = Math.floor(totalMinutes / (24 * 60));
+    const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+    const minutes = totalMinutes % 60;
+    if (days > 0) return days + "d " + hours + "h left";
+    if (hours > 0) return hours + "h " + minutes + "m left";
+    return minutes + "m left";
+  }
+
+  function formatReset(windowData, title) {
     if (!windowData) return "reset time unavailable";
-    if (windowData.reset_at_local) return "resets " + windowData.reset_at_local;
+    const seconds = secondsLeft(windowData);
+    const isWeekly = String(title || windowData.label || windowData.key || "").toLowerCase().includes("week");
+    const leftText = isWeekly ? formatDaysTimeLeft(seconds) : formatHoursLeft(seconds);
+    if (windowData.reset_at_local) return (leftText ? leftText + " · " : "") + "resets " + windowData.reset_at_local;
     const formatted = formatDateTime(windowData.reset_at);
-    return formatted ? "resets " + formatted : "reset time unavailable";
+    return formatted ? (leftText ? leftText + " · " : "") + "resets " + formatted : (leftText || "reset time unavailable");
   }
 
   function formatAge(seconds) {
@@ -99,6 +134,25 @@
     return PACE_COLOR[key];
   }
 
+  function formatPlanLabel(planType) {
+    const value = String(planType || "").trim().toLowerCase();
+    if (!value) return "";
+
+    const normalized = value.replace(/^chatgpt[\s_-]*/, "").replace(/[\s_-]+/g, " ");
+    if (/(^|\b)pro(\b|$)/.test(normalized)) return "Pro account";
+    if (/(^|\b)plus(\b|$)/.test(normalized)) return "Plus account";
+    if (/(^|\b)team(\b|$)/.test(normalized)) return "Team account";
+    if (/(^|\b)(enterprise|business)(\b|$)/.test(normalized)) return "Enterprise account";
+
+    const label = normalized.replace(/\b\w/g, function (char) { return char.toUpperCase(); });
+    return label ? label + " account" : "";
+  }
+
+  function planLabelForAccount(account) {
+    const explicitPlan = account && (account.plan_type || account.plan);
+    return formatPlanLabel(explicitPlan) || "Plan unknown";
+  }
+
   function normalizeHistory(history, windowData) {
     const resetDate = parseDate(windowData && windowData.reset_at);
     const periodSeconds = toNumber(windowData && windowData.period_seconds);
@@ -113,6 +167,7 @@
           remaining: remaining,
           pace: point && point.pace_state ? String(point.pace_state) : "unknown",
           generatedAt: point ? point.generated_at : null,
+          resetAt: point ? point.reset_at : null,
           synthetic: Boolean(point && point.synthetic),
         };
       })
@@ -121,6 +176,8 @@
         if (windowStart === null || windowEnd === null) return true;
         const generated = parseDate(point.generatedAt);
         if (!generated) return false;
+        const pointReset = parseDate(point.resetAt);
+        if (resetDate && pointReset && Math.abs(pointReset.getTime() - resetDate.getTime()) > 60000) return false;
         const timestamp = generated.getTime();
         return timestamp >= windowStart - 60000 && timestamp <= windowEnd + 60000;
       })
@@ -200,6 +257,32 @@
     });
   }
 
+  function visiblePointIndexes(points) {
+    const indexes = new Set();
+    if (!points.length) return indexes;
+    indexes.add(0);
+    indexes.add(points.length - 1);
+    points.forEach(function (point, index) {
+      const previous = points[index - 1];
+      const next = points[index + 1];
+      if (point.synthetic) indexes.add(index);
+      if (previous && point.pace !== previous.pace) {
+        indexes.add(index - 1);
+        indexes.add(index);
+      }
+      if (next && point.pace !== next.pace) {
+        indexes.add(index);
+        indexes.add(index + 1);
+      }
+      if (previous && next) {
+        const before = Math.sign(point.remaining - previous.remaining);
+        const after = Math.sign(next.remaining - point.remaining);
+        if (before !== 0 && after !== 0 && before !== after) indexes.add(index);
+      }
+    });
+    return Array.from(indexes).sort(function (a, b) { return a - b; });
+  }
+
   function UsageChart(props) {
     const points = normalizeHistory(props.history, props.windowData);
     const width = 320;
@@ -209,8 +292,10 @@
       right: 308,
       top: 14,
       bottom: 144,
-      plotHeight: 130,
+      floorPadding: 8,
     };
+    layout.plotBottom = layout.bottom - layout.floorPadding;
+    layout.plotHeight = layout.plotBottom - layout.top;
     const plotWidth = layout.right - layout.left;
     const resetDate = parseDate(props.windowData && props.windowData.reset_at);
     const periodSeconds = toNumber(props.windowData && props.windowData.period_seconds);
@@ -234,7 +319,7 @@
     }
 
     const children = [
-      h("rect", { key: "bg", className: "codex-usage-chart-bg", x: layout.left, y: layout.top, width: plotWidth, height: layout.plotHeight }),
+      h("rect", { key: "bg", className: "codex-usage-chart-bg", x: layout.left, y: layout.top, width: plotWidth, height: layout.bottom - layout.top }),
       h(ChartGrid, Object.assign({ key: "grid" }, layout)),
       h("line", { key: "axis-y", className: "codex-usage-chart-axis", x1: layout.left, x2: layout.left, y1: layout.top, y2: layout.bottom }),
       h("line", { key: "axis-x", className: "codex-usage-chart-axis", x1: layout.left, x2: layout.right, y1: layout.bottom, y2: layout.bottom }),
@@ -263,13 +348,15 @@
           stroke: paceColor(current.pace || previous.pace),
         }));
       }
-      points.forEach(function (point, index) {
+      visiblePointIndexes(points).forEach(function (index) {
+        const point = points[index];
+        const isLatest = index === points.length - 1;
         children.push(h("circle", {
           key: "point-" + index,
-          className: "codex-usage-chart-point",
+          className: "codex-usage-chart-point" + (isLatest ? " codex-usage-chart-point--latest" : ""),
           cx: xAt(index),
           cy: yAt(point.remaining),
-          r: points.length === 1 ? 3.6 : 2.4,
+          r: points.length === 1 || isLatest ? 3.6 : 2.6,
           fill: paceColor(point.pace),
         }));
       });
@@ -294,7 +381,7 @@
         h("span", { className: "codex-usage-window-title" }, props.title),
         h("span", { className: "codex-usage-window-value" }, remaining, onPaceText, " remaining")
       ),
-      h("div", { className: "codex-usage-reset" }, formatReset(windowData)),
+      h("div", { className: "codex-usage-reset" }, formatReset(windowData, props.title)),
       h(UsageChart, { history: windowData.history, label: props.title, windowData: windowData })
     );
   }
@@ -304,6 +391,7 @@
     const windows = account.windows || {};
     const accent = colorForAccount(account, props.index || 0);
     const label = account.label || account.stored_label || account.id || "Codex account";
+    const planLabel = planLabelForAccount(account);
     const drop = toPercent(account.active_drop_percent);
     const activeText = drop === null ? "recent quota drop" : "recent quota drop · " + formatPercent(drop);
 
@@ -312,7 +400,8 @@
         h("div", { className: "codex-usage-account-head" },
           h("div", { className: "codex-usage-account-title" },
             h("span", { className: "codex-usage-dot", "aria-hidden": "true" }),
-            h("span", null, label)
+            h("span", { className: "codex-usage-account-label" }, label),
+            h("span", { className: "codex-usage-plan-badge" }, planLabel)
           ),
           account.active_now ? h("div", { className: "codex-usage-active" }, activeText) : null
         ),

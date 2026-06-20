@@ -37,6 +37,9 @@ CACHE_TTL_SECONDS = POLL_INTERVAL_SECONDS
 COMMAND_TIMEOUT_SECONDS = 25
 HISTORY_RETENTION = timedelta(days=8)
 HISTORY_DIRNAME = "codex-usage-monitor"
+HISTORY_OUTLIER_MIN_DEVIATION_PERCENT = 10.0
+HISTORY_OUTLIER_NEIGHBOR_TOLERANCE_PERCENT = 2.0
+HISTORY_OUTLIER_MAX_GAP_SECONDS = 10 * 60
 
 WINDOW_PERIOD_SECONDS: dict[str, int] = {
     "five_hour": 5 * 60 * 60,
@@ -66,6 +69,9 @@ _ASSIGNMENT_RE = re.compile(
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _JWT_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])")
 _OPENAI_KEY_RE = re.compile(r"(?<![A-Za-z0-9_-])(?:sk|sess|org)-[A-Za-z0-9_-]{12,}(?![A-Za-z0-9_-])")
+_TRUNCATED_OPENAI_KEY_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:sk|sess|org)-[A-Za-z0-9_-]{2,}\.\.\.[A-Za-z0-9_-]{2,}(?![A-Za-z0-9_-])"
+)
 _LONG_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_=-]{48,}(?![A-Za-z0-9_-])")
 
 _CACHE_LOCK = threading.Lock()
@@ -332,6 +338,7 @@ def _sanitize_text(text: str) -> str:
     redacted = _ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
     redacted = _JWT_RE.sub("[REDACTED_TOKEN]", redacted)
     redacted = _OPENAI_KEY_RE.sub("[REDACTED_TOKEN]", redacted)
+    redacted = _TRUNCATED_OPENAI_KEY_RE.sub("[REDACTED_TOKEN]", redacted)
     redacted = _LONG_TOKEN_RE.sub("[REDACTED_TOKEN]", redacted)
     return redacted
 
@@ -827,6 +834,14 @@ def _history_points_for_current_window(
         if remaining is None:
             continue
         generated_dt = parse_dt(point.get("generated_at"))
+        point_reset_dt = parse_dt(point.get("reset_at"))
+        if point_reset_dt is not None and window_end is not None:
+            # Near a quota reset, the previous bucket's last sample can fall
+            # inside the timestamp tolerance for the next bucket's period
+            # start. Match reset_at too so stale samples do not draw a false
+            # vertical drop at the left edge of the chart.
+            if abs((point_reset_dt - window_end).total_seconds()) > 60:
+                continue
         if window_start is not None and window_end is not None:
             if generated_dt is None:
                 continue
@@ -839,6 +854,7 @@ def _history_points_for_current_window(
         key=lambda item: parse_dt(item.get("generated_at"))
         or datetime.min.replace(tzinfo=timezone.utc)
     )
+    filtered = _drop_isolated_history_outliers(filtered)
 
     if window_start is not None:
         first_dt = next(
@@ -864,6 +880,55 @@ def _history_points_for_current_window(
             )
 
     return filtered
+
+
+def _drop_isolated_history_outliers(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove one-sample history glitches that create false chart spikes.
+
+    A single impossible-looking point can happen when the wrapper briefly emits
+    an incomplete bucket.  If the prior and next samples are close together,
+    are close in value, and the middle point jumps far outside that local
+    value, omit the middle point from chart history.  Sustained drops are kept.
+    """
+    if len(points) < 3:
+        return points
+
+    cleaned: list[dict[str, Any]] = [points[0]]
+    max_gap = timedelta(seconds=HISTORY_OUTLIER_MAX_GAP_SECONDS)
+    for index in range(1, len(points) - 1):
+        previous = points[index - 1]
+        current = points[index]
+        next_point = points[index + 1]
+        previous_remaining = _coerce_percent(previous.get("remaining_percent"))
+        current_remaining = _coerce_percent(current.get("remaining_percent"))
+        next_remaining = _coerce_percent(next_point.get("remaining_percent"))
+        previous_dt = parse_dt(previous.get("generated_at"))
+        current_dt = parse_dt(current.get("generated_at"))
+        next_dt = parse_dt(next_point.get("generated_at"))
+
+        is_outlier = False
+        if (
+            previous_remaining is not None
+            and current_remaining is not None
+            and next_remaining is not None
+            and previous_dt is not None
+            and current_dt is not None
+            and next_dt is not None
+            and current_dt - previous_dt <= max_gap
+            and next_dt - current_dt <= max_gap
+            and abs(previous_remaining - next_remaining) <= HISTORY_OUTLIER_NEIGHBOR_TOLERANCE_PERCENT
+        ):
+            neighbor_floor = min(previous_remaining, next_remaining)
+            neighbor_ceiling = max(previous_remaining, next_remaining)
+            is_low_spike = current_remaining <= neighbor_floor - HISTORY_OUTLIER_MIN_DEVIATION_PERCENT
+            is_high_spike = current_remaining >= neighbor_ceiling + HISTORY_OUTLIER_MIN_DEVIATION_PERCENT
+            is_outlier = is_low_spike or is_high_spike
+
+        if not is_outlier:
+            cleaned.append(current)
+
+    cleaned.append(points[-1])
+    return cleaned
 
 
 def _attach_history_to_accounts(

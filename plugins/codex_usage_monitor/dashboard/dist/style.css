@@ -124,6 +124,7 @@
 .codex-usage-account-title {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.45rem;
   min-width: 0;
   color: var(--color-foreground);
@@ -132,10 +133,25 @@
   letter-spacing: -0.02em;
 }
 
-.codex-usage-account-title span:last-child {
+.codex-usage-account-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-usage-plan-badge {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--codex-account-accent) 58%, var(--color-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--codex-account-accent) 12%, transparent);
+  color: color-mix(in srgb, var(--codex-account-accent) 78%, var(--color-foreground));
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.6rem;
+  font-weight: 760;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  padding: 0.18rem 0.38rem;
   white-space: nowrap;
 }
 

@@ -123,7 +123,7 @@ def test_normalize_strips_token_fields_and_maps_windows(plugin_api):
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     raw = _raw_snapshot(now)
     raw["access_token"] = "root-secret-token"
-    raw["error"] = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz1234567890"
+    raw["error"] = 'Authorization: Bearer abcdef...890'
     raw["accounts"][0]["refresh_token"] = "refresh-secret"
     raw["accounts"][0]["headers"] = {"Authorization": "Bearer should-not-leak"}
     raw["accounts"][0]["nested"] = {"api_key": "api-secret", "safe": "kept"}
@@ -232,7 +232,7 @@ def test_run_usage_command_available_semantics_and_sanitized_errors(plugin_api, 
             command,
             2,
             stdout="",
-            stderr="Authorization: Bearer rawsecretbearer access_token=raw-secret-value",
+            stderr="Authorization: Bearer *** access_token=raw-secret-value",
         )
 
     monkeypatch.setattr(plugin_api.subprocess, "run", fake_nonzero)
@@ -249,7 +249,7 @@ def test_run_usage_command_available_semantics_and_sanitized_errors(plugin_api, 
         return plugin_api.subprocess.CompletedProcess(
             command,
             0,
-            stdout="not json token=raw-invalid-token sk-abcdefghijklmnop",
+            stdout="not json token=raw-invalid-token sk-abc...mnop",
             stderr="",
         )
 
@@ -260,7 +260,7 @@ def test_run_usage_command_available_semantics_and_sanitized_errors(plugin_api, 
     assert source["available"] is True
     assert source["command"] == "husage usage --json"
     assert "raw-invalid-token" not in source["last_error"]
-    assert "sk-abcdefghijklmnop" not in source["last_error"]
+    assert "sk-abc...mnop" not in source["last_error"]
     assert "[REDACTED]" in source["last_error"]
 
 
@@ -467,6 +467,168 @@ def test_history_missing_period_start_adds_100_percent_anchor(plugin_api, tmp_pa
     assert history[1]["remaining_percent"] == 60
 
 
+def test_history_excludes_previous_reset_sample_inside_period_start_tolerance(plugin_api):
+    period_start = datetime(2026, 1, 1, 5, 15, 43, tzinfo=timezone.utc)
+    previous_reset = period_start - timedelta(seconds=2)
+    current_reset = period_start + timedelta(hours=5)
+    rows = [
+        {
+            "generated_at": (period_start - timedelta(seconds=25)).isoformat(),
+            "accounts": [
+                {
+                    "id": "kev1",
+                    "windows": {
+                        "five_hour": {
+                            "remaining_percent": 63,
+                            "used_percent": 37,
+                            "reset_at": previous_reset.isoformat(),
+                            "period_seconds": 5 * 60 * 60,
+                            "pace_state": "under",
+                        }
+                    },
+                }
+            ],
+        },
+        {
+            "generated_at": (period_start + timedelta(seconds=36)).isoformat(),
+            "accounts": [
+                {
+                    "id": "kev1",
+                    "windows": {
+                        "five_hour": {
+                            "remaining_percent": 100,
+                            "used_percent": 0,
+                            "reset_at": current_reset.isoformat(),
+                            "period_seconds": 5 * 60 * 60,
+                            "pace_state": "on",
+                        }
+                    },
+                }
+            ],
+        },
+    ]
+
+    attached = plugin_api._attach_history_to_accounts(
+        [
+            {
+                "id": "kev1",
+                "windows": {
+                    "five_hour": {
+                        "reset_at": current_reset.isoformat().replace("+00:00", "Z"),
+                        "period_seconds": 5 * 60 * 60,
+                        "remaining_percent": 100,
+                        "history": [],
+                    }
+                },
+            }
+        ],
+        rows,
+        history_points=20,
+    )
+
+    history = attached[0]["windows"]["five_hour"]["history"]
+    remaining_values = [point["remaining_percent"] for point in history]
+    assert 63 not in remaining_values
+    assert remaining_values == [100]
+
+
+def test_history_filters_isolated_remaining_outlier(plugin_api):
+    period_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    reset_at = period_start + timedelta(days=7)
+    rows = []
+    for minutes, remaining in ((10, 24), (11, 0), (12, 24), (13, 24)):
+        rows.append(
+            {
+                "generated_at": (period_start + timedelta(minutes=minutes)).isoformat(),
+                "accounts": [
+                    {
+                        "id": "ken2",
+                        "windows": {
+                            "weekly": {
+                                "remaining_percent": remaining,
+                                "used_percent": 100 - remaining,
+                                "reset_at": reset_at.isoformat(),
+                                "period_seconds": 7 * 24 * 60 * 60,
+                                "pace_state": "over",
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+
+    attached = plugin_api._attach_history_to_accounts(
+        [
+            {
+                "id": "ken2",
+                "windows": {
+                    "weekly": {
+                        "reset_at": reset_at.isoformat().replace("+00:00", "Z"),
+                        "period_seconds": 7 * 24 * 60 * 60,
+                        "remaining_percent": 24,
+                        "history": [],
+                    }
+                },
+            }
+        ],
+        rows,
+        history_points=20,
+    )
+
+    history = attached[0]["windows"]["weekly"]["history"]
+    remaining_values = [point["remaining_percent"] for point in history]
+    assert 0 not in remaining_values
+    assert remaining_values[-1] == 24
+
+
+def test_history_keeps_sustained_zero_remaining(plugin_api):
+    period_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    reset_at = period_start + timedelta(days=7)
+    rows = []
+    for minutes, remaining in ((10, 24), (11, 0), (12, 0), (13, 0)):
+        rows.append(
+            {
+                "generated_at": (period_start + timedelta(minutes=minutes)).isoformat(),
+                "accounts": [
+                    {
+                        "id": "ken2",
+                        "windows": {
+                            "weekly": {
+                                "remaining_percent": remaining,
+                                "used_percent": 100 - remaining,
+                                "reset_at": reset_at.isoformat(),
+                                "period_seconds": 7 * 24 * 60 * 60,
+                                "pace_state": "over",
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+
+    attached = plugin_api._attach_history_to_accounts(
+        [
+            {
+                "id": "ken2",
+                "windows": {
+                    "weekly": {
+                        "reset_at": reset_at.isoformat().replace("+00:00", "Z"),
+                        "period_seconds": 7 * 24 * 60 * 60,
+                        "remaining_percent": 0,
+                        "history": [],
+                    }
+                },
+            }
+        ],
+        rows,
+        history_points=20,
+    )
+
+    remaining_values = [point["remaining_percent"] for point in attached[0]["windows"]["weekly"]["history"]]
+    assert 0 in remaining_values
+    assert remaining_values[-1] == 0
+
+
 def test_frontend_uses_dashboard_sdk_not_token_global():
     frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
 
@@ -483,6 +645,8 @@ def test_frontend_draws_period_start_anchor_for_missing_initial_samples():
     assert "remaining: 100" in frontend
     assert "synthetic: true" in frontend
     assert "firstDated.getTime() > windowStart + 60000" in frontend
+    assert "resetAt: point ? point.reset_at : null" in frontend
+    assert "Math.abs(pointReset.getTime() - resetDate.getTime()) > 60000" in frontend
 
 
 def test_frontend_displays_on_pace_remaining_parenthetical():
@@ -490,6 +654,43 @@ def test_frontend_displays_on_pace_remaining_parenthetical():
 
     assert "on_pace_remaining_percent" in frontend
     assert " on pace)" in frontend
+
+
+def test_frontend_displays_plan_badges_next_to_account_titles():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+
+    assert "planLabelForAccount" in frontend
+    assert "formatPlanLabel" in frontend
+    assert "account.plan_type || account.plan" in frontend
+    assert "Plus account" in frontend
+    assert "Pro account" in frontend
+    assert "Plan unknown" in frontend
+    assert "kev1" not in frontend.lower()
+    assert "codex-usage-plan-badge" in frontend
+
+
+def test_frontend_displays_time_left_before_reset_time():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+
+    assert "formatHoursLeft" in frontend
+    assert "formatDaysTimeLeft" in frontend
+    assert "hours\") + \" left\"" in frontend
+    assert "d \" + hours + \"h left" in frontend
+    assert "leftText + \" · \"" in frontend
+    assert "formatReset(windowData, props.title)" in frontend
+
+
+def test_frontend_lifts_zero_percent_line_and_reduces_point_clutter():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+
+    assert "floorPadding: 8" in frontend
+    assert "layout.plotBottom = layout.bottom - layout.floorPadding" in frontend
+    assert "layout.plotHeight = layout.plotBottom - layout.top" in frontend
+    assert "height: layout.bottom - layout.top" in frontend
+    assert "visiblePointIndexes(points)" in frontend
+    assert "point.pace !== previous.pace" in frontend
+    assert "visiblePointIndexes(points).forEach" in frontend
+    assert "codex-usage-chart-point--latest" in frontend
 
 
 def test_frontend_does_not_render_pace_as_x_axis_zones():
@@ -513,5 +714,6 @@ def test_css_has_desktop_grid_and_mobile_stack():
 
     assert ".codex-usage-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }" in css
     assert "white-space: normal;" in css
+    assert ".codex-usage-plan-badge" in css
     assert "@media (max-width: 700px)" in css
     assert ".codex-usage-grid { grid-template-columns: 1fr; }" in css
