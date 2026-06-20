@@ -40,6 +40,7 @@ HISTORY_DIRNAME = "codex-usage-monitor"
 HISTORY_OUTLIER_MIN_DEVIATION_PERCENT = 10.0
 HISTORY_OUTLIER_NEIGHBOR_TOLERANCE_PERCENT = 2.0
 HISTORY_OUTLIER_MAX_GAP_SECONDS = 10 * 60
+HISTORY_REFILL_SPIKE_MIN_DEVIATION_PERCENT = 10.0
 
 WINDOW_PERIOD_SECONDS: dict[str, int] = {
     "five_hour": 5 * 60 * 60,
@@ -194,6 +195,13 @@ def _coerce_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "current", "eligible"}
     return bool(value)
+
+
+def _coerce_int(value: Any) -> int | None:
+    number = _to_float(value)
+    if number is None:
+        return None
+    return int(max(0, round(number)))
 
 
 def _slugify(value: Any, fallback: str) -> str:
@@ -641,6 +649,67 @@ def normalize_snapshot(
     return result
 
 
+def _normalize_reset_credit(credit: dict[str, Any]) -> dict[str, Any] | None:
+    clean = sanitize(credit)
+    if not isinstance(clean, dict):
+        return None
+    status = str(clean.get("status") or "").strip().lower()
+    if status != "available":
+        return None
+    # Deliberately omit id/id_short/credit_id. The dashboard only needs the
+    # human-readable count and dates; redeeming still belongs in husage.
+    return {
+        "status": "available",
+        "reset_type": str(clean.get("reset_type")) if clean.get("reset_type") not in (None, "") else None,
+        "title": str(clean.get("title") or "Reset credit"),
+        "description": str(clean.get("description")) if clean.get("description") not in (None, "") else None,
+        "granted_at": _iso(parse_dt(_first_present(clean, "granted_at", "grantedAt"))),
+        "granted_at_local": str(clean.get("granted_at_local") or clean.get("grantedAtLocal") or "") or None,
+        "expires_at": _iso(parse_dt(_first_present(clean, "expires_at", "expiresAt"))),
+        "expires_at_local": str(clean.get("expires_at_local") or clean.get("expiresAtLocal") or "") or None,
+    }
+
+
+def normalize_reset_credit_accounts(raw: Any) -> dict[str, dict[str, Any]]:
+    """Return sanitized reset-credit info keyed by stable account id."""
+    clean = sanitize(raw)
+    if isinstance(clean, list):
+        clean = {"accounts": clean}
+    if not isinstance(clean, dict):
+        clean = {}
+
+    by_account: dict[str, dict[str, Any]] = {}
+    for idx, raw_account in enumerate(_extract_accounts(clean)):
+        if not isinstance(raw_account, dict):
+            continue
+        account = sanitize(raw_account)
+        account_id = stable_account_id(account, idx)
+        raw_credits = account.get("credits") if isinstance(account.get("credits"), list) else []
+        credits = [credit for credit in (_normalize_reset_credit(item) for item in raw_credits) if credit]
+        credits.sort(key=lambda item: item.get("expires_at") or item.get("expires_at_local") or "")
+        available_count = _coerce_int(account.get("available_count"))
+        if available_count is None:
+            available_count = len(credits)
+        total_earned_count = _coerce_int(account.get("total_earned_count"))
+        by_account[account_id] = {
+            "available_count": available_count,
+            "total_earned_count": total_earned_count,
+            "credits": credits,
+        }
+    return by_account
+
+
+def merge_reset_credits(accounts: list[dict[str, Any]], raw_reset_snapshot: Any) -> list[dict[str, Any]]:
+    """Attach sanitized banked reset-credit info to normalized accounts."""
+    reset_by_account = normalize_reset_credit_accounts(raw_reset_snapshot)
+    for account in accounts:
+        account_id = str(account.get("id") or "")
+        reset_info = reset_by_account.get(account_id)
+        if reset_info is not None:
+            account["reset_credits"] = reset_info
+    return accounts
+
+
 # ---------------------------------------------------------------------------
 # History helpers
 # ---------------------------------------------------------------------------
@@ -855,6 +924,7 @@ def _history_points_for_current_window(
         or datetime.min.replace(tzinfo=timezone.utc)
     )
     filtered = _drop_isolated_history_outliers(filtered)
+    filtered = _drop_isolated_refill_spikes(filtered)
 
     if window_start is not None:
         first_dt = next(
@@ -931,6 +1001,53 @@ def _drop_isolated_history_outliers(points: list[dict[str, Any]]) -> list[dict[s
     return cleaned
 
 
+def _same_reset_bucket(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_reset = parse_dt(left.get("reset_at"))
+    right_reset = parse_dt(right.get("reset_at"))
+    if left_reset is None or right_reset is None:
+        return False
+    return abs((left_reset - right_reset).total_seconds()) <= 60
+
+
+def _drop_isolated_refill_spikes(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove one-sample quota refills that happen without a reset.
+
+    Remaining quota should trend downward inside one reset bucket. A single
+    point that jumps sharply upward and immediately falls back creates a very
+    visible vertical chart spike, but it is not a real quota reset because
+    ``reset_at`` stayed the same. Drop only that isolated refill sample.
+    """
+    if len(points) < 3:
+        return points
+
+    cleaned: list[dict[str, Any]] = [points[0]]
+    for index in range(1, len(points) - 1):
+        previous = points[index - 1]
+        current = points[index]
+        next_point = points[index + 1]
+        previous_remaining = _coerce_percent(previous.get("remaining_percent"))
+        current_remaining = _coerce_percent(current.get("remaining_percent"))
+        next_remaining = _coerce_percent(next_point.get("remaining_percent"))
+        is_refill_spike = False
+        if (
+            previous_remaining is not None
+            and current_remaining is not None
+            and next_remaining is not None
+            and _same_reset_bucket(previous, current)
+            and _same_reset_bucket(current, next_point)
+        ):
+            is_refill_spike = (
+                current_remaining >= previous_remaining + HISTORY_REFILL_SPIKE_MIN_DEVIATION_PERCENT
+                and current_remaining >= next_remaining + HISTORY_REFILL_SPIKE_MIN_DEVIATION_PERCENT
+            )
+
+        if not is_refill_spike:
+            cleaned.append(current)
+
+    cleaned.append(points[-1])
+    return cleaned
+
+
 def _attach_history_to_accounts(
     accounts: list[dict[str, Any]],
     history_rows: list[dict[str, Any]],
@@ -947,7 +1064,10 @@ def _attach_history_to_accounts(
             points = history_index.get((account_id, window_key(key)), [])
             if isinstance(window, dict):
                 current_points = _history_points_for_current_window(points, window)
-                window["history"] = downsample_points(current_points, history_points)
+                downsampled_points = downsample_points(current_points, history_points)
+                # Uniform downsampling can make two sides of a dropped spike
+                # adjacent even when the full-resolution series was clean.
+                window["history"] = _drop_isolated_refill_spikes(downsampled_points)
     return accounts_out
 
 
@@ -996,15 +1116,10 @@ def _short_error(text: str, limit: int = 700) -> str:
     return clean
 
 
-def run_usage_command() -> tuple[Any | None, dict[str, Any]]:
-    """Invoke the first available Codex OAuth usage wrapper.
-
-    Preferred order is ``husage --json usage`` then ``husage usage --json``;
-    if ``husage`` is unavailable or both argument orders fail, repeat the same
-    safe argument-order fallback for ``hermes-codex-accounts``.
-    """
+def run_wrapper_json_command(subcommand: str, noun: str) -> tuple[Any | None, dict[str, Any]]:
+    """Invoke the first available husage/hermes-codex-accounts JSON command."""
     binaries = ("husage", "hermes-codex-accounts")
-    arg_orders = (["--json", "usage"], ["usage", "--json"])
+    arg_orders = (["--json", subcommand], [subcommand, "--json"])
     missing: list[str] = []
     errors: list[str] = []
     last_command: str | None = None
@@ -1051,13 +1166,23 @@ def run_usage_command() -> tuple[Any | None, dict[str, Any]]:
 
     if not found_binary:
         last_error = (
-            "No Codex usage wrapper command found. Install or enable `husage` "
+            f"No Codex {noun} wrapper command found. Install or enable `husage` "
             "or `hermes-codex-accounts`, then retry."
         )
     else:
         missing_text = f" Missing commands: {', '.join(sorted(set(missing)))}." if missing else ""
-        last_error = ("; ".join(errors[-4:]) or "Codex usage wrapper command failed.") + missing_text
+        last_error = (f"; ".join(errors[-4:]) or f"Codex {noun} wrapper command failed.") + missing_text
     return None, {"command": last_command, "available": found_binary, "last_error": _short_error(last_error)}
+
+
+def run_usage_command() -> tuple[Any | None, dict[str, Any]]:
+    """Invoke the first available Codex OAuth usage wrapper."""
+    return run_wrapper_json_command("usage", "usage")
+
+
+def run_reset_credits_command() -> tuple[Any | None, dict[str, Any]]:
+    """Invoke the first available Codex reset-credit wrapper command."""
+    return run_wrapper_json_command("resets", "reset credits")
 
 
 # ---------------------------------------------------------------------------
@@ -1141,12 +1266,20 @@ def build_snapshot(history_points: int = 240, force: bool = False) -> dict[str, 
             base_snapshot = _base_error_snapshot(now_dt, source)
         else:
             normalized = normalize_snapshot(raw, now=now_dt, previous=previous_by_id)
+            reset_raw, reset_source = run_reset_credits_command()
+            accounts = normalized.get("accounts", [])
+            if reset_raw is not None and isinstance(accounts, list):
+                accounts = merge_reset_credits(accounts, reset_raw)
             source = sanitize(source)
+            reset_source = sanitize(reset_source)
             if not isinstance(source, dict):
                 source = {}
+            if not isinstance(reset_source, dict):
+                reset_source = {}
             last_error = source.get("last_error")
             if not normalized.get("ok", True) and not last_error:
                 last_error = normalized.get("error") or "Codex usage wrapper reported an error."
+            reset_last_error = reset_source.get("last_error")
             base_snapshot = {
                 "ok": bool(normalized.get("ok", True)),
                 "generated_at": normalized.get("generated_at") or _iso(now_dt),
@@ -1158,7 +1291,12 @@ def build_snapshot(history_points: int = 240, force: bool = False) -> dict[str, 
                     "available": bool(source.get("available", True)),
                     "last_error": sanitize(last_error) if last_error else None,
                 },
-                "accounts": normalized.get("accounts", []),
+                "reset_credits_source": {
+                    "command": reset_source.get("command"),
+                    "available": bool(reset_source.get("available", False)),
+                    "last_error": sanitize(reset_last_error) if reset_last_error else None,
+                },
+                "accounts": accounts if isinstance(accounts, list) else [],
             }
             history_rows = append_history_snapshot(base_snapshot, now=now_dt)
 

@@ -83,6 +83,42 @@ def _raw_snapshot(now: datetime | None = None) -> dict[str, Any]:
     }
 
 
+def _raw_reset_snapshot(now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "accounts": [
+            {
+                "stored_label": "Acct One",
+                "label": "Primary Codex",
+                "priority": 1,
+                "available_count": 2,
+                "total_earned_count": 3,
+                "credits": [
+                    {
+                        "id_short": "RateLimitResetCredit-secret-fragment",
+                        "credit_id": "must-not-leak",
+                        "status": "available",
+                        "reset_type": "codex_rate_limits",
+                        "granted_at": now.isoformat(),
+                        "granted_at_local": "Jan 1, 00:00 UTC",
+                        "expires_at": (now + timedelta(days=30)).isoformat(),
+                        "expires_at_local": "Jan 31, 00:00 UTC",
+                        "title": "One free rate limit reset",
+                        "description": "Thanks for using Codex!",
+                    },
+                    {
+                        "status": "redeemed",
+                        "id_short": "redeemed-secret",
+                        "expires_at": (now + timedelta(days=20)).isoformat(),
+                    },
+                ],
+            }
+        ],
+    }
+
+
 def test_dynamic_module_load_exports_router(plugin_api):
     assert plugin_api.PLUGIN_MODULE_PATH if hasattr(plugin_api, "PLUGIN_MODULE_PATH") else True
     assert plugin_api.router is not None
@@ -99,7 +135,7 @@ def test_manifest_registers_expected_dashboard_plugin():
         "icon": "Activity",
         "version": "0.1.0",
         "tab": {"path": "/codex-usage", "position": "after:analytics"},
-        "entry": "dist/index.js",
+        "entry": "dist/index.js?v=20260620-reset-credits-placement-v2",
         "css": "dist/style.css",
         "api": "plugin_api.py",
     }
@@ -162,6 +198,28 @@ def test_normalize_strips_token_fields_and_maps_windows(plugin_api):
     reauth_raw["accounts"][0]["auth_status"] = "reauth_required"
     reauth_account = plugin_api.normalize_snapshot(reauth_raw, now=now)["accounts"][0]
     assert reauth_account["error"] == "Re-auth required"
+
+
+def test_reset_credit_normalization_attaches_only_safe_available_credit_info(plugin_api):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    accounts = plugin_api.normalize_snapshot(_raw_snapshot(now), now=now)["accounts"]
+
+    merged = plugin_api.merge_reset_credits(accounts, _raw_reset_snapshot(now))
+    payload = json.dumps(merged)
+
+    assert "must-not-leak" not in payload
+    assert "secret-fragment" not in payload
+    assert "redeemed-secret" not in payload
+    assert "id_short" not in payload
+    assert "credit_id" not in payload
+
+    reset_info = merged[0]["reset_credits"]
+    assert reset_info["available_count"] == 2
+    assert reset_info["total_earned_count"] == 3
+    assert len(reset_info["credits"]) == 1
+    assert reset_info["credits"][0]["status"] == "available"
+    assert reset_info["credits"][0]["expires_at_local"] == "Jan 31, 00:00 UTC"
+    assert reset_info["credits"][0]["title"] == "One free rate limit reset"
 
 
 def test_pace_state_weekly_halfway_examples(plugin_api):
@@ -302,7 +360,15 @@ def test_mocked_snapshot_endpoint_returns_normalized_accounts(plugin_api, monkey
             "last_error": None,
         }
 
+    def fake_run_reset_credits_command():
+        return _raw_reset_snapshot(now), {
+            "command": "husage --json resets",
+            "available": True,
+            "last_error": None,
+        }
+
     monkeypatch.setattr(plugin_api, "run_usage_command", fake_run_usage_command)
+    monkeypatch.setattr(plugin_api, "run_reset_credits_command", fake_run_reset_credits_command)
     response = _client(plugin_api).get("/api/plugins/codex_usage_monitor/snapshot?history_points=20")
 
     assert response.status_code == 200, response.text
@@ -314,10 +380,17 @@ def test_mocked_snapshot_endpoint_returns_normalized_accounts(plugin_api, monkey
         "available": True,
         "last_error": None,
     }
+    assert data["reset_credits_source"] == {
+        "command": "husage --json resets",
+        "available": True,
+        "last_error": None,
+    }
     account = data["accounts"][0]
     assert account["id"] == "acct-one"
     assert account["windows"]["five_hour"]["remaining_percent"] == 70.0
     assert account["windows"]["weekly"]["remaining_percent"] == 80.0
+    assert account["reset_credits"]["available_count"] == 2
+    assert account["reset_credits"]["credits"][0]["expires_at_local"] == "Jan 31, 00:00 UTC"
     five_hour_history = account["windows"]["five_hour"]["history"]
     assert len(five_hour_history) == 2
     assert five_hour_history[0]["synthetic"] is True
@@ -326,26 +399,36 @@ def test_mocked_snapshot_endpoint_returns_normalized_accounts(plugin_api, monkey
 
 
 def test_build_snapshot_cache_coalesces_immediate_calls(plugin_api, monkeypatch):
-    calls = {"count": 0}
+    calls = {"usage": 0, "resets": 0}
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     def fake_run_usage_command():
-        calls["count"] += 1
+        calls["usage"] += 1
         return _raw_snapshot(now), {
             "command": "husage --json usage",
             "available": True,
             "last_error": None,
         }
 
+    def fake_run_reset_credits_command():
+        calls["resets"] += 1
+        return _raw_reset_snapshot(now), {
+            "command": "husage --json resets",
+            "available": True,
+            "last_error": None,
+        }
+
     monkeypatch.setattr(plugin_api, "run_usage_command", fake_run_usage_command)
+    monkeypatch.setattr(plugin_api, "run_reset_credits_command", fake_run_reset_credits_command)
 
     first = plugin_api.build_snapshot(history_points=20)
     second = plugin_api.build_snapshot(history_points=20)
 
-    assert calls["count"] == 1
+    assert calls == {"usage": 1, "resets": 1}
     assert first["cached"] is False
     assert second["cached"] is True
     assert second["accounts"][0]["id"] == "acct-one"
+    assert second["accounts"][0]["reset_credits"]["available_count"] == 2
 
 
 def test_history_writes_sanitized_jsonl_and_downsampling_keeps_first_last(plugin_api, tmp_path):
@@ -532,6 +615,55 @@ def test_history_excludes_previous_reset_sample_inside_period_start_tolerance(pl
     assert remaining_values == [100]
 
 
+def test_history_filters_isolated_refill_spike_without_reset(plugin_api):
+    period_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    reset_at = period_start + timedelta(hours=5)
+    rows = []
+    for minutes, remaining in ((10, 15), (11, 100), (12, 0), (13, 0)):
+        rows.append(
+            {
+                "generated_at": (period_start + timedelta(minutes=minutes)).isoformat(),
+                "accounts": [
+                    {
+                        "id": "dads-chatgpt",
+                        "windows": {
+                            "five_hour": {
+                                "remaining_percent": remaining,
+                                "used_percent": 100 - remaining,
+                                "reset_at": reset_at.isoformat(),
+                                "period_seconds": 5 * 60 * 60,
+                                "pace_state": "over",
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+
+    attached = plugin_api._attach_history_to_accounts(
+        [
+            {
+                "id": "dads-chatgpt",
+                "windows": {
+                    "five_hour": {
+                        "reset_at": reset_at.isoformat().replace("+00:00", "Z"),
+                        "period_seconds": 5 * 60 * 60,
+                        "remaining_percent": 0,
+                        "history": [],
+                    }
+                },
+            }
+        ],
+        rows,
+        history_points=20,
+    )
+
+    history = attached[0]["windows"]["five_hour"]["history"]
+    spike_at = (period_start + timedelta(minutes=11)).isoformat().replace("+00:00", "Z")
+    assert spike_at not in {point["generated_at"] for point in history}
+    assert history[-1]["remaining_percent"] == 0
+
+
 def test_history_filters_isolated_remaining_outlier(plugin_api):
     period_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     reset_at = period_start + timedelta(days=7)
@@ -669,6 +801,27 @@ def test_frontend_displays_plan_badges_next_to_account_titles():
     assert "codex-usage-plan-badge" in frontend
 
 
+def test_frontend_displays_remaining_reset_credits_only_when_available():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+    css = FRONTEND_CSS_PATH.read_text(encoding="utf-8")
+
+    assert "resetCreditInfoForAccount" in frontend
+    assert "available_count" in frontend
+    assert "if (count <= 0) return null" in frontend
+    assert "Codex reset " in frontend
+    assert "Earliest expires " in frontend
+    assert "h(ResetCredits, { account: account })" in frontend
+    assert "codex-usage-reset-credits" in frontend
+    assert ".codex-usage-reset-credits" in css
+    assert ".codex-usage-reset-credits-expiry" in css
+    assert "margin-top: 0.1rem;" in css
+
+    five_hour_index = frontend.index('h(WindowMetric, { title: "5-hour"')
+    weekly_index = frontend.index('h(WindowMetric, { title: "Weekly"')
+    reset_credit_index = frontend.index("h(ResetCredits, { account: account })")
+    assert five_hour_index < weekly_index < reset_credit_index
+
+
 def test_frontend_displays_time_left_before_reset_time():
     frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
 
@@ -689,8 +842,11 @@ def test_frontend_lifts_zero_percent_line_and_reduces_point_clutter():
     assert "height: layout.bottom - layout.top" in frontend
     assert "visiblePointIndexes(points)" in frontend
     assert "point.pace !== previous.pace" in frontend
-    assert "visiblePointIndexes(points).forEach" in frontend
+    assert "visiblePointIndexes(points).filter" in frontend
     assert "codex-usage-chart-point--latest" in frontend
+    assert "isNearVerticalSegment" in frontend
+    assert "NEAR_VERTICAL_MIN_DX" in frontend
+    assert "NEAR_VERTICAL_MIN_DY" in frontend
 
 
 def test_frontend_does_not_render_pace_as_x_axis_zones():
@@ -715,5 +871,6 @@ def test_css_has_desktop_grid_and_mobile_stack():
     assert ".codex-usage-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }" in css
     assert "white-space: normal;" in css
     assert ".codex-usage-plan-badge" in css
+    assert ".codex-usage-reset-credits" in css
     assert "@media (max-width: 700px)" in css
     assert ".codex-usage-grid { grid-template-columns: 1fr; }" in css

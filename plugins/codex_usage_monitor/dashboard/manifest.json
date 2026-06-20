@@ -5,7 +5,7 @@
   "icon": "Activity",
   "version": "0.1.0",
   "tab": { "path": "/codex-usage", "position": "after:analytics" },
-  "entry": "dist/index.js",
+  "entry": "dist/index.js?v=20260620-reset-credits-placement-v2",
   "css": "dist/style.css",
   "api": "plugin_api.py"
 }

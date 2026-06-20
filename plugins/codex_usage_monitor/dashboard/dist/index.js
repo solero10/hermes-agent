@@ -23,6 +23,8 @@
     over: "#ef4444",
     unknown: "#94a3b8",
   };
+  const NEAR_VERTICAL_MIN_DX = 20;
+  const NEAR_VERTICAL_MIN_DY = 8;
 
   function toNumber(value) {
     if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
@@ -151,6 +153,32 @@
   function planLabelForAccount(account) {
     const explicitPlan = account && (account.plan_type || account.plan);
     return formatPlanLabel(explicitPlan) || "Plan unknown";
+  }
+
+  function resetCreditInfoForAccount(account) {
+    const resetCredits = account && account.reset_credits;
+    if (!resetCredits || typeof resetCredits !== "object") return null;
+    const credits = Array.isArray(resetCredits.credits) ? resetCredits.credits : [];
+    let count = toNumber(resetCredits.available_count);
+    if (count === null) count = credits.length;
+    count = Math.max(0, Math.round(count));
+    if (count <= 0) return null;
+    const nextCredit = credits[0] || {};
+    const expiresText = nextCredit.expires_at_local || formatDateTime(nextCredit.expires_at);
+    return {
+      count: count,
+      label: count + " Codex reset " + (count === 1 ? "credit" : "credits"),
+      expiresText: expiresText ? "Earliest expires " + expiresText : "Expiration date unavailable",
+    };
+  }
+
+  function ResetCredits(props) {
+    const info = resetCreditInfoForAccount(props.account);
+    if (!info) return null;
+    return h("div", { className: "codex-usage-reset-credits" },
+      h("div", { className: "codex-usage-reset-credits-count" }, info.label),
+      h("div", { className: "codex-usage-reset-credits-expiry" }, info.expiresText)
+    );
   }
 
   function normalizeHistory(history, windowData) {
@@ -283,6 +311,12 @@
     return Array.from(indexes).sort(function (a, b) { return a - b; });
   }
 
+  function isNearVerticalSegment(previous, current, xForPoint, yForPoint) {
+    const dx = Math.abs(xForPoint(current) - xForPoint(previous));
+    const dy = Math.abs(yForPoint(current) - yForPoint(previous));
+    return dx < NEAR_VERTICAL_MIN_DX && dy > NEAR_VERTICAL_MIN_DY;
+  }
+
   function UsageChart(props) {
     const points = normalizeHistory(props.history, props.windowData);
     const width = 320;
@@ -302,14 +336,20 @@
     const scaleEnd = resetDate ? resetDate.getTime() : null;
     const scaleStart = resetDate && periodSeconds && periodSeconds > 0 ? scaleEnd - periodSeconds * 1000 : null;
 
-    function xAt(index) {
+    function xForPoint(point) {
       if (scaleStart !== null && scaleEnd !== null && scaleEnd > scaleStart) {
-        const generated = parseDate(points[index] && points[index].generatedAt);
+        const generated = parseDate(point && point.generatedAt);
         if (generated) {
           const ratio = Math.max(0, Math.min(1, (generated.getTime() - scaleStart) / (scaleEnd - scaleStart)));
           return layout.left + plotWidth * ratio;
         }
       }
+      return null;
+    }
+
+    function xAt(index) {
+      const exact = xForPoint(points[index]);
+      if (exact !== null) return exact;
       if (points.length <= 1) return layout.left + plotWidth / 2;
       return layout.left + (plotWidth * index) / (points.length - 1);
     }
@@ -317,7 +357,6 @@
     function yAt(percent) {
       return layout.top + ((100 - percent) / 100) * layout.plotHeight;
     }
-
     const children = [
       h("rect", { key: "bg", className: "codex-usage-chart-bg", x: layout.left, y: layout.top, width: plotWidth, height: layout.bottom - layout.top }),
       h(ChartGrid, Object.assign({ key: "grid" }, layout)),
@@ -335,9 +374,19 @@
         dominantBaseline: "middle",
       }, "waiting for samples"));
     } else {
+      function xForVisiblePoint(point) {
+        const exact = xForPoint(point);
+        return exact === null ? layout.left + plotWidth / 2 : exact;
+      }
+      function yForVisiblePoint(point) {
+        return yAt(point.remaining);
+      }
       for (let i = 1; i < points.length; i += 1) {
         const previous = points[i - 1];
         const current = points[i];
+        if (isNearVerticalSegment(previous, current, xForVisiblePoint, yForVisiblePoint)) {
+          continue;
+        }
         children.push(h("line", {
           key: "segment-" + i,
           className: "codex-usage-chart-segment",
@@ -348,7 +397,15 @@
           stroke: paceColor(current.pace || previous.pace),
         }));
       }
-      visiblePointIndexes(points).forEach(function (index) {
+      visiblePointIndexes(points).filter(function (index) {
+        if (index === points.length - 1) return true;
+        const point = points[index];
+        const previous = points[index - 1];
+        const next = points[index + 1];
+        if (previous && isNearVerticalSegment(previous, point, xForVisiblePoint, yForVisiblePoint)) return false;
+        if (next && isNearVerticalSegment(point, next, xForVisiblePoint, yForVisiblePoint)) return false;
+        return true;
+      }).forEach(function (index) {
         const point = points[index];
         const isLatest = index === points.length - 1;
         children.push(h("circle", {
@@ -408,7 +465,8 @@
         h("div", { className: "codex-usage-helper" }, "Remaining usage since first sample"),
         account.error ? h("div", { className: "codex-usage-account-error" }, String(account.error)) : null,
         h(WindowMetric, { title: "5-hour", windowData: windows.five_hour }),
-        h(WindowMetric, { title: "Weekly", windowData: windows.weekly })
+        h(WindowMetric, { title: "Weekly", windowData: windows.weekly }),
+        h(ResetCredits, { account: account })
       )
     );
   }

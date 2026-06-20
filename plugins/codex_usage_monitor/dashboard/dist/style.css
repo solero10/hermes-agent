@@ -181,6 +181,31 @@
   line-height: 1.35;
 }
 
+.codex-usage-reset-credits {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  margin-top: 0.1rem;
+  border: 1px solid color-mix(in srgb, #22c55e 44%, var(--color-border));
+  border-radius: calc(var(--radius) * 0.7);
+  background: linear-gradient(135deg, color-mix(in srgb, #22c55e 13%, transparent), color-mix(in srgb, var(--color-card) 88%, transparent));
+  padding: 0.48rem 0.6rem;
+}
+
+.codex-usage-reset-credits-count {
+  color: color-mix(in srgb, #bbf7d0 88%, var(--color-foreground));
+  font-size: 0.78rem;
+  font-weight: 760;
+  line-height: 1.25;
+}
+
+.codex-usage-reset-credits-expiry {
+  color: color-mix(in srgb, var(--color-muted-foreground) 88%, #bbf7d0);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.66rem;
+  line-height: 1.3;
+}
+
 .codex-usage-account-error,
 .codex-usage-inline-error {
   border: 1px solid color-mix(in srgb, #ef4444 48%, var(--color-border));
