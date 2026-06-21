@@ -597,6 +597,26 @@ class TestMessageStorage:
 
         assert [m["content"] for m in conv if m["role"] == "user"] == ["same prompt", "next prompt"]
 
+    def test_get_compression_lineage_returns_message_bearing_root_and_tip(self, db):
+        db.create_session("root", "tui")
+        db.append_message("root", role="user", content="first prompt")
+        db.append_message("root", role="assistant", content="first answer")
+        db.end_session("root", end_reason="compression")
+        db.create_session("child", "tui", parent_session_id="root")
+        db.append_message("child", role="user", content="second prompt")
+
+        assert db.get_compression_lineage("root") == ["root", "child"]
+        assert db.get_compression_lineage("child") == ["root", "child"]
+
+    def test_get_compression_lineage_does_not_cross_branch_edges(self, db):
+        db.create_session("root", "tui")
+        db.append_message("root", role="user", content="first prompt")
+        db.end_session("root", end_reason="branched")
+        db.create_session("branch", "tui", parent_session_id="root")
+        db.append_message("branch", role="user", content="branch prompt")
+
+        assert db.get_compression_lineage("branch") == ["branch"]
+
     def test_finish_reason_stored(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="assistant", content="Done", finish_reason="stop")

@@ -529,12 +529,12 @@
 
     return h("div", { className: "codex-usage-monitor" },
       h("header", { className: "codex-usage-hero" },
-        h("div", null,
+        h("div", { className: "codex-usage-hero-title" },
           h("div", { className: "codex-usage-kicker" }, "Codex OAuth usage"),
-          h("h1", null, "Codex Usage Monitor"),
-          h("p", null, "Polls every 30 seconds. Active account is inferred from quota drops, not session mapping.")
+          h("h1", null, "Codex Usage Monitor")
         ),
-        snapshot ? h(SnapshotMeta, { snapshot: snapshot }) : null
+        h("p", { className: "codex-usage-poll-note" }, "Polls every 30 seconds. Active account is inferred from quota drops, not session mapping."),
+        snapshot ? h(SnapshotMeta, { snapshot: snapshot }) : h("div", { className: "codex-usage-meta", "aria-hidden": "true" })
       ),
 
       loading && !snapshot ? h(StatePanel, { tone: "loading", title: "Loading usage data", message: "Reading the latest Codex quota snapshot…" }) : null,

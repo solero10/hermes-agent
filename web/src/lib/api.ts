@@ -1672,6 +1672,7 @@ export interface SessionMessage {
 
 export interface SessionMessagesResponse {
   session_id: string;
+  lineage?: string[];
   messages: SessionMessage[];
 }
 

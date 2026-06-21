@@ -135,7 +135,7 @@ def test_manifest_registers_expected_dashboard_plugin():
         "icon": "Activity",
         "version": "0.1.0",
         "tab": {"path": "/codex-usage", "position": "after:analytics"},
-        "entry": "dist/index.js?v=20260620-reset-credits-placement-v2",
+        "entry": "dist/index.js?v=20260620-compact-banner-3col-v4",
         "css": "dist/style.css",
         "api": "plugin_api.py",
     }
@@ -799,6 +799,28 @@ def test_frontend_displays_plan_badges_next_to_account_titles():
     assert "Plan unknown" in frontend
     assert "kev1" not in frontend.lower()
     assert "codex-usage-plan-badge" in frontend
+
+
+def test_css_keeps_codex_usage_banner_compact():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+    css = FRONTEND_CSS_PATH.read_text(encoding="utf-8")
+
+    assert "display: grid;" in css
+    assert "grid-template-columns: max-content minmax(0, 1fr) max-content;" in css
+    assert "gap: 0.65rem;" in css
+    assert "align-items: center;" in css
+    assert "padding: 0.42rem 0.75rem;" in css
+    assert "font-size: clamp(1.08rem, 1.45vw, 1.45rem);" in css
+    assert ".codex-usage-poll-note" in css
+    assert "white-space: nowrap;" in css
+    assert "padding: 1rem 1.1rem;" not in css
+    assert "clamp(1.45rem, 2.6vw, 2.35rem)" not in css
+
+    title_index = frontend.index('className: "codex-usage-hero-title"')
+    poll_index = frontend.index('className: "codex-usage-poll-note"')
+    meta_index = frontend.index("h(SnapshotMeta")
+    assert title_index < poll_index < meta_index
+    assert 'h("p", null, "Polls every 30 seconds' not in frontend
 
 
 def test_frontend_displays_remaining_reset_credits_only_when_available():

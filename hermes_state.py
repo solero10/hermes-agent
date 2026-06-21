@@ -1977,6 +1977,85 @@ class SessionDB:
             current = row["id"]
         return current
 
+    def get_compression_lineage(self, session_id: str) -> List[str]:
+        """Return the compression lineage containing ``session_id``.
+
+        Compression turns one logical conversation into multiple ``sessions``
+        rows: an ended parent (``end_reason='compression'``) and a child
+        continuation created immediately afterwards. Desktop/session detail
+        views need the *whole* logical transcript, not just the currently
+        selected segment, but branch and delegate children must stay isolated.
+
+        The returned list is ordered root → tip and follows only compression
+        edges using the same predicate as :meth:`get_compression_tip`:
+        parent ended by compression and child.started_at >= parent.ended_at.
+        Non-compression children return ``[session_id]``.
+        """
+        if not session_id:
+            return []
+
+        def _row(conn, sid: str):
+            return conn.execute(
+                "SELECT id, parent_session_id, started_at, ended_at, end_reason "
+                "FROM sessions WHERE id = ?",
+                (sid,),
+            ).fetchone()
+
+        with self._lock:
+            conn = self._conn
+            if conn is None:
+                return []
+            current = _row(conn, session_id)
+            if current is None:
+                return []
+
+            seen = {session_id}
+            root_id = session_id
+            for _ in range(100):
+                parent_id = current["parent_session_id"]
+                if not parent_id or parent_id in seen:
+                    break
+                parent = _row(conn, parent_id)
+                if parent is None:
+                    break
+                parent_ended_at = parent["ended_at"]
+                child_started_at = current["started_at"]
+                is_compression_edge = (
+                    parent["end_reason"] == "compression"
+                    and parent_ended_at is not None
+                    and child_started_at is not None
+                    and child_started_at >= parent_ended_at
+                )
+                if not is_compression_edge:
+                    break
+                seen.add(parent_id)
+                root_id = parent_id
+                current = parent
+
+            lineage: List[str] = []
+            current_id = root_id
+            seen = set()
+            for _ in range(100):
+                if not current_id or current_id in seen:
+                    break
+                lineage.append(current_id)
+                seen.add(current_id)
+                child = conn.execute(
+                    "SELECT child.id FROM sessions parent "
+                    "JOIN sessions child ON child.parent_session_id = parent.id "
+                    "WHERE parent.id = ? "
+                    "  AND parent.end_reason = 'compression' "
+                    "  AND parent.ended_at IS NOT NULL "
+                    "  AND child.started_at >= parent.ended_at "
+                    "ORDER BY child.started_at DESC, child.id DESC LIMIT 1",
+                    (current_id,),
+                ).fetchone()
+                if child is None:
+                    break
+                current_id = child["id"]
+
+        return lineage or [session_id]
+
     def list_sessions_rich(
         self,
         source: str = None,
