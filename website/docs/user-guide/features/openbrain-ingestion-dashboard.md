@@ -1,0 +1,94 @@
+---
+sidebar_position: 16
+title: "OpenBrain Ingestion Dashboard"
+description: "Read-only dashboard plugin for inspecting OpenBrain ingestion snapshots, source units, thought lineage, stops, and CortexDB receipts"
+---
+
+# OpenBrain Ingestion Dashboard
+
+The **OpenBrain** dashboard tab is a read-only view into the latest OpenBrain ingestion snapshot. It is meant for auditing what the ingestion exporter produced before and after import: which source units were processed, which durable thought candidates were extracted, where each candidate currently sits in the lineage, what stopped before import, and which imported thoughts have CortexDB receipts.
+
+The dashboard is registered as a dashboard plugin named `openbrain_ingestion` and appears at `/openbrain` after the Kanban tab.
+
+## What it shows
+
+The board is organized by **source unit**. Each row represents one item from the snapshot, such as a transcript, document, or other source-specific unit. Inside each row, thought cards are grouped by canonical ingestion stage:
+
+1. Extracted
+2. Shaped
+3. Deduped
+4. Policy
+5. Ready for CortexDB
+6. CortexDB
+
+The top metrics show **visible / total** counts for source units, thoughts, review items, stopped items, imported items, and zero-thought sources. Visible counts follow the current filters and search; total counts describe the selected source type in the snapshot.
+
+## Source-type dropdown
+
+Use the **Source type** dropdown to switch between material lanes in the snapshot. The backend defaults to `transcripts` when present, otherwise the first source type in the snapshot. The dropdown is populated by:
+
+```text
+/api/plugins/openbrain_ingestion/source-types
+```
+
+The board itself is loaded from:
+
+```text
+/api/plugins/openbrain_ingestion/board?source_type=<type>&filter=<filter>&sort=<sort>&search=<query>
+```
+
+## Current-state rule: each thought card appears exactly once
+
+The board is a current-state view, not a full per-stage history board. **Each thought card appears exactly once**, in the column matching its current or final stage. For example:
+
+- an imported thought appears in **CortexDB**;
+- a duplicate stopped during dedupe appears in **Deduped**;
+- a candidate ready but not imported yet appears in **Ready for CortexDB**.
+
+Open a card's detail dialog to see the full lineage timeline, including completed, current, pending, review-needed, and not-reached stages.
+
+## Ready for CortexDB
+
+**Ready for CortexDB** means the candidate has survived the earlier shaping, dedupe, and policy phases and is ready to become a durable OpenBrain/CortexDB memory. In the read-only MVP, the label is informational: the dashboard does not promote, import, reopen, or mutate records.
+
+## Stopped and not-imported cards
+
+Stopped cards are candidates that did not become CortexDB records. Common examples are duplicate/merged candidates or policy stops. Their detail dialog shows:
+
+- the stopped reason;
+- any matched or related memory IDs;
+- the lineage timeline, with later stages marked **Not reached** when applicable.
+
+If a non-imported card reaches a later stage in the snapshot, the API intentionally strips CortexDB receipt fields unless the disposition is `imported`.
+
+## Imported receipts
+
+Imported cards show a **CortexDB receipt** in the detail dialog, including fields such as receipt ID, type, capture time, ingestion run ID, source unit ID, and candidate ID. The receipt indicates that the candidate crossed the boundary into CortexDB/OpenBrain memory storage.
+
+## Snapshot path
+
+The backend reads the sanitized snapshot from:
+
+```text
+~/.hermes/openbrain-ingestion-dashboard/snapshot.json
+```
+
+If the file is missing or unreadable, the backend returns a safe sample snapshot so the dashboard can still mount.
+
+## Exporter boundary
+
+The exporter boundary is:
+
+```text
+Panning-for-Gold artifacts -> SnapshotV1 -> dashboard API -> read-only UI
+```
+
+The Panning exporter converts artifacts such as `source-items.jsonl`, `inventory.jsonl`, `dedupe-receipts.jsonl`, `capture-candidates.jsonl`, `capture-audit.jsonl`, and `summary.json` into a sanitized **SnapshotV1** document. The dashboard backend validates and redacts that snapshot, normalizes stage aliases, and exposes only the source-scoped board/detail API used by the frontend.
+
+The frontend does not read Panning artifacts directly and does not include adapter-specific logic. It only calls the dashboard plugin API through the Hermes plugin SDK.
+
+## Read-only MVP
+
+This first dashboard release is deliberately **read-only**. Buttons such as **Open source**, **Open CortexDB record**, **Copy final memory**, **Open matched memory**, **Copy merge note**, **Reopen later**, **Promote later**, and **Mark for review later** are disabled placeholders labeled `Read-only MVP`.
+
+No mutation controls are enabled. Use the dashboard to inspect and audit ingestion state; perform source edits, merges, promotions, or imports through the ingestion/export pipeline outside this UI.

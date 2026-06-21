@@ -135,8 +135,8 @@ def test_manifest_registers_expected_dashboard_plugin():
         "icon": "Activity",
         "version": "0.1.0",
         "tab": {"path": "/codex-usage", "position": "after:analytics"},
-        "entry": "dist/index.js?v=20260620-compact-banner-3col-v4",
-        "css": "dist/style.css",
+        "entry": "dist/index.js?v=20260621-exhausted-cards-v2",
+        "css": "dist/style.css?v=20260621-exhausted-cards-v2",
         "api": "plugin_api.py",
     }
 
@@ -183,6 +183,14 @@ def test_normalize_strips_token_fields_and_maps_windows(plugin_api):
     assert account["is_current"] is True
     assert account["is_next_eligible"] is False
     assert account["auth_status"] == "ok"
+    assert account["auth_exhausted"] is False
+    assert account["window_exhausted"] is False
+    assert account["exhausted_windows"] == []
+    assert account["exhausted_reason"] is None
+    assert account["cooldown_seconds_left"] is None
+    assert account["cooldown_reset_at"] is None
+    assert account["auth_exhausted_until"] is None
+    assert account["is_exhausted"] is False
     assert account["plan_type"] == "plus"
     assert set(account["windows"]) == {"five_hour", "weekly"}
     five_hour = account["windows"]["five_hour"]
@@ -198,6 +206,31 @@ def test_normalize_strips_token_fields_and_maps_windows(plugin_api):
     reauth_raw["accounts"][0]["auth_status"] = "reauth_required"
     reauth_account = plugin_api.normalize_snapshot(reauth_raw, now=now)["accounts"][0]
     assert reauth_account["error"] == "Re-auth required"
+
+    exhausted_raw = _raw_snapshot(now)
+    exhausted_raw["accounts"][0]["auth_status"] = "exhausted"
+    exhausted_raw["accounts"][0]["auth_exhausted"] = True
+    exhausted_raw["accounts"][0]["auth_exhausted_until_local"] = "2026-01-01 02:00 PST"
+    exhausted_account = plugin_api.normalize_snapshot(exhausted_raw, now=now)["accounts"][0]
+    assert exhausted_account["auth_exhausted"] is True
+    assert exhausted_account["is_exhausted"] is True
+    assert exhausted_account["exhausted_reason"] == "Account exhausted"
+    assert exhausted_account["auth_exhausted_until"] == "2026-01-01 02:00 PST"
+    assert exhausted_account["cooldown_reset_at"] == "2026-01-01 02:00 PST"
+
+    weekly_exhausted_raw = _raw_snapshot(now)
+    weekly_exhausted_raw["accounts"][0]["windows"][1]["remaining_percent"] = 0
+    weekly_exhausted = plugin_api.normalize_snapshot(weekly_exhausted_raw, now=now)["accounts"][0]
+    assert weekly_exhausted["auth_status"] == "ok"
+    assert weekly_exhausted["auth_exhausted"] is False
+    assert weekly_exhausted["window_exhausted"] is True
+    assert weekly_exhausted["is_exhausted"] is True
+    assert weekly_exhausted["exhausted_reason"] == "Weekly exhausted"
+    assert weekly_exhausted["exhausted_windows"] == [{"key": "weekly", "label": "Weekly"}]
+    assert weekly_exhausted["cooldown_window_label"] == "Weekly"
+    assert weekly_exhausted["cooldown_seconds_left"] == 4 * 24 * 60 * 60
+    assert weekly_exhausted["windows"]["weekly"]["is_exhausted"] is True
+    assert weekly_exhausted["windows"]["five_hour"].get("is_exhausted") is None
 
 
 def test_reset_credit_normalization_attaches_only_safe_available_credit_info(plugin_api):
@@ -799,6 +832,27 @@ def test_frontend_displays_plan_badges_next_to_account_titles():
     assert "Plan unknown" in frontend
     assert "kev1" not in frontend.lower()
     assert "codex-usage-plan-badge" in frontend
+
+
+def test_frontend_greys_exhausted_account_cards():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+    css = FRONTEND_CSS_PATH.read_text(encoding="utf-8")
+
+    assert "isAccountExhausted" in frontend
+    assert "account.is_exhausted || account.auth_exhausted || account.window_exhausted" in frontend
+    assert "remaining !== null && remaining <= 0" in frontend
+    assert "codex-usage-card-exhausted" in frontend
+    assert '"data-exhausted": exhausted ? "true" : "false"' in frontend
+    assert "Cooldown ends in" in frontend
+    assert "formatCooldownDuration" in frontend
+    assert "codex-usage-cooldown" in frontend
+    assert "codex-usage-exhausted-badge" in frontend
+    assert "account.active_now && !exhausted" in frontend
+    assert ".codex-usage-card-exhausted" in css
+    assert ".codex-usage-cooldown" in css
+    assert ".codex-usage-exhausted-badge" in css
+    assert "filter: saturate" not in css
+    assert "grayscale(1)" not in css
 
 
 def test_css_keeps_codex_usage_banner_compact():

@@ -1,0 +1,5 @@
+name: openbrain_ingestion
+kind: dashboard
+version: 0.1.0
+description: Read-only OpenBrain ingestion dashboard showing source-scoped thought lineage from extraction through CortexDB import
+author: Hermes Agent

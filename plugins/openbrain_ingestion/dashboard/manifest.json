@@ -1,0 +1,11 @@
+{
+  "name": "openbrain_ingestion",
+  "label": "OpenBrain",
+  "description": "Read-only ingestion dashboard for OpenBrain source units, lineage stages, and CortexDB receipts",
+  "icon": "Database",
+  "version": "0.1.0",
+  "tab": { "path": "/openbrain", "position": "after:kanban" },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

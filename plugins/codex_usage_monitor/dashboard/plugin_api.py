@@ -517,6 +517,50 @@ def _window_map(account: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {}
 
 
+def _exhausted_windows_summary(windows: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Return exhausted-window facts used to grey account cards.
+
+    Local auth exhaustion is useful but not sufficient: a weekly window can be
+    depleted while the 5-hour window still has quota (or vice versa).  The UI
+    should mark the account unavailable whenever any current quota window is at
+    0% remaining and its reset is still in the future.
+    """
+    exhausted: list[dict[str, Any]] = []
+    cooldown_window: dict[str, Any] | None = None
+    cooldown_seconds: int | None = None
+
+    for key, window in windows.items():
+        if not isinstance(window, dict):
+            continue
+        remaining = _coerce_percent(window.get("remaining_percent"))
+        if remaining is None or remaining > 0:
+            continue
+        seconds_left = _coerce_int(window.get("seconds_left"))
+        if seconds_left is not None and seconds_left <= 0:
+            continue
+        window["is_exhausted"] = True
+        window["exhausted"] = True
+        label = str(window.get("label") or _WINDOW_LABELS.get(key, key.replace("_", " ").title()))
+        exhausted.append({"key": key, "label": label})
+        if seconds_left is not None and (cooldown_seconds is None or seconds_left > cooldown_seconds):
+            cooldown_seconds = seconds_left
+            cooldown_window = window
+
+    labels = [item["label"] for item in exhausted]
+    reason = None
+    if labels:
+        reason = " + ".join(labels) + " exhausted"
+    return {
+        "window_exhausted": bool(exhausted),
+        "exhausted_windows": exhausted,
+        "exhausted_reason": reason,
+        "cooldown_window_label": str(cooldown_window.get("label")) if cooldown_window else None,
+        "cooldown_seconds_left": cooldown_seconds,
+        "cooldown_reset_at": cooldown_window.get("reset_at") if cooldown_window else None,
+        "cooldown_reset_at_local": cooldown_window.get("reset_at_local") if cooldown_window else None,
+    }
+
+
 def infer_active_accounts(
     previous_by_id: dict[str, dict[str, Any]] | None,
     accounts: list[dict[str, Any]],
@@ -602,6 +646,17 @@ def normalize_snapshot(
         auth_status = account.get("auth_status") or account.get("status")
         plan_type = account.get("plan_type") or account.get("plan")
         auth_status_text = str(auth_status) if auth_status not in (None, "") else None
+        auth_status_lower = auth_status_text.lower() if auth_status_text else ""
+        auth_exhausted = _coerce_bool(
+            _first_present(account, "is_exhausted", "auth_exhausted", "exhausted")
+        ) or auth_status_lower in {"exhausted", "skipped"}
+        auth_exhausted_until = _first_present(
+            account,
+            "auth_exhausted_until_local",
+            "auth_exhausted_until",
+            "exhausted_until",
+            "last_error_reset_at",
+        )
 
         normalized_account: dict[str, Any] = {
             "id": account_id,
@@ -615,6 +670,9 @@ def normalize_snapshot(
                 account.get("is_next_eligible", account.get("next_eligible"))
             ),
             "auth_status": auth_status_text,
+            "auth_exhausted": auth_exhausted,
+            "auth_exhausted_until": str(auth_exhausted_until) if auth_exhausted_until not in (None, "") else None,
+            "is_exhausted": auth_exhausted,
             "plan_type": str(plan_type) if plan_type not in (None, "") else None,
             "active_now": False,
             "windows": {},
@@ -626,6 +684,16 @@ def normalize_snapshot(
             window = _normalize_window(raw_window, now_dt)
             if window is not None:
                 normalized_account["windows"][window["key"]] = window
+
+        exhaustion_summary = _exhausted_windows_summary(normalized_account["windows"])
+        window_exhausted = bool(exhaustion_summary["window_exhausted"])
+        normalized_account.update(exhaustion_summary)
+        normalized_account["is_exhausted"] = bool(auth_exhausted or window_exhausted)
+        if normalized_account["is_exhausted"] and not normalized_account.get("exhausted_reason"):
+            normalized_account["exhausted_reason"] = "Account exhausted"
+        if normalized_account["is_exhausted"] and normalized_account.get("cooldown_reset_at") is None:
+            normalized_account["cooldown_reset_at"] = normalized_account.get("auth_exhausted_until")
+            normalized_account["cooldown_reset_at_local"] = normalized_account.get("auth_exhausted_until")
 
         accounts.append(normalized_account)
 

@@ -1,0 +1,13 @@
+{
+  "run_id": "run_20260621_043954Z",
+  "adapter": "otter_package",
+  "source_type": "otter-package",
+  "generated_at": "2026-06-21T04:39:54Z",
+  "completed_at": "2026-06-21T04:39:54Z",
+  "counts": {
+    "source_items": 3,
+    "capture_candidates": 3,
+    "captured": 1,
+    "merged_exact": 1
+  }
+}

@@ -1,0 +1,1240 @@
+"""OpenBrain ingestion dashboard backend API.
+
+The dashboard reads a sanitized ingestion snapshot from
+``get_hermes_home()/openbrain-ingestion-dashboard/snapshot.json`` and exposes a
+small, source-scoped board API.  Snapshot validation intentionally normalizes
+legacy stage names while rejecting unknown stages so the frontend only ever sees
+canonical stage IDs.
+"""
+from __future__ import annotations
+
+import copy
+import json
+import math
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import urlparse
+
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from hermes_constants import get_hermes_home
+
+router = APIRouter()
+
+SNAPSHOT_DIRNAME = "openbrain-ingestion-dashboard"
+SNAPSHOT_FILENAME = "snapshot.json"
+
+StageId = Literal[
+    "extracted",
+    "shaped",
+    "deduped",
+    "policy",
+    "ready_for_cortexdb",
+    "cortexdb",
+]
+Disposition = Literal["in_progress", "needs_review", "stopped", "imported"]
+StageStatus = Literal[
+    "complete",
+    "current",
+    "pending",
+    "not_reached",
+    "failed",
+    "review_needed",
+]
+
+CANONICAL_STAGES: tuple[str, ...] = (
+    "extracted",
+    "shaped",
+    "deduped",
+    "policy",
+    "ready_for_cortexdb",
+    "cortexdb",
+)
+
+_STAGE_ALIASES: dict[str, str] = {
+    "raw_extraction": "extracted",
+    "raw-extraction": "extracted",
+    "raw extraction": "extracted",
+    "ready": "ready_for_cortexdb",
+    "ready_to_import": "ready_for_cortexdb",
+    "ready-to-import": "ready_for_cortexdb",
+}
+
+_STAGE_LABELS: dict[str, str] = {
+    "extracted": "Extracted",
+    "shaped": "Shaped",
+    "deduped": "Deduped",
+    "policy": "Policy",
+    "ready_for_cortexdb": "Ready for CortexDB",
+    "cortexdb": "CortexDB",
+}
+
+_ALLOWED_FILTERS = {
+    "all",
+    "imported",
+    "stopped",
+    "needs_review",
+    "review_needed",
+    "in_progress",
+    "zero_thoughts",
+}
+_ALLOWED_SORTS = {"default", "newest", "oldest", "most_thoughts", "most_stopped"}
+
+_SENSITIVE_KEY_PARTS = (
+    "access_token",
+    "refresh_token",
+    "authorization",
+    "api_key",
+    "apikey",
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "credential",
+    "cookie",
+    "private_key",
+)
+
+# Deliberately do not use a broad "long alphanumeric" token regex here: stable
+# source and lineage IDs can be long and must remain intact for source-scoped
+# dashboard navigation.
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_-])"
+    r"(?P<key>authorization)(?![A-Za-z0-9_-])"
+    r"(?P<sep>\s*[:=]\s*)"
+    r"(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{4,}"
+)
+_GENERIC_SECRET_KEY_RE = (
+    r"(?:access[_-]?token|refresh[_-]?token|(?:x[_-]?)?api[_-]?key|apikey|"
+    r"authorization|password|passwd|secret|token|credential|cookie|private[_-]?key)"
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    rf"(?i)(?<![A-Za-z0-9_-])(?P<key>{_GENERIC_SECRET_KEY_RE})(?![A-Za-z0-9_-])"
+    r"(?P<sep>\s*[:=]\s*)"
+    r"(?:(?P<quote>['\"])(?P<quoted_value>[^'\"\r\n]*)(?P=quote)|(?P<bare_value>[^&\s'\"),;<>#]+))"
+)
+_OPENAI_KEY_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:sk|sess|org|rk)-[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
+)
+_TRUNCATED_OPENAI_KEY_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:sk|sess|org|rk)-[A-Za-z0-9_-]{2,}\.\.\.[A-Za-z0-9_-]{2,}(?![A-Za-z0-9_-])"
+)
+_JWT_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
+)
+_PATH_SEGMENT_RE = r"[^\\/\s'\"()<>]+"
+_PATH_SEGMENT_WITH_SPACES_RE = rf"{_PATH_SEGMENT_RE}(?: {_PATH_SEGMENT_RE})*"
+_PATH_SEGMENT_WITH_DOT_RE = r"[^\\/\s'\"()<>]*\.[^\\/\s'\"()<>]*"
+_PATH_SPACED_FINAL_SEGMENT_RE = (
+    rf"{_PATH_SEGMENT_RE}(?: {_PATH_SEGMENT_RE})* {_PATH_SEGMENT_WITH_DOT_RE}"
+)
+_PATH_FINAL_SEGMENT_RE = rf"(?:{_PATH_SPACED_FINAL_SEGMENT_RE}|{_PATH_SEGMENT_RE})"
+_POSIX_PATH_BODY_RE = rf"/(?!/)(?:{_PATH_SEGMENT_WITH_SPACES_RE}/)*{_PATH_FINAL_SEGMENT_RE}"
+_WINDOWS_DRIVE_PATH_BODY_RE = (
+    rf"[A-Z]:[\\/](?:{_PATH_SEGMENT_WITH_SPACES_RE}[\\/])*{_PATH_FINAL_SEGMENT_RE}"
+)
+_UNC_PATH_BODY_RE = rf"\\\\(?:{_PATH_SEGMENT_WITH_SPACES_RE}[\\/])+{_PATH_FINAL_SEGMENT_RE}"
+_PRIVATE_PATH_RE = re.compile(
+    rf"(?i)(?P<prefix>^|[\s'\"`(=\[:{{])"
+    rf"(?P<path>{_POSIX_PATH_BODY_RE}|{_WINDOWS_DRIVE_PATH_BODY_RE}|{_UNC_PATH_BODY_RE})"
+)
+_URL_RE = re.compile(r"(?i)\b(?:file|https?)://[^\s'\")<>]+")
+_REFERENCE_TAIL_HARD_BOUNDARY_CHARS = frozenset("\r\n'\"`()<>{}[]")
+_REFERENCE_TAIL_SENTENCE_BOUNDARY_CHARS = frozenset(",;!?|")
+
+_BOUND_SOURCE_TEXT_KEYS = {
+    "source_snippet",
+    "source_text",
+    "source_quote",
+    "source_excerpt",
+    "raw_text",
+    "raw_content",
+    "raw_snippet",
+    "raw_quote",
+    "quote",
+    "excerpt",
+}
+
+_RAW_REFERENCE_KEYS = {
+    "path",
+    "source_path",
+    "absolute_path",
+    "local_path",
+    "raw_path",
+    "url",
+    "source_url",
+    "raw_url",
+    "file_url",
+    "link",
+    "source_link",
+    "raw_link",
+}
+
+_OMIT = object()
+
+
+# ---------------------------------------------------------------------------
+# Stage helpers
+# ---------------------------------------------------------------------------
+
+
+def _normalize_stage(value: Any) -> str:
+    """Return the canonical dashboard stage ID for ``value``.
+
+    Known legacy aliases are normalized.  Unknown values are returned as-is so
+    Pydantic Literal validation can raise a clear schema error in Snapshot
+    validation.
+    """
+
+    text = str(value or "").strip()
+    lowered = text.lower()
+    return _STAGE_ALIASES.get(lowered, lowered)
+
+
+def _stage_label(stage_id: Any) -> str:
+    return _STAGE_LABELS.get(_normalize_stage(stage_id), str(stage_id or "").strip())
+
+
+def _empty_columns() -> dict[str, list[dict[str, Any]]]:
+    return {stage_id: [] for stage_id in CANONICAL_STAGES}
+
+
+# ---------------------------------------------------------------------------
+# Privacy helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_sensitive_key(key: Any) -> bool:
+    lowered = str(key or "").strip().lower().replace("-", "_")
+    return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+
+
+def _is_url(text: str) -> bool:
+    return bool(re.match(r"(?i)^[a-z][a-z0-9+.-]*://", text.strip()))
+
+
+def _is_file_url(text: str) -> bool:
+    return text.strip().lower().startswith("file://")
+
+
+def _is_private_hostname(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    host = hostname.strip().lower().strip("[]")
+    if host in {"localhost", "0.0.0.0", "127.0.0.1", "::1"}:
+        return True
+    if host.endswith(".localhost") or host.endswith(".local"):
+        return True
+    parts = host.split(".")
+    if len(parts) == 4 and all(part.isdigit() for part in parts):
+        nums = [int(part) for part in parts]
+        if nums[0] == 10 or nums[0] == 127 or nums[0] == 0:
+            return True
+        if nums[0] == 192 and nums[1] == 168:
+            return True
+        if nums[0] == 172 and 16 <= nums[1] <= 31:
+            return True
+    return False
+
+
+def _is_private_url(text: str) -> bool:
+    raw = text.strip()
+    if not _is_url(raw):
+        return False
+    if _is_file_url(raw):
+        return True
+    parsed = urlparse(raw)
+    return _is_private_hostname(parsed.hostname)
+
+
+def _is_posix_absolute_path(text: str) -> bool:
+    stripped = text.strip()
+    return stripped.startswith("/") and not stripped.startswith("//")
+
+
+def _is_windows_absolute_path(text: str) -> bool:
+    stripped = text.strip()
+    return bool(re.match(r"(?i)^[a-z]:[\\/]", stripped)) or stripped.startswith("\\\\")
+
+
+def _looks_like_private_reference(text: Any) -> bool:
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    return (
+        _is_file_url(stripped)
+        or _is_private_url(stripped)
+        or _is_posix_absolute_path(stripped)
+        or _is_windows_absolute_path(stripped)
+    )
+
+
+def _basename_from_path_or_url(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if _is_url(text):
+        parsed = urlparse(text)
+        text = parsed.path or ""
+    text = text.rstrip("/\\")
+    if not text:
+        return None
+    # pathlib on POSIX does not split Windows separators, so split both.
+    base = re.split(r"[\\/]", text)[-1].strip()
+    return base or None
+
+
+def _reference_needs_tail_extension(candidate: str) -> bool:
+    """Return True when a matched private reference may have stopped at a spaced tail.
+
+    The base path/URL matchers intentionally stop at whitespace to avoid eating
+    ordinary prose.  That can split unquoted private references such as
+    ``/mnt/d/private/My Folder`` or ``file:///tmp/My Folder/file.md`` after the
+    first spaced component.  Extension is limited to candidates whose matched
+    basename has no dot; dotted basenames already cover the common file case.
+    """
+
+    base = _basename_from_path_or_url(candidate)
+    return bool(base and "." not in base)
+
+
+def _extend_private_reference_tail(text: str, end: int) -> int:
+    """Extend a redaction span over an unescaped private path/URL tail.
+
+    For ambiguous unquoted paths with spaces, privacy is preferable to leaking a
+    final directory/file tail.  Extend only when the next character is a space,
+    and stop at likely sentence or structural boundaries so unrelated surrounding
+    prose is not removed across clauses, quoted strings, or lines.
+    """
+
+    if end >= len(text) or text[end] != " ":
+        return end
+
+    cursor = end
+    while cursor < len(text):
+        char = text[cursor]
+        if char in _REFERENCE_TAIL_HARD_BOUNDARY_CHARS:
+            break
+        if char in _REFERENCE_TAIL_SENTENCE_BOUNDARY_CHARS:
+            break
+        if char == "." and (cursor + 1 == len(text) or text[cursor + 1].isspace()):
+            break
+        cursor += 1
+    return cursor
+
+
+def _redact_private_urls(text: str) -> str:
+    clean: list[str] = []
+    cursor = 0
+    changed = False
+    for match in _URL_RE.finditer(text):
+        if match.start() < cursor:
+            continue
+        candidate = match.group(0)
+        if not (_is_private_url(candidate) or _is_file_url(candidate)):
+            continue
+        end = match.end()
+        if _reference_needs_tail_extension(candidate):
+            end = _extend_private_reference_tail(text, end)
+        clean.append(text[cursor : match.start()])
+        clean.append("[REDACTED_URL]")
+        cursor = end
+        changed = True
+    if not changed:
+        return text
+    clean.append(text[cursor:])
+    return "".join(clean)
+
+
+def _redact_private_paths(text: str) -> str:
+    clean: list[str] = []
+    cursor = 0
+    changed = False
+    for match in _PRIVATE_PATH_RE.finditer(text):
+        path_start = match.start("path")
+        if path_start < cursor:
+            continue
+        candidate = match.group("path")
+        if not _looks_like_private_reference(candidate):
+            continue
+        end = match.end("path")
+        if _reference_needs_tail_extension(candidate):
+            end = _extend_private_reference_tail(text, end)
+        clean.append(text[cursor:path_start])
+        clean.append("[REDACTED_PATH]")
+        cursor = end
+        changed = True
+    if not changed:
+        return text
+    clean.append(text[cursor:])
+    return "".join(clean)
+
+
+def _redact_sensitive_text(value: str) -> str:
+    def _secret_assignment_repl(match: re.Match[str]) -> str:
+        quote = match.group("quote") or ""
+        return f"{match.group('key')}{match.group('sep')}{quote}[REDACTED]{quote}"
+
+    text = _AUTH_HEADER_RE.sub(lambda match: f"{match.group('key')}{match.group('sep')}[REDACTED]", value)
+    text = _BEARER_RE.sub("[REDACTED]", text)
+    text = _TRUNCATED_OPENAI_KEY_RE.sub("[REDACTED]", text)
+    text = _OPENAI_KEY_RE.sub("[REDACTED]", text)
+    text = _JWT_RE.sub("[REDACTED]", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(_secret_assignment_repl, text)
+    text = _redact_private_urls(text)
+    return _redact_private_paths(text)
+
+
+def _should_bound_source_text(key: Any) -> bool:
+    lowered = str(key or "").strip().lower()
+    return lowered in _BOUND_SOURCE_TEXT_KEYS
+
+
+def _bound_source_text(value: str, limit: int = 500) -> str:
+    if len(value) <= limit:
+        return value
+    if limit <= 3:
+        return value[:limit]
+    return value[: limit - 3] + "..."
+
+
+def _is_raw_reference_key(key: Any) -> bool:
+    lowered = str(key or "").strip().lower()
+    if lowered in _RAW_REFERENCE_KEYS:
+        return True
+    if lowered.startswith("raw_") and any(part in lowered for part in ("path", "url", "link")):
+        return True
+    if lowered.startswith("file_") and any(part in lowered for part in ("path", "url", "link")):
+        return True
+    return False
+
+
+def _sanitize_source_ref(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    clean: dict[str, Any] = {}
+    for key in ("kind", "source_unit_id", "display_path"):
+        if key not in value:
+            continue
+        item = value[key]
+        if key == "display_path":
+            if not isinstance(item, str) or _looks_like_private_reference(item) or _is_url(item):
+                continue
+        sanitized = _sanitize_node(item, key)
+        if sanitized is not _OMIT:
+            clean[key] = sanitized
+    return clean
+
+
+def _sanitize_node(value: Any, key: Any = None) -> Any:
+    if _is_sensitive_key(key):
+        return "[REDACTED]"
+
+    if key == "source_ref":
+        return _sanitize_source_ref(value)
+
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key_text = str(raw_key)
+            if key_text == "source_ref":
+                source_ref = _sanitize_source_ref(raw_value)
+                if source_ref:
+                    clean[key_text] = source_ref
+                continue
+            if _is_raw_reference_key(key_text):
+                # Raw path/url/link fields are implementation artifacts and can
+                # contain private local files or localhost import URLs.  The
+                # frontend only needs source_ref.display_path when it is safe.
+                continue
+            if (
+                isinstance(raw_value, str)
+                and any(part in key_text.lower() for part in ("path", "url", "link"))
+                and _looks_like_private_reference(raw_value)
+            ):
+                continue
+            sanitized = _sanitize_node(raw_value, key_text)
+            if sanitized is not _OMIT:
+                clean[key_text] = sanitized
+        return clean
+
+    if isinstance(value, list):
+        clean_items = []
+        for item in value:
+            sanitized = _sanitize_node(item, key)
+            if sanitized is not _OMIT:
+                clean_items.append(sanitized)
+        return clean_items
+
+    if isinstance(value, tuple):
+        return [_sanitize_node(item, key) for item in value]
+
+    if isinstance(value, str):
+        if _looks_like_private_reference(value):
+            # If a private path/URL escaped a raw reference field, avoid leaking
+            # directories or hosts.  Keep a basename for non-URL path-like labels
+            # where it may still be useful and non-sensitive.
+            if _is_file_url(value) or _is_private_url(value):
+                return "[REDACTED_URL]"
+            base = _basename_from_path_or_url(value)
+            return _redact_sensitive_text(base or "[REDACTED_PATH]")
+        text = _redact_sensitive_text(value)
+        if _should_bound_source_text(key):
+            text = _bound_source_text(text)
+        return text
+
+    return value
+
+
+def _sanitize_snapshot(snapshot: Any) -> dict[str, Any]:
+    """Return a privacy-safe snapshot dictionary for API/model consumption."""
+
+    if not isinstance(snapshot, dict):
+        return {}
+    return _sanitize_node(copy.deepcopy(snapshot))
+
+
+# ---------------------------------------------------------------------------
+# Pydantic schema
+# ---------------------------------------------------------------------------
+
+
+class StageRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: StageId
+    status: StageStatus = "pending"
+    label: str | None = None
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _canonical_id(cls, value: Any) -> str:
+        return _normalize_stage(value)
+
+    @model_validator(mode="after")
+    def _canonical_label(self) -> "StageRecord":
+        self.label = _stage_label(self.id)
+        return self
+
+
+class RelatedMemory(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    title: str | None = None
+    score: float | None = None
+
+
+class CortexDBReceipt(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    type: str | None = None
+    captured_at: str | None = None
+    ingestion_run_id: str | None = None
+    source_unit_id: str | None = None
+    candidate_id: str | None = None
+
+
+class ProducerInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    adapter: str
+    source_type: str | None = None
+    run_root_label: str | None = None
+    artifacts: list[str] = Field(default_factory=list)
+
+    @field_validator("run_root_label", mode="before")
+    @classmethod
+    def _safe_run_root_label(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if _is_private_url(text) or _is_file_url(text):
+            return None
+        return _redact_sensitive_text(_basename_from_path_or_url(text) or text)
+
+    @field_validator("artifacts", mode="before")
+    @classmethod
+    def _safe_artifacts(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        items = value if isinstance(value, list) else [value]
+        clean: list[str] = []
+        for item in items:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if not text or _is_private_url(text) or _is_file_url(text):
+                continue
+            base = _basename_from_path_or_url(text)
+            if base:
+                clean.append(_redact_sensitive_text(base))
+        return clean
+
+
+class SourceType(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    label: str
+    count: int = 0
+
+
+class ThoughtRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    lineage_id: str
+    candidate_id: str | None = None
+    title: str | None = None
+    summary: str | None = None
+    current_stage: StageId = "extracted"
+    disposition: Disposition = "in_progress"
+    needs_review: bool | None = None
+    topics: list[str] = Field(default_factory=list)
+    confidence: float | None = None
+    source_snippet: str | None = None
+    raw_text: str | None = None
+    quote: str | None = None
+    final_memory_text: str | None = None
+    stopped_reason: str | None = None
+    matched_memory_id: str | None = None
+    stages: list[StageRecord] | None = None
+    related_memories: list[RelatedMemory] = Field(default_factory=list)
+    cortexdb_receipt: CortexDBReceipt | None = None
+    cortexdb_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_before(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if not data.get("lineage_id") and data.get("id"):
+            data["lineage_id"] = data["id"]
+        if not data.get("id") and data.get("lineage_id"):
+            data["id"] = data["lineage_id"]
+        if "current_stage" in data:
+            data["current_stage"] = _normalize_stage(data["current_stage"])
+        return data
+
+    @field_validator("current_stage", mode="before")
+    @classmethod
+    def _canonical_current_stage(cls, value: Any) -> str:
+        return _normalize_stage(value)
+
+    @model_validator(mode="after")
+    def _enforce_receipt_rule(self) -> "ThoughtRecord":
+        if not self.id:
+            self.id = self.lineage_id
+        if self.disposition != "imported":
+            self.cortexdb_receipt = None
+            self.cortexdb_id = None
+            extra = getattr(self, "__pydantic_extra__", None)
+            if isinstance(extra, dict):
+                extra.pop("cortexdb_receipt", None)
+                extra.pop("cortexdb_id", None)
+        elif self.cortexdb_id is None and self.cortexdb_receipt and self.cortexdb_receipt.id:
+            self.cortexdb_id = self.cortexdb_receipt.id
+        return self
+
+
+class SourceUnit(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    source_type: str
+    label: str | None = None
+    subtitle: str | None = None
+    source_ref: dict[str, Any] | None = None
+    occurred_at: str | None = None
+    processed_at: str | None = None
+    thoughts: list[ThoughtRecord] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_before(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if data.get("thoughts") is None:
+            data["thoughts"] = []
+        if "source_ref" in data:
+            data["source_ref"] = _sanitize_source_ref(data.get("source_ref"))
+        return data
+
+
+class Snapshot(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: Literal[1]
+    generated_at: str | None = None
+    ingestion_run_id: str | None = None
+    producer: ProducerInfo | None = None
+    source_types: list[SourceType] = Field(default_factory=list)
+    source_units: list[SourceUnit] = Field(default_factory=list)
+
+
+class ThoughtCard(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    source_unit_id: str
+    lineage_id: str
+    candidate_id: str | None = None
+    title: str | None = None
+    summary: str | None = None
+    current_stage: StageId
+    disposition: Disposition
+    needs_review: bool | None = None
+    topics: list[str] = Field(default_factory=list)
+    confidence: float | None = None
+    stopped_reason: str | None = None
+    matched_memory_id: str | None = None
+    cortexdb_id: str | None = None
+
+    @field_validator("current_stage", mode="before")
+    @classmethod
+    def _canonical_current_stage(cls, value: Any) -> str:
+        return _normalize_stage(value)
+
+    @model_validator(mode="after")
+    def _enforce_card_receipt_rule(self) -> "ThoughtCard":
+        if self.disposition != "imported":
+            self.cortexdb_id = None
+        return self
+
+
+class ThoughtDetail(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    lineage_id: str
+    candidate_id: str | None = None
+    title: str | None = None
+    summary: str | None = None
+    current_stage: StageId
+    disposition: Disposition
+    needs_review: bool | None = None
+    topics: list[str] = Field(default_factory=list)
+    confidence: float | None = None
+    source_snippet: str | None = None
+    raw_text: str | None = None
+    quote: str | None = None
+    final_memory_text: str | None = None
+    stopped_reason: str | None = None
+    matched_memory_id: str | None = None
+    source_unit: dict[str, Any]
+    stages: list[StageRecord]
+    related_memories: list[RelatedMemory] = Field(default_factory=list)
+    cortexdb_receipt: CortexDBReceipt | None = None
+    cortexdb_id: str | None = None
+
+    @field_validator("current_stage", mode="before")
+    @classmethod
+    def _canonical_current_stage(cls, value: Any) -> str:
+        return _normalize_stage(value)
+
+    @model_validator(mode="after")
+    def _enforce_detail_receipt_rule(self) -> "ThoughtDetail":
+        if self.disposition != "imported":
+            self.cortexdb_receipt = None
+            self.cortexdb_id = None
+            extra = getattr(self, "__pydantic_extra__", None)
+            if isinstance(extra, dict):
+                extra.pop("cortexdb_receipt", None)
+                extra.pop("cortexdb_id", None)
+        elif self.cortexdb_id is None and self.cortexdb_receipt and self.cortexdb_receipt.id:
+            self.cortexdb_id = self.cortexdb_receipt.id
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Snapshot loading
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_path() -> Path:
+    return get_hermes_home() / SNAPSHOT_DIRNAME / SNAPSHOT_FILENAME
+
+
+def _sample_snapshot() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "generated_at": "1970-01-01T00:00:00Z",
+        "ingestion_run_id": "sample",
+        "producer": {
+            "kind": "sample",
+            "adapter": "sample",
+            "source_type": "transcripts",
+            "run_root_label": "sample",
+            "artifacts": [],
+        },
+        "source_types": [{"id": "transcripts", "label": "Transcripts", "count": 0}],
+        "source_units": [],
+    }
+
+
+def _read_snapshot_dict() -> dict[str, Any]:
+    path = _snapshot_path()
+    if not path.exists():
+        return _sample_snapshot()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return _sample_snapshot()
+    return payload if isinstance(payload, dict) else _sample_snapshot()
+
+
+def _load_snapshot() -> Snapshot:
+    clean = _sanitize_snapshot(_read_snapshot_dict())
+    if not clean:
+        clean = _sample_snapshot()
+    return Snapshot.model_validate(clean)
+
+
+# ---------------------------------------------------------------------------
+# Board/detail helpers
+# ---------------------------------------------------------------------------
+
+
+def _model_dump(value: Any) -> dict[str, Any]:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, dict):
+        return copy.deepcopy(value)
+    return {}
+
+
+def _receipt_id(thought: dict[str, Any]) -> str | None:
+    if thought.get("disposition") != "imported":
+        return None
+    if thought.get("cortexdb_id"):
+        return str(thought["cortexdb_id"])
+    receipt = thought.get("cortexdb_receipt")
+    if isinstance(receipt, dict) and receipt.get("id"):
+        return str(receipt["id"])
+    return None
+
+
+def _card(thought: Any, source_unit_id: str) -> dict[str, Any]:
+    t = _model_dump(thought)
+    lineage_id = str(t.get("lineage_id") or t.get("id") or "")
+    disposition = str(t.get("disposition") or "in_progress")
+    card: dict[str, Any] = {
+        "id": lineage_id,
+        "source_unit_id": source_unit_id,
+        "lineage_id": lineage_id,
+        "candidate_id": t.get("candidate_id"),
+        "title": t.get("title"),
+        "summary": t.get("summary"),
+        "current_stage": _normalize_stage(t.get("current_stage") or "extracted"),
+        "disposition": disposition,
+        "needs_review": t.get("needs_review"),
+        "topics": t.get("topics") or [],
+        "confidence": t.get("confidence"),
+        "stopped_reason": t.get("stopped_reason"),
+        "matched_memory_id": t.get("matched_memory_id"),
+    }
+    cortexdb_id = _receipt_id(t)
+    if cortexdb_id:
+        card["cortexdb_id"] = cortexdb_id
+    return ThoughtCard.model_validate(card).model_dump(mode="json", exclude_none=True)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _source_unit_summary(source_unit: Any) -> dict[str, Any]:
+    su = _model_dump(source_unit)
+    summary: dict[str, Any] = {
+        "id": su.get("id"),
+        "source_type": su.get("source_type"),
+        "label": su.get("label"),
+        "subtitle": su.get("subtitle"),
+        "occurred_at": su.get("occurred_at"),
+        "processed_at": su.get("processed_at"),
+        "source_ref": su.get("source_ref") or None,
+    }
+    return {key: value for key, value in summary.items() if value is not None}
+
+
+def _blank_counts() -> dict[str, int]:
+    counts: dict[str, int] = {
+        "source_units": 0,
+        "thoughts": 0,
+        "imported": 0,
+        "stopped": 0,
+        "needs_review": 0,
+        "in_progress": 0,
+        "zero_thoughts": 0,
+    }
+    for stage_id in CANONICAL_STAGES:
+        counts[stage_id] = 0
+    return counts
+
+
+def _count_thought(counts: dict[str, int], thought: dict[str, Any]) -> None:
+    counts["thoughts"] += 1
+    stage_id = _normalize_stage(thought.get("current_stage") or "extracted")
+    if stage_id in CANONICAL_STAGES:
+        counts[stage_id] += 1
+    disposition = str(thought.get("disposition") or "in_progress")
+    if disposition == "imported":
+        counts["imported"] += 1
+    elif disposition == "stopped":
+        counts["stopped"] += 1
+    elif disposition == "needs_review":
+        counts["needs_review"] += 1
+    elif disposition == "in_progress":
+        counts["in_progress"] += 1
+    if thought.get("needs_review") is True and disposition != "needs_review":
+        counts["needs_review"] += 1
+
+
+def _counts_for_units(units: list[SourceUnit]) -> dict[str, int]:
+    counts = _blank_counts()
+    counts["source_units"] = len(units)
+    for source_unit in units:
+        thoughts = [_model_dump(thought) for thought in source_unit.thoughts]
+        if not thoughts:
+            counts["zero_thoughts"] += 1
+        for thought in thoughts:
+            _count_thought(counts, thought)
+    return counts
+
+
+def _counts_for_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = _blank_counts()
+    counts["source_units"] = len(rows)
+    for row in rows:
+        visible_cards = [card for cards in row["columns"].values() for card in cards]
+        if not visible_cards and row.get("thought_count", 0) == 0:
+            counts["zero_thoughts"] += 1
+        for card in visible_cards:
+            _count_thought(counts, card)
+    return counts
+
+
+def _matches_filter(thought: dict[str, Any], filter_value: str) -> bool:
+    if filter_value == "all":
+        return True
+    disposition = str(thought.get("disposition") or "in_progress")
+    if filter_value == "review_needed":
+        filter_value = "needs_review"
+    if filter_value == "needs_review":
+        return disposition == "needs_review" or thought.get("needs_review") is True
+    if filter_value in {"imported", "stopped", "in_progress"}:
+        return disposition == filter_value
+    return True
+
+
+def _flatten_search_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (int, float, bool)):
+        return [str(value)]
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for item in value.values():
+            parts.extend(_flatten_search_values(item))
+        return parts
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            parts.extend(_flatten_search_values(item))
+        return parts
+    return []
+
+
+_BOARD_CARD_SEARCH_FIELDS: tuple[str, ...] = (
+    "id",
+    "lineage_id",
+    "candidate_id",
+    "title",
+    "summary",
+    "current_stage",
+    "disposition",
+    "topics",
+    "stopped_reason",
+    "matched_memory_id",
+    "cortexdb_id",
+    "final_memory_text",
+)
+
+
+def _matches_search(thought: dict[str, Any], query: str | None) -> bool:
+    if not query or not query.strip():
+        return True
+    # Board search controls which *cards* are visible.  Source-unit labels,
+    # dates, IDs, and other row metadata must not make every card in a matching
+    # row visible for a non-empty query.
+    haystack_parts: list[str] = []
+    for field in _BOARD_CARD_SEARCH_FIELDS:
+        haystack_parts.extend(_flatten_search_values(thought.get(field)))
+    haystack = "\n".join(haystack_parts).lower()
+    return query.strip().lower() in haystack
+
+
+def _stage_timeline(thought: dict[str, Any]) -> list[dict[str, Any]]:
+    current_stage = _normalize_stage(thought.get("current_stage") or "extracted")
+    disposition = str(thought.get("disposition") or "in_progress")
+    needs_review = thought.get("needs_review") is True or disposition == "needs_review"
+    try:
+        current_idx = CANONICAL_STAGES.index(current_stage)
+    except ValueError:
+        current_idx = 0
+
+    provided: dict[str, dict[str, Any]] = {}
+    for raw_stage in thought.get("stages") or []:
+        if not isinstance(raw_stage, dict):
+            continue
+        stage_id = _normalize_stage(raw_stage.get("id"))
+        if stage_id in CANONICAL_STAGES:
+            item = dict(raw_stage)
+            item["id"] = stage_id
+            item["label"] = _stage_label(stage_id)
+            provided[stage_id] = item
+
+    timeline: list[dict[str, Any]] = []
+    for idx, stage_id in enumerate(CANONICAL_STAGES):
+        if disposition == "imported":
+            status: str = "complete"
+        elif disposition == "stopped" and idx > current_idx:
+            status = "not_reached"
+        elif needs_review and idx == current_idx:
+            status = "review_needed"
+        elif idx < current_idx:
+            status = "complete"
+        elif idx == current_idx:
+            status = "current"
+        else:
+            status = "pending"
+
+        item = {"id": stage_id, "label": _stage_label(stage_id), "status": status}
+        if stage_id in provided:
+            # Preserve producer-provided safe metadata, but keep canonical ID and
+            # label.  For stopped thoughts, later stages must remain not_reached.
+            merged = {**provided[stage_id], **item}
+            if disposition != "stopped" or idx <= current_idx:
+                merged["status"] = provided[stage_id].get("status", status)
+            item = merged
+        timeline.append(StageRecord.model_validate(item).model_dump(mode="json", exclude_none=True))
+    return timeline
+
+
+def _thought_detail(thought: ThoughtRecord, source_unit: SourceUnit) -> dict[str, Any]:
+    t = thought.model_dump(mode="json", exclude_none=True)
+    if t.get("disposition") != "imported":
+        t.pop("cortexdb_receipt", None)
+        t.pop("cortexdb_id", None)
+    elif _receipt_id(t):
+        t["cortexdb_id"] = _receipt_id(t)
+    t["source_unit"] = _source_unit_summary(source_unit)
+    t["stages"] = _stage_timeline(t)
+    return ThoughtDetail.model_validate(t).model_dump(mode="json", exclude_none=True)
+
+
+def _default_source_type(snapshot: Snapshot) -> str:
+    source_types = [source_type.id for source_type in snapshot.source_types]
+    if "transcripts" in source_types:
+        return "transcripts"
+    if source_types:
+        return source_types[0]
+    unit_types = [source_unit.source_type for source_unit in snapshot.source_units]
+    if "transcripts" in unit_types:
+        return "transcripts"
+    return unit_types[0] if unit_types else "transcripts"
+
+
+def _source_types_payload(snapshot: Snapshot) -> list[dict[str, Any]]:
+    if snapshot.source_types:
+        return [source_type.model_dump(mode="json", exclude_none=True) for source_type in snapshot.source_types]
+
+    counts: dict[str, int] = {}
+    for source_unit in snapshot.source_units:
+        counts[source_unit.source_type] = counts.get(source_unit.source_type, 0) + 1
+    return [
+        {"id": source_type, "label": source_type.replace("_", " ").title(), "count": count}
+        for source_type, count in sorted(counts.items())
+    ]
+
+
+def _row_base(source_unit: SourceUnit) -> dict[str, Any]:
+    thoughts = [_model_dump(thought) for thought in source_unit.thoughts]
+    stopped_count = sum(1 for thought in thoughts if thought.get("disposition") == "stopped")
+    row = {
+        **_source_unit_summary(source_unit),
+        "thought_count": len(thoughts),
+        "stopped_count": stopped_count,
+        "columns": _empty_columns(),
+    }
+    return row
+
+
+def _sort_rows(rows: list[dict[str, Any]], sort_value: str) -> list[dict[str, Any]]:
+    if sort_value == "default":
+        return rows
+
+    def timestamp(row: dict[str, Any]) -> float | None:
+        dt = _parse_datetime(row.get("occurred_at") or row.get("processed_at"))
+        return dt.timestamp() if dt else None
+
+    def timestamp_or(row: dict[str, Any], fallback: float) -> float:
+        value = timestamp(row)
+        return value if value is not None else fallback
+
+    if sort_value == "newest":
+        rows.sort(key=lambda row: timestamp_or(row, -math.inf), reverse=True)
+    elif sort_value == "oldest":
+        rows.sort(key=lambda row: timestamp_or(row, math.inf))
+    elif sort_value == "most_thoughts":
+        rows.sort(key=lambda row: row.get("thought_count", 0), reverse=True)
+    elif sort_value == "most_stopped":
+        rows.sort(key=lambda row: row.get("stopped_count", 0), reverse=True)
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# API routes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/source-types")
+def source_types() -> dict[str, Any]:
+    snapshot = _load_snapshot()
+    source_types_payload = _source_types_payload(snapshot)
+    return {
+        "default_source_type": _default_source_type(snapshot),
+        "source_types": source_types_payload,
+        "generated_at": snapshot.generated_at,
+        "ingestion_run_id": snapshot.ingestion_run_id,
+    }
+
+
+@router.get("/board")
+def board(
+    source_type: str | None = None,
+    filter_value: str | None = Query(default=None, alias="filter"),
+    sort: str | None = None,
+    search: str | None = None,
+) -> dict[str, Any]:
+    snapshot = _load_snapshot()
+    selected_source_type = source_type or _default_source_type(snapshot)
+
+    normalized_filter = (filter_value or "all").strip().lower()
+    normalized_sort = (sort or "default").strip().lower()
+    if normalized_filter not in _ALLOWED_FILTERS:
+        raise HTTPException(status_code=400, detail=f"Unknown filter: {filter_value}")
+    if normalized_sort not in _ALLOWED_SORTS:
+        raise HTTPException(status_code=400, detail=f"Unknown sort: {sort}")
+
+    units = [unit for unit in snapshot.source_units if unit.source_type == selected_source_type]
+    total_counts = _counts_for_units(units)
+
+    rows: list[dict[str, Any]] = []
+    search_query = search.strip() if isinstance(search, str) else None
+    for source_unit in units:
+        all_thoughts = list(source_unit.thoughts)
+        row = _row_base(source_unit)
+
+        if normalized_filter == "zero_thoughts":
+            if all_thoughts:
+                continue
+            # With no cards to search, zero-thought rows only match an empty
+            # query.  This keeps search/filter behavior card-level.
+            if search_query:
+                continue
+            rows.append(row)
+            continue
+
+        visible_thoughts: list[ThoughtRecord] = []
+        for thought in all_thoughts:
+            thought_dict = thought.model_dump(mode="json", exclude_none=True)
+            if not _matches_filter(thought_dict, normalized_filter):
+                continue
+            if not _matches_search(thought_dict, search_query):
+                continue
+            visible_thoughts.append(thought)
+
+        if not visible_thoughts:
+            if all_thoughts or normalized_filter != "all" or search_query:
+                continue
+            rows.append(row)
+            continue
+
+        for thought in visible_thoughts:
+            card = _card(thought, source_unit.id)
+            stage_id = card["current_stage"]
+            row["columns"].setdefault(stage_id, []).append(card)
+        rows.append(row)
+
+    rows = _sort_rows(rows, normalized_sort)
+    visible_counts = _counts_for_rows(rows)
+    columns = [{"id": stage_id, "label": _stage_label(stage_id)} for stage_id in CANONICAL_STAGES]
+
+    return {
+        "schema_version": snapshot.schema_version,
+        "generated_at": snapshot.generated_at,
+        "ingestion_run_id": snapshot.ingestion_run_id,
+        "source_type": selected_source_type,
+        "columns": columns,
+        "rows": rows,
+        "total_counts": total_counts,
+        "visible_counts": visible_counts,
+        "metrics": total_counts,
+        "filter": normalized_filter,
+        "sort": normalized_sort,
+        "search": search_query or "",
+    }
+
+
+@router.get("/source-units/{source_unit_id}/thoughts/{lineage_id}")
+def thought_detail(source_unit_id: str, lineage_id: str) -> dict[str, Any]:
+    snapshot = _load_snapshot()
+    for source_unit in snapshot.source_units:
+        if source_unit.id != source_unit_id:
+            continue
+        for thought in source_unit.thoughts:
+            if thought.lineage_id == lineage_id:
+                return {"thought": _thought_detail(thought, source_unit)}
+        raise HTTPException(status_code=404, detail="Thought not found")
+    raise HTTPException(status_code=404, detail="Source unit not found")

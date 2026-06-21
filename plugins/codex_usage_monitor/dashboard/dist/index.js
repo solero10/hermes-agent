@@ -94,6 +94,18 @@
     return minutes + "m left";
   }
 
+  function formatCooldownDuration(seconds) {
+    const value = toNumber(seconds);
+    if (value === null) return null;
+    const totalMinutes = Math.max(0, Math.round(value / 60));
+    const days = Math.floor(totalMinutes / (24 * 60));
+    const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+    const minutes = totalMinutes % 60;
+    if (days > 0) return days + "d " + hours + "h";
+    if (hours > 0) return hours + "h " + minutes + "m";
+    return minutes + "m";
+  }
+
   function formatReset(windowData, title) {
     if (!windowData) return "reset time unavailable";
     const seconds = secondsLeft(windowData);
@@ -443,26 +455,83 @@
     );
   }
 
+  function isAccountExhausted(account) {
+    if (!account) return false;
+    if (account.is_exhausted || account.auth_exhausted || account.window_exhausted) return true;
+    const status = String(account.auth_status || account.status || "").toLowerCase();
+    if (status === "exhausted" || status === "skipped") return true;
+    const windows = account.windows || {};
+    return Object.keys(windows).some(function (key) {
+      const windowData = windows[key];
+      const remaining = toPercent(windowData && windowData.remaining_percent);
+      const left = secondsLeft(windowData);
+      return remaining !== null && remaining <= 0 && (left === null || left > 0);
+    });
+  }
+
+  function exhaustedReasonForAccount(account) {
+    if (!account) return "Exhausted";
+    if (account.exhausted_reason) return String(account.exhausted_reason);
+    if (Array.isArray(account.exhausted_windows) && account.exhausted_windows.length > 0) {
+      return account.exhausted_windows.map(function (item) { return item && item.label ? item.label : null; }).filter(Boolean).join(" + ") + " exhausted";
+    }
+    return "Exhausted";
+  }
+
+  function cooldownInfoForAccount(account) {
+    if (!account) return null;
+    let seconds = toNumber(account.cooldown_seconds_left);
+    const resetAt = account.cooldown_reset_at || account.auth_exhausted_until || account.exhausted_until;
+    const resetLocal = account.cooldown_reset_at_local || account.auth_exhausted_until || account.exhausted_until;
+    if (seconds === null) {
+      const resetDate = parseDate(resetAt);
+      if (resetDate) seconds = Math.max(0, (resetDate.getTime() - Date.now()) / 1000);
+    }
+    const remainingText = seconds === null ? null : formatCooldownDuration(seconds);
+    const resetText = resetLocal || formatDateTime(resetAt);
+    if (!remainingText && !resetText) return null;
+    return { remainingText: remainingText, resetText: resetText };
+  }
+
+  function CooldownNotice(props) {
+    const info = cooldownInfoForAccount(props.account);
+    if (!info) {
+      return h("div", { className: "codex-usage-cooldown" },
+        h("span", { className: "codex-usage-cooldown-label" }, "Cooldown timing unavailable")
+      );
+    }
+    return h("div", { className: "codex-usage-cooldown" },
+      h("span", { className: "codex-usage-cooldown-label" }, "Cooldown ends in"),
+      h("span", { className: "codex-usage-cooldown-value" }, info.remainingText || "—"),
+      info.resetText ? h("span", { className: "codex-usage-cooldown-reset" }, "resets " + info.resetText) : null
+    );
+  }
+
   function AccountCard(props) {
     const account = props.account || {};
     const windows = account.windows || {};
-    const accent = colorForAccount(account, props.index || 0);
+    const exhausted = isAccountExhausted(account);
+    const accent = exhausted ? "#94a3b8" : colorForAccount(account, props.index || 0);
     const label = account.label || account.stored_label || account.id || "Codex account";
     const planLabel = planLabelForAccount(account);
     const drop = toPercent(account.active_drop_percent);
     const activeText = drop === null ? "recent quota drop" : "recent quota drop · " + formatPercent(drop);
+    const cardClass = "codex-usage-card" + (exhausted ? " codex-usage-card-exhausted" : "");
+    const helperText = exhausted ? exhaustedReasonForAccount(account) : "Remaining usage since first sample";
 
-    return h(Card, { className: "codex-usage-card", style: { "--codex-account-accent": accent } },
+    return h(Card, { className: cardClass, "data-exhausted": exhausted ? "true" : "false", style: { "--codex-account-accent": accent } },
       h(CardContent, { className: "codex-usage-card-content" },
         h("div", { className: "codex-usage-account-head" },
           h("div", { className: "codex-usage-account-title" },
             h("span", { className: "codex-usage-dot", "aria-hidden": "true" }),
             h("span", { className: "codex-usage-account-label" }, label),
-            h("span", { className: "codex-usage-plan-badge" }, planLabel)
+            h("span", { className: "codex-usage-plan-badge" }, planLabel),
+            exhausted ? h("span", { className: "codex-usage-exhausted-badge" }, "Exhausted") : null
           ),
-          account.active_now ? h("div", { className: "codex-usage-active" }, activeText) : null
+          account.active_now && !exhausted ? h("div", { className: "codex-usage-active" }, activeText) : null
         ),
-        h("div", { className: "codex-usage-helper" }, "Remaining usage since first sample"),
+        h("div", { className: "codex-usage-helper" }, helperText),
+        exhausted ? h(CooldownNotice, { account: account }) : null,
         account.error ? h("div", { className: "codex-usage-account-error" }, String(account.error)) : null,
         h(WindowMetric, { title: "5-hour", windowData: windows.five_hour }),
         h(WindowMetric, { title: "Weekly", windowData: windows.weekly }),
