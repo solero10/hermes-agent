@@ -67,6 +67,29 @@
     return text.replace(/\b\w/g, function (char) { return char.toUpperCase(); });
   }
 
+  function stopCodeLabel(value) {
+    const slug = String(value || "").replace(/\s+/g, "_").replace(/-/g, "_").toLowerCase();
+    if (!slug) return "";
+    if (slug === "duplicate") return "Duplicate";
+    if (slug === "reference_merge" || slug === "reference/merge") return "Reference / merge";
+    if (slug === "policy") return "Policy stop";
+    if (slug === "obsolete") return "Obsolete";
+    if (slug === "non_thought") return "Not a thought";
+    if (slug === "needs_review") return "Needs review";
+    if (slug === "other") return "Stopped";
+    return slug.replace(/_/g, " ").replace(/\b\w/g, function (char) { return char.toUpperCase(); });
+  }
+
+  function stopTargetText(thought) {
+    if (!thought || !thought.stop_target_label) return "";
+    const label = safeText(thought.stop_target_label, "");
+    if (!label || label === "—") return "";
+    const slug = String(thought.stop_code || "").toLowerCase();
+    if (slug === "duplicate") return "Duplicate of " + label;
+    if (slug === "reference_merge") return "Merged into " + label;
+    return label;
+  }
+
   function countOf(counts, key) {
     const value = counts && counts[key];
     return Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -331,10 +354,14 @@
   function ThoughtCard(props) {
     const card = props.card || {};
     const disposition = card.disposition || "in_progress";
+    const stopCode = disposition === "stopped" ? stopCodeLabel(card.stop_code) : "";
     return h("article", { className: cx("ob-thought-card", "ob-thought-card--" + stageSlug(disposition), stageClass(card.current_stage)) },
       h("div", { className: "ob-card-head" },
         h("h3", null, safeText(card.title || card.summary || card.lineage_id, "Untitled thought")),
-        h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(disposition)) }, dispositionLabel(disposition))
+        h("div", { className: "ob-card-badges" },
+          h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(disposition)) }, dispositionLabel(disposition)),
+          stopCode ? h("span", { className: cx("ob-badge", "ob-badge--stopped") }, stopCode) : null
+        )
       ),
       card.summary ? h("p", { className: "ob-card-summary" }, card.summary) : null,
       h("dl", { className: "ob-card-meta" },
@@ -346,6 +373,7 @@
         return h("span", { key: topic, className: "ob-topic" }, topic);
       })) : null,
       card.stopped_reason ? h("p", { className: "ob-card-reason" }, "Stopped: ", card.stopped_reason) : null,
+      card.stop_target_label ? h("p", { className: "ob-card-reason" }, stopTargetText(card)) : null,
       card.cortexdb_id ? h("p", { className: "ob-card-receipt" }, "CortexDB receipt: ", card.cortexdb_id) : null,
       h("button", {
         type: "button",
@@ -428,6 +456,9 @@
         h(ReadOnlyButton, null, "Copy merge note")
       ),
       h("dl", { className: "ob-detail-list" },
+        h("div", null, h("dt", null, "Stop code"), h("dd", null, safeText(stopCodeLabel(thought.stop_code), "Stopped"))),
+        thought.stop_target_label ? h("div", null, h("dt", null, "Stop target"), h("dd", null, stopTargetText(thought))) : null,
+        thought.stop_stage_id ? h("div", null, h("dt", null, "Stop stage"), h("dd", null, stageLabel(thought.stop_stage_id))) : null,
         h("div", null, h("dt", null, "Stopped reason"), h("dd", null, safeText(thought.stopped_reason, "No stopped reason supplied"))),
         h("div", null, h("dt", null, "Matched memory"), h("dd", null, safeText(thought.matched_memory_id)))
       ),
@@ -491,6 +522,7 @@
           h("div", { className: "ob-detail-summary" },
             h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(thought.disposition)) }, dispositionLabel(thought.disposition)),
             h("span", { className: cx("ob-badge", stageClass(thought.current_stage)) }, stageLabel(thought.current_stage)),
+            thought.disposition === "stopped" && stopCodeLabel(thought.stop_code) ? h("span", { className: cx("ob-badge", "ob-badge--stopped") }, stopCodeLabel(thought.stop_code)) : null,
             h("span", { className: "ob-ready-label" }, "Ready for CortexDB")
           ),
           h(DetailIDs, { thought: thought }),

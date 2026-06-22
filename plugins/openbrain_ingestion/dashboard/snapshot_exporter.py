@@ -186,6 +186,7 @@ def build_snapshot_from_panning_run(
     inventory_index = _RecordIndex(inventory)
     dedupe_index = _RecordIndex(dedupe_receipts)
     audit_index = _RecordIndex(capture_audit)
+    capture_candidate_index = _RecordIndex(capture_candidates)
 
     for candidate in capture_candidates:
         source_id = _candidate_source_id(candidate, inventory_index, dedupe_index, audit_index)
@@ -205,6 +206,27 @@ def build_snapshot_from_panning_run(
             inventory_index=inventory_index,
             dedupe_index=dedupe_index,
             audit_index=audit_index,
+            ingestion_run_id=ingestion_run_id,
+            generated_at=generated_at_value,
+        )
+        if thought:
+            source_unit.setdefault("thoughts", []).append(thought)
+
+    for record in inventory:
+        source_id = _string_or_none(_dig(record, "source_id"))
+        if not source_id:
+            continue
+        source_unit = source_units_by_source_id.get(source_id)
+        if source_unit is None:
+            continue
+        candidate_id = _string_or_none(_dig(record, "candidate_id") or _dig(record, "id"))
+        fingerprint = _string_or_none(_dig(record, "content_fingerprint") or _dig(record, "fingerprint"))
+        if capture_candidate_index.find(source_id=source_id, candidate_id=candidate_id, fingerprint=fingerprint):
+            continue
+        thought = _stopped_thought_from_inventory(
+            record=record,
+            source_id=source_id,
+            source_unit_id=str(source_unit["id"]),
             ingestion_run_id=ingestion_run_id,
             generated_at=generated_at_value,
         )
@@ -506,8 +528,13 @@ def _thought_from_candidate(
             thought["related_memories"] = related
             if related[0].get("id"):
                 thought["matched_memory_id"] = related[0]["id"]
+                thought["stop_target_id"] = related[0]["id"]
+            if related[0].get("title"):
+                thought["stop_target_label"] = related[0]["title"]
         stopped_reason = _string_or_none(_dig(dedupe, "reason") or _dig(dedupe, "stopped_reason"))
         thought["stopped_reason"] = stopped_reason or "merged_exact duplicate"
+        thought["stop_code"] = "duplicate"
+        thought["stop_stage_id"] = "deduped"
 
     if imported:
         receipt = _receipt_from_audit(
@@ -525,6 +552,86 @@ def _thought_from_candidate(
         if related:
             thought["related_memories"] = related
 
+    thought = {key: value for key, value in thought.items() if value is not None and value != []}
+    return _normalize_thought(thought)
+
+
+def _inventory_is_stopped(record: dict[str, Any]) -> bool:
+    return str(_dig(record, "final_capture_action") or "").strip().lower() == "not_applicable"
+
+
+def _inventory_stop_metadata(record: dict[str, Any]) -> tuple[str, str]:
+    parts = [
+        _string_or_none(_dig(record, "verdict")),
+        _string_or_none(_dig(record, "metadata", "historical_archive", "historical_verdict")),
+        _string_or_none(_dig(record, "metadata", "historical_archive", "historical_memory_type")),
+        _string_or_none(_dig(record, "dedupe", "decision")),
+        _string_or_none(_dig(record, "dedupe", "capture_action")),
+        _string_or_none(_dig(record, "capture_content")),
+    ]
+    normalized = " ".join(part for part in parts if part).lower().replace("-", "_").replace(" ", "_")
+    if "obsolete" in normalized:
+        return "obsolete", "policy"
+    if "reference_or_merge" in normalized or "reference_merge" in normalized or "reference / merge" in normalized or "reference" in normalized:
+        return "reference_merge", "policy"
+    if "duplicate" in normalized or "merged" in normalized:
+        return "duplicate", "deduped"
+    if "policy" in normalized:
+        return "policy", "policy"
+    if "non_thought" in normalized or "not_a_thought" in normalized:
+        return "non_thought", "extracted"
+    return "other", "deduped"
+
+
+def _stopped_thought_from_inventory(
+    *,
+    record: dict[str, Any],
+    source_id: str,
+    source_unit_id: str,
+    ingestion_run_id: str,
+    generated_at: str,
+) -> dict[str, Any] | None:
+    candidate_id = _string_or_none(_dig(record, "candidate_id") or _dig(record, "id"))
+    fingerprint = _string_or_none(_dig(record, "content_fingerprint") or _dig(record, "fingerprint"))
+    lineage_id = _lineage_id(source_id=source_id, candidate_id=candidate_id, fingerprint=fingerprint, inventory=record)
+    stop_code, current_stage = _inventory_stop_metadata(record)
+
+    related = _related_memories(record)
+    stop_target_id = None
+    stop_target_label = None
+    if related:
+        stop_target_id = _string_or_none(related[0].get("id"))
+        stop_target_label = _string_or_none(related[0].get("title"))
+
+    thought: dict[str, Any] = {
+        "id": lineage_id,
+        "lineage_id": lineage_id,
+        "candidate_id": candidate_id,
+        "title": _string_or_none(_dig(record, "title") or _dig(record, "idea") or _dig(record, "capture_content")),
+        "summary": _string_or_none(_dig(record, "reason") or _dig(record, "capture_content")),
+        "current_stage": current_stage,
+        "stop_stage_id": current_stage,
+        "disposition": "stopped",
+        "stop_code": stop_code,
+        "stop_target_id": stop_target_id,
+        "stop_target_label": stop_target_label,
+        "needs_review": False,
+        "topics": _list_of_strings(_dig(record, "topics") or _dig(record, "connections")),
+        "confidence": _number_or_none(_dig(record, "confidence") or _dig(record, "score")),
+        "source_snippet": _string_or_none(
+            _dig(record, "evidence_quote")
+            or _dig(record, "source_snippet")
+            or _dig(record, "capture_content")
+        ),
+        "final_memory_text": _string_or_none(
+            _dig(record, "final_memory_text") or _dig(record, "idea") or _dig(record, "title")
+        ),
+        "stopped_reason": _string_or_none(_dig(record, "reason") or _dig(record, "capture_content")),
+        "matched_memory_id": stop_target_id,
+        "content_fingerprint": fingerprint,
+    }
+    if not _inventory_is_stopped(record):
+        return None
     thought = {key: value for key, value in thought.items() if value is not None and value != []}
     return _normalize_thought(thought)
 

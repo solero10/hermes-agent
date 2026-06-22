@@ -42,9 +42,9 @@ def _load_exporter():
     )
 
 
-def _snapshot(exporter):
+def _snapshot(exporter, run_root=FIXTURE_RUN_ROOT):
     return exporter.build_snapshot_from_panning_run(
-        run_root=FIXTURE_RUN_ROOT,
+        run_root=run_root,
         source_type="transcripts",
         adapter="otter_package",
         generated_at="2026-06-21T04:39:54Z",
@@ -134,6 +134,111 @@ def test_imported_duplicate_and_derived_lineage_rows_map_correctly_without_sqlit
     assert pending["lineage_id"].startswith("lineage-")
     assert pending["current_stage"] == "ready_for_cortexdb"
     assert pending["disposition"] == "in_progress"
+
+
+def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, monkeypatch):
+    exporter = _load_exporter()
+    api = _load_plugin_api()
+    run_root = tmp_path / "stopped-run"
+    shutil.copytree(FIXTURE_RUN_ROOT, run_root)
+
+    inventory_path = run_root / "inventory.jsonl"
+    inventory_rows = inventory_path.read_text(encoding="utf-8").splitlines()
+    inventory_rows.extend(
+        [
+            json.dumps(
+                {
+                    "source_id": "otter-package:transcript-001",
+                    "candidate_id": "cand_004_reference_merge",
+                    "thread_id": "thread_reference_merge",
+                    "content_fingerprint": "sha256:fp_reference_004",
+                    "capture_content": "REFERENCE / MERGE: Historical background on patient coordination.",
+                    "capture_recommendation": False,
+                    "final_capture_action": "not_applicable",
+                    "verdict": "REFERENCE / MERGE",
+                    "reason": "Historical background that should be merged into a source summary instead of stored as a separate thought.",
+                    "title": "Historical background on patient coordination",
+                    "idea": "Ken uses patient advocacy to navigate healthcare systems.",
+                    "topics": ["healthcare advocacy"],
+                    "connections": ["healthcare advocacy"],
+                    "metadata": {
+                        "historical_archive": {
+                            "historical_memory_type": "reference_or_merge",
+                            "historical_verdict": "REFERENCE / MERGE",
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "source_id": "otter-package:transcript-003",
+                    "candidate_id": "cand_005_obsolete_skip",
+                    "thread_id": "thread_obsolete_skip",
+                    "content_fingerprint": "sha256:fp_obsolete_005",
+                    "capture_content": "OBSOLETE / SKIP: Pack the car the night before early departure.",
+                    "capture_recommendation": False,
+                    "final_capture_action": "not_applicable",
+                    "verdict": "OBSOLETE / SKIP",
+                    "reason": "Time-specific travel logistics that should not surface as a durable thought.",
+                    "title": "Pack the car the night before early departure",
+                    "idea": "Pack items into the car the night before early departure.",
+                    "topics": ["family travel logistics"],
+                    "connections": ["family travel logistics"],
+                    "metadata": {
+                        "historical_archive": {
+                            "historical_memory_type": "obsolete_or_skip",
+                            "historical_verdict": "OBSOLETE / SKIP",
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    inventory_path.write_text("\n".join(inventory_rows) + "\n", encoding="utf-8")
+
+    validated = api.Snapshot.model_validate(_snapshot(exporter, run_root=run_root)).model_dump(mode="json", exclude_none=True)
+    thoughts = {
+        thought["candidate_id"]: thought
+        for unit in validated["source_units"]
+        for thought in unit.get("thoughts", [])
+    }
+
+    reference = thoughts["cand_004_reference_merge"]
+    assert reference["disposition"] == "stopped"
+    assert reference["current_stage"] == "policy"
+    assert reference["stop_code"] == "reference_merge"
+    assert reference["stop_stage_id"] == "policy"
+    assert reference["stopped_reason"].startswith("Historical background")
+
+    obsolete = thoughts["cand_005_obsolete_skip"]
+    assert obsolete["disposition"] == "stopped"
+    assert obsolete["current_stage"] == "policy"
+    assert obsolete["stop_code"] == "obsolete"
+    assert obsolete["stop_stage_id"] == "policy"
+    assert obsolete["stopped_reason"].startswith("Time-specific travel logistics")
+
+    assert sum(len(unit.get("thoughts", [])) for unit in validated["source_units"]) == 5
+
+    hermes_home = tmp_path / ".hermes"
+    out_path = hermes_home / "openbrain-ingestion-dashboard" / "snapshot.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(validated), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    api = _load_plugin_api()
+    app = FastAPI()
+    app.include_router(api.router, prefix="/api/plugins/openbrain_ingestion")
+    client = TestClient(app)
+
+    board = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
+    assert board["total_counts"]["thoughts"] == 5
+    assert board["total_counts"]["stopped"] == 3
+    assert board["total_counts"]["deduped"] == 1
+    assert board["total_counts"]["policy"] == 2
+    stop_codes = {card.get("stop_code") for card in _all_cards(board) if card.get("stop_code")}
+    assert {"duplicate", "reference_merge", "obsolete"}.issubset(stop_codes)
 
 
 def test_exported_snapshot_is_read_by_dashboard_board_api(tmp_path, monkeypatch):

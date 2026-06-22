@@ -328,6 +328,10 @@ def test_thought_detail_stopped_duplicate_strips_receipt(client):
     assert thought["current_stage"] == "deduped"
     assert thought["stopped_reason"] == "duplicate / merged"
     assert thought["matched_memory_id"] == "thought_existing_91c"
+    assert thought["stop_code"] == "duplicate"
+    assert thought["stop_target_id"] == "thought_existing_91c"
+    assert thought["stop_target_label"] == "Start narrow"
+    assert thought["stop_stage_id"] == "deduped"
     assert "cortexdb_receipt" not in thought or thought["cortexdb_receipt"] in ({}, None)
     later = [stage for stage in thought["stages"] if stage["id"] in {"policy", "ready_for_cortexdb", "cortexdb"}]
     assert all(stage["status"] == "not_reached" for stage in later)

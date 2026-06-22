@@ -405,6 +405,13 @@
   line-height: 1.22;
 }
 
+.ob-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+  justify-content: flex-end;
+}
+
 .ob-card-summary,
 .ob-card-reason,
 .ob-card-receipt {

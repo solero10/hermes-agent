@@ -602,6 +602,10 @@ class ThoughtRecord(BaseModel):
     current_stage: StageId = "extracted"
     disposition: Disposition = "in_progress"
     needs_review: bool | None = None
+    stop_code: str | None = None
+    stop_target_id: str | None = None
+    stop_target_label: str | None = None
+    stop_stage_id: StageId | None = None
     topics: list[str] = Field(default_factory=list)
     confidence: float | None = None
     source_snippet: str | None = None
@@ -627,12 +631,50 @@ class ThoughtRecord(BaseModel):
             data["id"] = data["lineage_id"]
         if "current_stage" in data:
             data["current_stage"] = _normalize_stage(data["current_stage"])
+        if data.get("stop_stage_id") is not None:
+            data["stop_stage_id"] = _normalize_stage(data["stop_stage_id"])
+        if str(data.get("disposition") or "").strip() == "stopped":
+            stopped_reason = str(data.get("stopped_reason") or "").lower()
+            stop_code = str(data.get("stop_code") or "").strip() or None
+            if not stop_code:
+                if "duplicate" in stopped_reason or data.get("matched_memory_id"):
+                    stop_code = "duplicate"
+                elif "reference" in stopped_reason or "merge" in stopped_reason:
+                    stop_code = "reference_merge"
+                elif "obsolete" in stopped_reason or data.get("current_stage") == "policy":
+                    stop_code = "obsolete"
+                elif "policy" in stopped_reason:
+                    stop_code = "policy"
+                else:
+                    stop_code = "other"
+            data["stop_code"] = stop_code
+            if data.get("stop_stage_id") is None:
+                data["stop_stage_id"] = data.get("current_stage")
+            if data.get("stop_target_id") is None and data.get("matched_memory_id"):
+                data["stop_target_id"] = data["matched_memory_id"]
+            if data.get("stop_target_label") is None:
+                related = data.get("related_memories")
+                if isinstance(related, list) and related:
+                    first = related[0]
+                    if isinstance(first, dict):
+                        if first.get("title"):
+                            data["stop_target_label"] = first.get("title")
+                        if data.get("stop_target_id") is None and first.get("id"):
+                            data["stop_target_id"] = first.get("id")
         return data
 
     @field_validator("current_stage", mode="before")
     @classmethod
     def _canonical_current_stage(cls, value: Any) -> str:
         return _normalize_stage(value)
+
+    @field_validator("stop_stage_id", mode="before")
+    @classmethod
+    def _canonical_stop_stage(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return _normalize_stage(text) if text else None
 
     @model_validator(mode="after")
     def _enforce_receipt_rule(self) -> "ThoughtRecord":
@@ -698,6 +740,10 @@ class ThoughtCard(BaseModel):
     current_stage: StageId
     disposition: Disposition
     needs_review: bool | None = None
+    stop_code: str | None = None
+    stop_target_id: str | None = None
+    stop_target_label: str | None = None
+    stop_stage_id: StageId | None = None
     topics: list[str] = Field(default_factory=list)
     confidence: float | None = None
     stopped_reason: str | None = None
@@ -708,6 +754,14 @@ class ThoughtCard(BaseModel):
     @classmethod
     def _canonical_current_stage(cls, value: Any) -> str:
         return _normalize_stage(value)
+
+    @field_validator("stop_stage_id", mode="before")
+    @classmethod
+    def _canonical_stop_stage(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return _normalize_stage(text) if text else None
 
     @model_validator(mode="after")
     def _enforce_card_receipt_rule(self) -> "ThoughtCard":
@@ -727,6 +781,10 @@ class ThoughtDetail(BaseModel):
     current_stage: StageId
     disposition: Disposition
     needs_review: bool | None = None
+    stop_code: str | None = None
+    stop_target_id: str | None = None
+    stop_target_label: str | None = None
+    stop_stage_id: StageId | None = None
     topics: list[str] = Field(default_factory=list)
     confidence: float | None = None
     source_snippet: str | None = None
@@ -745,6 +803,14 @@ class ThoughtDetail(BaseModel):
     @classmethod
     def _canonical_current_stage(cls, value: Any) -> str:
         return _normalize_stage(value)
+
+    @field_validator("stop_stage_id", mode="before")
+    @classmethod
+    def _canonical_stop_stage(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return _normalize_stage(text) if text else None
 
     @model_validator(mode="after")
     def _enforce_detail_receipt_rule(self) -> "ThoughtDetail":
@@ -843,6 +909,10 @@ def _card(thought: Any, source_unit_id: str) -> dict[str, Any]:
         "current_stage": _normalize_stage(t.get("current_stage") or "extracted"),
         "disposition": disposition,
         "needs_review": t.get("needs_review"),
+        "stop_code": t.get("stop_code"),
+        "stop_target_id": t.get("stop_target_id"),
+        "stop_target_label": t.get("stop_target_label"),
+        "stop_stage_id": _normalize_stage(t.get("stop_stage_id")) if t.get("stop_stage_id") else None,
         "topics": t.get("topics") or [],
         "confidence": t.get("confidence"),
         "stopped_reason": t.get("stopped_reason"),
@@ -995,6 +1065,10 @@ _BOARD_CARD_SEARCH_FIELDS: tuple[str, ...] = (
     "disposition",
     "topics",
     "stopped_reason",
+    "stop_code",
+    "stop_target_id",
+    "stop_target_label",
+    "stop_stage_id",
     "matched_memory_id",
     "cortexdb_id",
     "final_memory_text",
@@ -1016,10 +1090,11 @@ def _matches_search(thought: dict[str, Any], query: str | None) -> bool:
 
 def _stage_timeline(thought: dict[str, Any]) -> list[dict[str, Any]]:
     current_stage = _normalize_stage(thought.get("current_stage") or "extracted")
+    stop_stage = _normalize_stage(thought.get("stop_stage_id") or current_stage)
     disposition = str(thought.get("disposition") or "in_progress")
     needs_review = thought.get("needs_review") is True or disposition == "needs_review"
     try:
-        current_idx = CANONICAL_STAGES.index(current_stage)
+        current_idx = CANONICAL_STAGES.index(stop_stage)
     except ValueError:
         current_idx = 0
 

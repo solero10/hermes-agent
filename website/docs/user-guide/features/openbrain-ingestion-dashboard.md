@@ -53,10 +53,11 @@ Open a card's detail dialog to see the full lineage timeline, including complete
 
 ## Stopped and not-imported cards
 
-Stopped cards are candidates that did not become CortexDB records. Common examples are duplicate/merged candidates or policy stops. Their detail dialog shows:
+Stopped cards are candidates or inventory rows that did not become CortexDB records. Duplicate stops remain in **Deduped**; reference/merge and suitability stops remain in **Policy** so the column name matches the reason. Their detail dialog shows:
 
+- a stop code label;
+- any stop target, matched, or related memory IDs;
 - the stopped reason;
-- any matched or related memory IDs;
 - the lineage timeline, with later stages marked **Not reached** when applicable.
 
 If a non-imported card reaches a later stage in the snapshot, the API intentionally strips CortexDB receipt fields unless the disposition is `imported`.
@@ -83,7 +84,7 @@ The exporter boundary is:
 Panning-for-Gold artifacts -> SnapshotV1 -> dashboard API -> read-only UI
 ```
 
-The Panning exporter converts artifacts such as `source-items.jsonl`, `inventory.jsonl`, `dedupe-receipts.jsonl`, `capture-candidates.jsonl`, `capture-audit.jsonl`, and `summary.json` into a sanitized **SnapshotV1** document. The dashboard backend validates and redacts that snapshot, normalizes stage aliases, and exposes only the source-scoped board/detail API used by the frontend.
+The Panning exporter converts artifacts such as `source-items.jsonl`, `inventory.jsonl`, `dedupe-receipts.jsonl`, `capture-candidates.jsonl`, `capture-audit.jsonl`, and `summary.json` into a sanitized **SnapshotV1** document. The dashboard backend validates and redacts that snapshot, normalizes stage aliases, surfaces inventory rows that stop before `Ready for CortexDB` as visible stopped cards, and exposes only the source-scoped board/detail API used by the frontend.
 
 The frontend does not read Panning artifacts directly and does not include adapter-specific logic. It only calls the dashboard plugin API through the Hermes plugin SDK.
 

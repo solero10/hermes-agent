@@ -79,6 +79,8 @@ def test_frontend_declares_all_required_components_before_registration():
         "ImportedReceipt",
         "StoppedReceipt",
         "RelatedMemories",
+        "stopCodeLabel",
+        "stopTargetText",
     ]
     for component in components:
         definition = f"function {component}"
@@ -135,6 +137,7 @@ def test_toolbar_accessibility_board_labels_and_read_only_placeholders_present()
 
     assert "Read-only MVP" in frontend
     assert "disabled: true" in frontend
+    assert "safeText(stopCodeLabel(card.stop_code), \"Stopped\")" not in frontend
     assert "No mutation" not in frontend  # action buttons are placeholders, not hidden mutation controls.
 
 
@@ -150,6 +153,12 @@ def test_board_detail_and_state_strings_are_present():
         "CortexDB receipt",
         "Related memories",
         "Stopped reason",
+        "Stop code",
+        "Stop target",
+        "Stop stage",
+        "Reference / merge",
+        "Duplicate of",
+        "Merged into",
         "Not reached",
         "No board data loaded",
         "No source units match this filter",
@@ -162,7 +171,7 @@ def test_board_detail_and_state_strings_are_present():
 def test_css_uses_ob_namespace_and_required_selectors():
     css = _read(FRONTEND_CSS_PATH)
 
-    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage"):
+    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges"):
         assert selector in css
     assert "ready-for-cortexdb" in css
     assert ":disabled" in css or "[disabled]" in css
