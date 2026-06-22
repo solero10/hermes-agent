@@ -72,6 +72,39 @@ _STAGE_LABELS: dict[str, str] = {
     "cortexdb": "CortexDB",
 }
 
+POLICY_STOP_DEFINITIONS: tuple[dict[str, str], ...] = (
+    {
+        "id": "needs_source_validation",
+        "label": "Needs source validation",
+        "definition": "Potentially useful, but the supporting evidence is weak, outline-only, voicemail-derived, or ambiguous. Verify against the source before capture.",
+    },
+    {
+        "id": "sensitive_detail",
+        "label": "Sensitive detail",
+        "definition": "Contains a raw private identifier, case/reference/account number, emergency/contact detail, or similar information that should stay in controlled evidence rather than general memory.",
+    },
+    {
+        "id": "stale_task",
+        "label": "Stale task",
+        "definition": "Looks like an old action item or status update. Do not store it as current memory until completion/current relevance is checked or rewritten as history.",
+    },
+    {
+        "id": "obsolete_internal",
+        "label": "Obsolete internal process",
+        "definition": "Old employer/company-specific process mechanics with no reusable lesson. Keep auditable in source artifacts, but do not capture as CortexDB memory.",
+    },
+    {
+        "id": "too_thin",
+        "label": "Too thin / missing context",
+        "definition": "Not self-contained enough to become a reliable memory: missing who/what/why, identifiers, or enough detail to avoid misleading future retrieval.",
+    },
+    {
+        "id": "no_durable_value",
+        "label": "No durable value",
+        "definition": "Purely incidental, time-specific, already-expired, or not useful enough to keep as long-term memory.",
+    },
+)
+
 _ALLOWED_FILTERS = {
     "all",
     "imported",
@@ -1222,6 +1255,7 @@ def source_types() -> dict[str, Any]:
         "source_types": source_types_payload,
         "generated_at": snapshot.generated_at,
         "ingestion_run_id": snapshot.ingestion_run_id,
+        "policy_stop_definitions": list(POLICY_STOP_DEFINITIONS),
     }
 
 
@@ -1296,6 +1330,7 @@ def board(
         "total_counts": total_counts,
         "visible_counts": visible_counts,
         "metrics": total_counts,
+        "policy_stop_definitions": list(POLICY_STOP_DEFINITIONS),
         "filter": normalized_filter,
         "sort": normalized_sort,
         "search": search_query or "",

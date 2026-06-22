@@ -53,7 +53,18 @@ Open a card's detail dialog to see the full lineage timeline, including complete
 
 ## Stopped and not-imported cards
 
-Stopped cards are candidates or inventory rows that did not become CortexDB records. Duplicate stops remain in **Deduped**; reference/merge and suitability stops remain in **Policy** so the column name matches the reason. Their detail dialog shows:
+Stopped cards are candidates or inventory rows that did not become CortexDB records. Duplicate stops remain in **Deduped**. The **Policy** column is reserved only for thoughts blocked by a clearly defined capture policy; useful historical/reference material that merely needs rewriting, merging, or semantic dedupe should remain in **Shaped**.
+
+Policy tags use this vocabulary:
+
+- **Needs source validation** — potentially useful, but the supporting evidence is weak, outline-only, voicemail-derived, or ambiguous. Verify against the source before capture.
+- **Sensitive detail** — contains a raw private identifier, case/reference/account number, emergency/contact detail, or similar information that belongs in controlled evidence rather than general memory.
+- **Stale task** — looks like an old action item or status update. Do not store it as current memory until completion/current relevance is checked or rewritten as history.
+- **Obsolete internal process** — old employer/company-specific process mechanics with no reusable lesson. Keep auditable in source artifacts, but do not capture as CortexDB memory.
+- **Too thin / missing context** — not self-contained enough to become a reliable memory: missing who/what/why, identifiers, or enough detail to avoid misleading future retrieval.
+- **No durable value** — purely incidental, time-specific, already-expired, or not useful enough to keep as long-term memory.
+
+Their detail dialog shows:
 
 - a stop code label;
 - any stop target, matched, or related memory IDs;

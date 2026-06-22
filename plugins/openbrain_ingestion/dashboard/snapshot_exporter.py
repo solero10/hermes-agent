@@ -86,6 +86,17 @@ _DUPLICATE_DECISIONS = {
     "merge_exact",
     "merged-exact",
 }
+_SEMANTIC_COMPLETE_DECISIONS = {
+    "created",
+    "review_required",
+    "skipped_semantic_duplicate",
+    "semantic_duplicate",
+}
+_DEGRADED_DEDUPE_MARKERS = {
+    "degraded_created",
+    "degraded_exact_only",
+    "exact_only",
+}
 _PRIVATE_URL_SCHEMES = {"file"}
 _PATH_KEYS = (
     "path",
@@ -106,6 +117,105 @@ _CANDIDATE_STAGE_ALIASES: dict[str, str] = {
     "ready_to_import": "ready_for_cortexdb",
     "candidate": "ready_for_cortexdb",
     "capture_candidate": "ready_for_cortexdb",
+}
+
+_POLICY_NEEDS_SOURCE_VALIDATION_MARKERS = {
+    "auto generated outline",
+    "auto_generated outline",
+    "outline only",
+    "not substantiated",
+    "source does not clarify",
+    "source evidence is weak",
+    "verify against the full transcript",
+    "verify against the transcript",
+    "verify before capture",
+    "voicemail_derived",
+}
+_POLICY_SENSITIVE_DETAIL_MARKERS = {
+    "account number",
+    "case/reference handle",
+    "emergency number",
+    "exact identifier",
+    "medical id",
+    "raw identifier",
+    "reference number",
+    "salesforce number",
+    "secure/private system",
+    "social security",
+    "ssn",
+    "should not be broadly captured",
+}
+_POLICY_MISSING_CONTEXT_MARKERS = {
+    "does not provide full identifiers",
+    "full identifiers",
+    "lacks context",
+    "missing identifier",
+    "names and roles may be stale",
+    "not enough detail",
+    "too vague",
+}
+_POLICY_INTERNAL_PROCESS_MARKERS = {
+    "charge code",
+    "company_specific operating",
+    "ey mechanics",
+    "ey_internal",
+    "independence kpi",
+    "internal process",
+    "obsolete ey",
+    "sow/process details",
+}
+_POLICY_NO_DURABLE_VALUE_MARKERS = {
+    "has no durable value",
+    "incidental personal context with no clear durable value",
+    "no clear durable value",
+    "no durable value beyond",
+    "no longer durable enough",
+    "no longer useful as durable memory",
+    "not useful to preserve",
+    "not worth retaining",
+    "time_specific travel logistics",
+    "time-specific travel logistics",
+}
+_POLICY_STALE_TASK_MARKERS = {
+    "current completion status is unknown",
+    "current status is unknown",
+    "do not reactivate",
+    "if the project is revived",
+    "likely completed",
+    "should not be reactivated",
+    "stale unless",
+    "without confirming whether they were completed",
+}
+_DURABLE_SIGNAL_MARKERS = {
+    "collaboration pattern",
+    "communication pattern",
+    "control point is useful",
+    "cost control",
+    "delivery tactic",
+    "documentation tactic",
+    "durable",
+    "framework",
+    "historical context",
+    "lesson",
+    "operational observation",
+    "pattern",
+    "principle",
+    "product design",
+    "product_management",
+    "product-management",
+    "project risk",
+    "relationship context",
+    "reusable",
+    "scoping artifact",
+    "strategic insight",
+    "strong product",
+    "tactic",
+    "useful as",
+    "useful context",
+    "useful historical",
+    "useful operational",
+    "useful product",
+    "useful project",
 }
 
 
@@ -484,6 +594,7 @@ def _thought_from_candidate(
     imported = _is_imported_audit(audit)
     duplicate = _is_duplicate_dedupe(dedupe)
     base_stage = _candidate_stage(candidate)
+    semantic_complete = _semantic_dedupe_complete(dedupe)
 
     if imported:
         current_stage = "cortexdb"
@@ -491,6 +602,9 @@ def _thought_from_candidate(
     elif duplicate:
         current_stage = "deduped"
         disposition = "stopped"
+    elif base_stage == "ready_for_cortexdb" and not semantic_complete:
+        current_stage = "shaped"
+        disposition = "needs_review" if _candidate_needs_review(candidate) else "in_progress"
     else:
         current_stage = base_stage
         disposition = "needs_review" if _candidate_needs_review(candidate) else "in_progress"
@@ -560,27 +674,185 @@ def _inventory_is_stopped(record: dict[str, Any]) -> bool:
     return str(_dig(record, "final_capture_action") or "").strip().lower() == "not_applicable"
 
 
-def _inventory_stop_metadata(record: dict[str, Any]) -> tuple[str, str]:
+def _inventory_stop_metadata(record: dict[str, Any]) -> tuple[str | None, str]:
+    """Return ``(policy_stop_code, current_stage)`` for inventory-only rows.
+
+    ``final_capture_action=not_applicable`` historically mixed two very
+    different outcomes: true policy skips and useful historical/reference rows
+    that simply did not become capture candidates in that run.  The dashboard
+    should only place a row in Policy when a clear rule blocks CortexDB capture.
+    Otherwise, keep the row in Shaped so Ken can decide whether it should be
+    rewritten, semantically deduped, and captured later.
+    """
+
+    if _inventory_is_duplicate_stop(record):
+        return "duplicate", "deduped"
+
+    policy_stop_code = _inventory_policy_stop_code(record)
+    if policy_stop_code:
+        return policy_stop_code, "policy"
+
+    return None, "shaped"
+
+
+def _inventory_policy_stop_code(record: dict[str, Any]) -> str | None:
+    normalized = _inventory_policy_text(record)
+    historical_memory_type = _normalize_status_token(
+        _dig(record, "metadata", "historical_archive", "historical_memory_type")
+    )
+    historical_verdict = _normalize_status_token(
+        _dig(record, "metadata", "historical_archive", "historical_verdict") or _dig(record, "verdict")
+    )
+
+    if historical_memory_type == "needs_current_validation" or historical_verdict == "needs_current_validation":
+        return "needs_source_validation"
+    if _contains_any(normalized, _POLICY_NEEDS_SOURCE_VALIDATION_MARKERS):
+        return "needs_source_validation"
+    if _contains_any(normalized, _POLICY_SENSITIVE_DETAIL_MARKERS):
+        return "sensitive_detail"
+    if _contains_any(normalized, _POLICY_INTERNAL_PROCESS_MARKERS) and not _inventory_has_durable_signal(record):
+        return "obsolete_internal"
+    if _contains_any(normalized, _POLICY_MISSING_CONTEXT_MARKERS):
+        return "too_thin"
+    if _contains_any(normalized, _POLICY_NO_DURABLE_VALUE_MARKERS):
+        return "no_durable_value"
+    if _contains_any(normalized, _POLICY_STALE_TASK_MARKERS) and not _inventory_has_durable_signal(record):
+        return "stale_task"
+    if historical_memory_type == "obsolete_or_skip" and not _inventory_has_durable_signal(record):
+        return "no_durable_value"
+    if "non_thought" in normalized or "not_a_thought" in normalized:
+        return "no_durable_value"
+    return None
+
+
+def _inventory_policy_text(record: dict[str, Any]) -> str:
     parts = [
+        _string_or_none(_dig(record, "title")),
+        _string_or_none(_dig(record, "idea")),
+        _string_or_none(_dig(record, "reason")),
+        _string_or_none(_dig(record, "category")),
         _string_or_none(_dig(record, "verdict")),
+        _string_or_none(_dig(record, "capture_content")),
+        _string_or_none(_dig(record, "evidence_quote")),
         _string_or_none(_dig(record, "metadata", "historical_archive", "historical_verdict")),
         _string_or_none(_dig(record, "metadata", "historical_archive", "historical_memory_type")),
-        _string_or_none(_dig(record, "dedupe", "decision")),
-        _string_or_none(_dig(record, "dedupe", "capture_action")),
-        _string_or_none(_dig(record, "capture_content")),
     ]
-    normalized = " ".join(part for part in parts if part).lower().replace("-", "_").replace(" ", "_")
-    if "obsolete" in normalized:
-        return "obsolete", "policy"
-    if "reference_or_merge" in normalized or "reference_merge" in normalized or "reference / merge" in normalized or "reference" in normalized:
-        return "reference_merge", "policy"
-    if "duplicate" in normalized or "merged" in normalized:
-        return "duplicate", "deduped"
-    if "policy" in normalized:
-        return "policy", "policy"
-    if "non_thought" in normalized or "not_a_thought" in normalized:
-        return "non_thought", "extracted"
-    return "other", "deduped"
+    parts.extend(_list_of_strings(_dig(record, "topics")))
+    parts.extend(_list_of_strings(_dig(record, "connections")))
+    return " ".join(part for part in parts if part).lower().replace("-", "_")
+
+
+def _contains_any(text: str, markers: set[str]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _inventory_has_durable_signal(record: dict[str, Any]) -> bool:
+    if _inventory_is_durable_personal_context(record):
+        return True
+    historical_memory_type = _normalize_status_token(
+        _dig(record, "metadata", "historical_archive", "historical_memory_type")
+    )
+    if historical_memory_type == "reference_or_merge":
+        return True
+    normalized = _inventory_policy_text(record)
+    return _contains_any(normalized, _DURABLE_SIGNAL_MARKERS)
+
+
+def _inventory_is_duplicate_stop(record: dict[str, Any]) -> bool:
+    """Return true only when the inventory/dedupe metadata says duplicate.
+
+    Free-text Panning reasons can contain words such as "duplicate work" or
+    "rework" without meaning the candidate was deduped.  The dashboard's
+    Deduped column should be driven by structured dedupe outcomes or matched
+    memories, not incidental prose.
+    """
+
+    parts = [
+        _string_or_none(_dig(record, "dedupe", key))
+        for key in ("decision", "capture_action", "action", "status", "outcome", "disposition")
+    ]
+    parts.extend(
+        _string_or_none(_dig(record, key))
+        for key in ("dedupe_decision", "dedupe_action", "duplicate_decision")
+    )
+    dedupe = _dig(record, "dedupe") if isinstance(_dig(record, "dedupe"), dict) else record
+    if not _semantic_dedupe_complete(dedupe):
+        return False
+    normalized = {_normalize_status_token(part) for part in parts if part}
+    if normalized & _DUPLICATE_DECISIONS:
+        return True
+    if any("merged_exact" in part or "exact_duplicate" in part for part in normalized):
+        return True
+    return bool(_related_memories(record)) and any("duplicate" in part or "merged" in part for part in normalized)
+
+
+def _inventory_is_durable_personal_context(record: dict[str, Any]) -> bool:
+    """Return true for non-actionable personal context Ken wants promoted.
+
+    Historical Panning runs often remap old PARK rows to REFERENCE / MERGE.  That
+    is right for generic background, but relationship/person/value/therapy
+    context can be durable memory even when it is not an immediate task.
+    """
+
+    if not _inventory_is_stopped(record):
+        return False
+
+    parts = [
+        _string_or_none(_dig(record, "title")),
+        _string_or_none(_dig(record, "idea")),
+        _string_or_none(_dig(record, "reason")),
+        _string_or_none(_dig(record, "category")),
+        _string_or_none(_dig(record, "verdict")),
+        _string_or_none(_dig(record, "capture_content")),
+        _string_or_none(_dig(record, "metadata", "historical_archive", "historical_verdict")),
+        _string_or_none(_dig(record, "metadata", "historical_archive", "historical_memory_type")),
+    ]
+    parts.extend(_list_of_strings(_dig(record, "connections")))
+    normalized = " ".join(part for part in parts if part).lower().replace("-", "_")
+
+    if "obsolete" in normalized or "duplicate" in normalized or "non_thought" in normalized or "not_a_thought" in normalized:
+        return False
+
+    category = str(_dig(record, "category") or "").strip().lower().replace("-", "_")
+    if category not in {"personal", "relationship", "relationships", "therapy", "family"}:
+        return False
+
+    uncertainty_markers = {
+        "avoid over_capturing",
+        "not substantiated",
+        "secondhand",
+        "should be clarified",
+        "source does not clarify",
+        "too vague",
+        "verify before capturing",
+        "verified before capture",
+    }
+    if any(marker in normalized for marker in uncertainty_markers):
+        return False
+
+    durable_markers = {
+        "abandonment",
+        "attachment",
+        "children",
+        "durable context",
+        "emotional pattern",
+        "family",
+        "first international trip",
+        "hawaii",
+        "japan",
+        "long_term environment",
+        "marriage",
+        "motivation",
+        "personal context",
+        "relocation",
+        "relationship decision",
+        "therapy",
+        "tramy",
+        "value",
+        "values",
+        "wife",
+    }
+    return any(marker in normalized for marker in durable_markers)
 
 
 def _stopped_thought_from_inventory(
@@ -611,7 +883,7 @@ def _stopped_thought_from_inventory(
         "summary": _string_or_none(_dig(record, "reason") or _dig(record, "capture_content")),
         "current_stage": current_stage,
         "stop_stage_id": current_stage,
-        "disposition": "stopped",
+        "disposition": "in_progress" if stop_code is None else "stopped",
         "stop_code": stop_code,
         "stop_target_id": stop_target_id,
         "stop_target_label": stop_target_label,
@@ -630,6 +902,9 @@ def _stopped_thought_from_inventory(
         "matched_memory_id": stop_target_id,
         "content_fingerprint": fingerprint,
     }
+    if stop_code is None:
+        for key in ("stop_stage_id", "stop_code", "stop_target_id", "stop_target_label", "stopped_reason", "matched_memory_id"):
+            thought.pop(key, None)
     if not _inventory_is_stopped(record):
         return None
     thought = {key: value for key, value in thought.items() if value is not None and value != []}
@@ -782,14 +1057,78 @@ def _is_imported_audit(audit: dict[str, Any]) -> bool:
 def _is_duplicate_dedupe(dedupe: dict[str, Any]) -> bool:
     if not dedupe:
         return False
+    if not _semantic_dedupe_complete(dedupe):
+        return False
     parts = [
         _string_or_none(_dig(dedupe, key))
         for key in ("decision", "outcome", "status", "action", "disposition", "reason")
     ]
-    normalized = {str(part).strip().lower().replace(" ", "_") for part in parts if part}
+    normalized = {_normalize_status_token(part) for part in parts if part}
     if normalized & _DUPLICATE_DECISIONS:
         return True
     return any("merged_exact" in part or "exact_duplicate" in part for part in normalized)
+
+
+def _semantic_dedupe_complete(dedupe: dict[str, Any]) -> bool:
+    """Return true when a dedupe receipt proves semantic matching ran.
+
+    `degraded_exact_only` / `degraded_created` receipts mean the semantic matcher
+    was unavailable, so the candidate must stay in Shaped until a real semantic
+    pass runs. The Deduped and Ready columns should only be populated after the
+    full dedupe framework has evidence of semantic coverage.
+    """
+
+    if not dedupe:
+        return False
+    parts = [
+        _string_or_none(_dig(dedupe, key))
+        for key in (
+            "decision",
+            "outcome",
+            "status",
+            "action",
+            "disposition",
+            "capture_action",
+            "recommended_action",
+            "reason",
+            "degraded_reason",
+            "semantic_decision",
+            "semantic_outcome",
+            "semantic_status",
+        )
+    ]
+    normalized = {_normalize_status_token(part) for part in parts if part}
+    joined = " ".join(normalized)
+    if normalized & _DEGRADED_DEDUPE_MARKERS:
+        return False
+    if "semantic_matcher_not_configured" in joined or "semantic_matcher_unavailable" in joined:
+        return False
+    if _dig(dedupe, "embedding_available") is False:
+        return False
+
+    for key in ("semantic_checked", "semantic_dedupe_checked", "semantic_dedupe_complete", "semantic_complete"):
+        if _dig(dedupe, key) is True:
+            return True
+
+    if _dig(dedupe, "embedding_available") is True:
+        return True
+    if _dig(dedupe, "candidate_embedding") is not None:
+        return True
+    if _dig(dedupe, "matched_similarity") is not None:
+        return True
+    if _dig(dedupe, "embedding_similarity") is not None:
+        return True
+    if _dig(dedupe, "semantic_similarity") is not None:
+        return True
+    if _related_memories(dedupe) and any("semantic" in key.lower() or "similarity" in key.lower() for key in dedupe):
+        return True
+    if normalized & _SEMANTIC_COMPLETE_DECISIONS:
+        return True
+    return False
+
+
+def _normalize_status_token(value: Any) -> str:
+    return str(value).strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def _related_memories(record: dict[str, Any]) -> list[dict[str, Any]]:

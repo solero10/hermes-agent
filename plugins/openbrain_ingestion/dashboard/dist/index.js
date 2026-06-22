@@ -35,6 +35,38 @@
   ];
   const READ_ONLY_TITLE = "Read-only MVP";
   const READ_ONLY_EXPLANATION = "Read-only MVP: this dashboard mirrors ingestion state only. Source, CortexDB, merge, review, and promotion actions are intentionally disabled placeholders.";
+  const DEFAULT_POLICY_STOP_DEFINITIONS = [
+    {
+      id: "needs_source_validation",
+      label: "Needs source validation",
+      definition: "Evidence is weak, outline-only, voicemail-derived, or ambiguous. Verify against the source before capture.",
+    },
+    {
+      id: "sensitive_detail",
+      label: "Sensitive detail",
+      definition: "Contains a raw private identifier, case/reference/account number, emergency/contact detail, or similar information that belongs in controlled evidence, not general memory.",
+    },
+    {
+      id: "stale_task",
+      label: "Stale task",
+      definition: "Looks like an old action item or status update. Check current status or rewrite as history before capture.",
+    },
+    {
+      id: "obsolete_internal",
+      label: "Obsolete internal process",
+      definition: "Old employer/company-specific process mechanics with no reusable lesson. Keep in source artifacts; do not capture as CortexDB memory.",
+    },
+    {
+      id: "too_thin",
+      label: "Too thin / missing context",
+      definition: "Missing enough who/what/why or identifiers to be a reliable standalone memory.",
+    },
+    {
+      id: "no_durable_value",
+      label: "No durable value",
+      definition: "Incidental, time-specific, already expired, or not useful enough to keep as long-term memory.",
+    },
+  ];
 
   function cx() {
     return Array.prototype.slice.call(arguments).filter(Boolean).join(" ");
@@ -67,17 +99,83 @@
     return text.replace(/\b\w/g, function (char) { return char.toUpperCase(); });
   }
 
+  function stopCodeSlug(value) {
+    return String(value || "").replace(/\s+/g, "_").replace(/-/g, "_").toLowerCase();
+  }
+
   function stopCodeLabel(value) {
-    const slug = String(value || "").replace(/\s+/g, "_").replace(/-/g, "_").toLowerCase();
+    const slug = stopCodeSlug(value);
+    const definition = policyDefinitionFor(slug, DEFAULT_POLICY_STOP_DEFINITIONS);
+    if (definition) return definition.label;
     if (!slug) return "";
     if (slug === "duplicate") return "Duplicate";
-    if (slug === "reference_merge" || slug === "reference/merge") return "Reference / merge";
-    if (slug === "policy") return "Policy stop";
-    if (slug === "obsolete") return "Obsolete";
-    if (slug === "non_thought") return "Not a thought";
+    if (slug === "reference_merge" || slug === "reference/merge") return "Needs shaping / merge";
+    if (slug === "needs_current_validation") return "Needs source validation";
+    if (slug === "obsolete") return "No durable value";
+    if (slug === "policy") return "Too thin / missing context";
+    if (slug === "non_thought") return "No durable value";
     if (slug === "needs_review") return "Needs review";
     if (slug === "other") return "Stopped";
     return slug.replace(/_/g, " ").replace(/\b\w/g, function (char) { return char.toUpperCase(); });
+  }
+
+  function stopCodeTitle(value) {
+    const slug = stopCodeSlug(value);
+    const definition = policyDefinitionFor(slug, DEFAULT_POLICY_STOP_DEFINITIONS);
+    if (definition) return definition.definition;
+    if (slug === "reference_merge" || slug === "reference/merge") {
+      return "Legacy tag: useful material that should be rewritten or merged before capture. It is not a policy prohibition by itself.";
+    }
+    if (slug === "needs_current_validation") {
+      return stopCodeTitle("needs_source_validation");
+    }
+    if (slug === "obsolete") {
+      return stopCodeTitle("no_durable_value");
+    }
+    if (slug === "policy") {
+      return stopCodeTitle("too_thin");
+    }
+    if (slug === "duplicate") return "Duplicate only after exact and semantic dedupe evidence confirms this is already covered.";
+    return "";
+  }
+
+  function policyDefinitionFor(value, definitions) {
+    const slug = stopCodeSlug(value);
+    return asArray(definitions).find(function (item) { return stopCodeSlug(item && item.id) === slug; });
+  }
+
+  function policyDefinitions(board) {
+    const definitions = asArray(board && board.policy_stop_definitions);
+    return definitions.length ? definitions : DEFAULT_POLICY_STOP_DEFINITIONS;
+  }
+
+  function effectiveStopCode(card) {
+    if (!card) return "";
+    if (stopCodeSlug(card.stop_code)) return card.stop_code;
+    if (card.current_stage !== "policy") return "";
+    const text = [card.title, card.summary, card.stopped_reason, asArray(card.topics).join(" ")].join(" ").toLowerCase();
+    if (text.includes("verify") || text.includes("not substantiated") || text.includes("source evidence") || text.includes("source does not clarify")) {
+      return "needs_source_validation";
+    }
+    if (text.includes("raw identifier") || text.includes("sensitive") || text.includes("case/reference") || text.includes("reference number") || text.includes("account number")) {
+      return "sensitive_detail";
+    }
+    if (text.includes("should not be reactivated") || text.includes("current status") || text.includes("likely completed") || text.includes("stale unless")) {
+      return "stale_task";
+    }
+    if (text.includes("internal process") || text.includes("obsolete ey") || text.includes("ey mechanics")) {
+      return "obsolete_internal";
+    }
+    if (text.includes("no durable value") || text.includes("incidental") || text.includes("not worth retaining") || text.includes("not useful to preserve")) {
+      return "no_durable_value";
+    }
+    return "too_thin";
+  }
+
+  function isDuplicateText(left, right) {
+    const a = String(left || "").trim().replace(/\s+/g, " ");
+    const b = String(right || "").trim().replace(/\s+/g, " ");
+    return !!a && !!b && a === b;
   }
 
   function stopTargetText(thought) {
@@ -265,6 +363,26 @@
     );
   }
 
+  function PolicyLegend(props) {
+    const board = props.board || {};
+    const total = (board.total_counts || board.metrics || {}).policy || 0;
+    const definitions = policyDefinitions(board);
+    if (!Number(total)) return null;
+    return h("section", { className: "ob-policy-legend", "aria-label": "Policy tag definitions" },
+      h("div", { className: "ob-policy-legend-intro" },
+        h("h2", null, "Policy tag definitions"),
+        h("p", null, "Policy means a thought is blocked from CortexDB capture for a specific reason. Good-but-unverified or needs-shaping material should stay in Shaped, not Policy.")
+      ),
+      h("div", { className: "ob-policy-legend-grid" }, definitions.map(function (item) {
+        const label = item.label || stopCodeLabel(item.id);
+        return h("article", { className: "ob-policy-definition", key: item.id || label },
+          h("span", { className: cx("ob-badge", "ob-badge--stopped", "ob-policy-tag") }, label),
+          h("p", null, item.definition || stopCodeTitle(item.id))
+        );
+      }))
+    );
+  }
+
   function BoardView(props) {
     const board = props.board;
     if (props.loading && !board) {
@@ -282,6 +400,7 @@
     return h(React.Fragment, null,
       props.error ? h(StatePanel, { tone: "error", role: "alert", title: "Refresh failed", message: "Showing the last loaded board data.", detail: props.error }) : null,
       h(Metrics, { board: board }),
+      h(PolicyLegend, { board: board }),
       rows.length === 0 ? h(StatePanel, { tone: "empty", title: "No source units match this filter", message: "Try All, a different source type, or a broader search." }) :
         h("section", { className: "ob-board", "aria-label": "OpenBrain ingestion source rows" },
           rows.map(function (row) {
@@ -354,21 +473,23 @@
   function ThoughtCard(props) {
     const card = props.card || {};
     const disposition = card.disposition || "in_progress";
-    const stopCode = disposition === "stopped" ? stopCodeLabel(card.stop_code) : "";
+    const effectiveCode = effectiveStopCode(card);
+    const stopCode = disposition === "stopped" ? stopCodeLabel(effectiveCode) : "";
+    const stopTitle = stopCodeTitle(effectiveCode);
+    const cardSummary = isDuplicateText(card.summary, card.stopped_reason) ? "" : card.summary;
     return h("article", { className: cx("ob-thought-card", "ob-thought-card--" + stageSlug(disposition), stageClass(card.current_stage)) },
       h("div", { className: "ob-card-head" },
         h("h3", null, safeText(card.title || card.summary || card.lineage_id, "Untitled thought")),
         h("div", { className: "ob-card-badges" },
           h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(disposition)) }, dispositionLabel(disposition)),
-          stopCode ? h("span", { className: cx("ob-badge", "ob-badge--stopped") }, stopCode) : null
+          stopCode ? h("span", {
+            className: cx("ob-badge", "ob-badge--stopped", "ob-policy-tag"),
+            title: stopTitle || stopCode,
+            "aria-label": stopTitle ? stopCode + ": " + stopTitle : stopCode,
+          }, stopCode) : null
         )
       ),
-      card.summary ? h("p", { className: "ob-card-summary" }, card.summary) : null,
-      h("dl", { className: "ob-card-meta" },
-        h("div", null, h("dt", null, "Stage"), h("dd", null, stageLabel(card.current_stage))),
-        h("div", null, h("dt", null, "Lineage"), h("dd", null, safeText(card.lineage_id || card.id))),
-        card.candidate_id ? h("div", null, h("dt", null, "Candidate"), h("dd", null, card.candidate_id)) : null
-      ),
+      cardSummary ? h("p", { className: "ob-card-summary" }, cardSummary) : null,
       asArray(card.topics).length ? h("div", { className: "ob-topic-list" }, asArray(card.topics).map(function (topic) {
         return h("span", { key: topic, className: "ob-topic" }, topic);
       })) : null,
@@ -450,13 +571,22 @@
 
   function StoppedReceipt(props) {
     const thought = props.thought || {};
+    const effectiveCode = effectiveStopCode(thought);
+    const stopTitle = stopCodeTitle(effectiveCode);
+    const stopLabel = stopCodeLabel(effectiveCode);
     return h("section", { className: "ob-stopped-receipt ob-detail-variant--stopped" },
       h("div", { className: "ob-section-heading" },
         h("h3", null, "Stopped / not imported"),
         h(ReadOnlyButton, null, "Copy merge note")
       ),
       h("dl", { className: "ob-detail-list" },
-        h("div", null, h("dt", null, "Stop code"), h("dd", null, safeText(stopCodeLabel(thought.stop_code), "Stopped"))),
+        h("div", null, h("dt", null, "Policy tag"), h("dd", null,
+          h("span", {
+            className: cx("ob-badge", "ob-badge--stopped", "ob-policy-tag"),
+            title: stopTitle || stopLabel || "Stopped",
+            "aria-label": stopTitle ? stopLabel + ": " + stopTitle : stopLabel || "Stopped",
+          }, safeText(stopLabel, "Stopped"))
+        )),
         thought.stop_target_label ? h("div", null, h("dt", null, "Stop target"), h("dd", null, stopTargetText(thought))) : null,
         thought.stop_stage_id ? h("div", null, h("dt", null, "Stop stage"), h("dd", null, stageLabel(thought.stop_stage_id))) : null,
         h("div", null, h("dt", null, "Stopped reason"), h("dd", null, safeText(thought.stopped_reason, "No stopped reason supplied"))),
@@ -502,6 +632,10 @@
     const thought = props.thought;
     const dialogTitleId = "ob-detail-title";
     const disposition = thought && thought.disposition ? thought.disposition : "loading";
+    const detailSummary = thought && isDuplicateText(thought.summary, thought.stopped_reason) ? "" : thought && thought.summary;
+    const detailStopCode = thought ? effectiveStopCode(thought) : "";
+    const detailStopLabel = stopCodeLabel(detailStopCode);
+    const detailStopTitle = stopCodeTitle(detailStopCode);
     return h("div", { className: "ob-dialog-backdrop" },
       h("section", {
         className: cx("ob-detail", "ob-detail--" + stageSlug(disposition)),
@@ -522,11 +656,15 @@
           h("div", { className: "ob-detail-summary" },
             h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(thought.disposition)) }, dispositionLabel(thought.disposition)),
             h("span", { className: cx("ob-badge", stageClass(thought.current_stage)) }, stageLabel(thought.current_stage)),
-            thought.disposition === "stopped" && stopCodeLabel(thought.stop_code) ? h("span", { className: cx("ob-badge", "ob-badge--stopped") }, stopCodeLabel(thought.stop_code)) : null,
-            h("span", { className: "ob-ready-label" }, "Ready for CortexDB")
+            thought.disposition === "stopped" && detailStopLabel ? h("span", {
+              className: cx("ob-badge", "ob-badge--stopped", "ob-policy-tag"),
+              title: detailStopTitle || detailStopLabel,
+              "aria-label": detailStopTitle ? detailStopLabel + ": " + detailStopTitle : detailStopLabel,
+            }, detailStopLabel) : null,
+            thought.current_stage === "ready_for_cortexdb" ? h("span", { className: "ob-ready-label" }, "Ready for CortexDB") : null
           ),
           h(DetailIDs, { thought: thought }),
-          thought.summary ? h("p", { className: "ob-detail-copy" }, thought.summary) : null,
+          detailSummary ? h("p", { className: "ob-detail-copy" }, detailSummary) : null,
           thought.source_snippet || thought.quote || thought.raw_text ? h("blockquote", { className: "ob-source-snippet" }, thought.source_snippet || thought.quote || thought.raw_text) : null,
           h(SourceContext, { thought: thought }),
           h(LineageTimeline, { thought: thought }),

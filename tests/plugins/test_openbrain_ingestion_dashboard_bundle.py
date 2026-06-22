@@ -24,17 +24,17 @@ def _read(path: Path) -> str:
 
 def test_manifest_and_plugin_yaml_register_dashboard_plugin():
     manifest = json.loads(_read(MANIFEST_PATH))
-    assert manifest == {
+    assert {k: v for k, v in manifest.items() if k not in {"entry", "css"}} == {
         "name": "openbrain_ingestion",
         "label": "OpenBrain",
         "description": "Read-only ingestion dashboard for OpenBrain source units, lineage stages, and CortexDB receipts",
         "icon": "Database",
         "version": "0.1.0",
         "tab": {"path": "/openbrain", "position": "after:kanban"},
-        "entry": "dist/index.js",
-        "css": "dist/style.css",
         "api": "plugin_api.py",
     }
+    assert manifest["entry"].startswith("dist/index.js")
+    assert manifest["css"].startswith("dist/style.css")
 
     plugin_yaml = _read(PLUGIN_YAML_PATH)
     assert "name: openbrain_ingestion" in plugin_yaml
@@ -70,6 +70,7 @@ def test_frontend_declares_all_required_components_before_registration():
         "Toolbar",
         "BoardView",
         "Metrics",
+        "PolicyLegend",
         "SourceRow",
         "StageColumn",
         "ThoughtCard",
@@ -153,10 +154,19 @@ def test_board_detail_and_state_strings_are_present():
         "CortexDB receipt",
         "Related memories",
         "Stopped reason",
-        "Stop code",
+        "Policy tag",
         "Stop target",
         "Stop stage",
-        "Reference / merge",
+        "Policy tag definitions",
+        "Needs source validation",
+        "Sensitive detail",
+        "Stale task",
+        "Obsolete internal process",
+        "Too thin / missing context",
+        "No durable value",
+        "Evidence is weak, outline-only, voicemail-derived, or ambiguous.",
+        "raw private identifier",
+        "Good-but-unverified or needs-shaping material should stay in Shaped",
         "Duplicate of",
         "Merged into",
         "Not reached",
@@ -168,10 +178,26 @@ def test_board_detail_and_state_strings_are_present():
         assert text in frontend
 
 
+def test_abbreviated_thought_cards_do_not_render_stage_or_lineage_metadata():
+    frontend = _read(FRONTEND_JS_PATH)
+    card_start = frontend.index("function ThoughtCard")
+    card_end = frontend.index("function SourceContext")
+    thought_card = frontend[card_start:card_end]
+
+    assert "ob-card-meta" not in frontend
+    assert 'h("dt", null, "Stage")' not in thought_card
+    assert 'h("dt", null, "Lineage")' not in thought_card
+    assert "safeText(card.lineage_id || card.id)" not in thought_card
+    assert "effectiveStopCode(card)" in thought_card
+    assert "isDuplicateText(card.summary, card.stopped_reason)" in thought_card
+    assert "ob-policy-tag" in thought_card
+    assert "Lineage ID" in frontend  # detail view keeps the lineage identifier.
+
+
 def test_css_uses_ob_namespace_and_required_selectors():
     css = _read(FRONTEND_CSS_PATH)
 
-    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges"):
+    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges", ".ob-policy-tag", ".ob-policy-legend"):
         assert selector in css
     assert "ready-for-cortexdb" in css
     assert ":disabled" in css or "[disabled]" in css
@@ -193,5 +219,7 @@ def test_docs_cover_snapshot_boundary_and_read_only_mvp():
         "~/.hermes/openbrain-ingestion-dashboard/snapshot.json",
         "Read-only MVP",
         "Panning-for-Gold artifacts -> SnapshotV1",
+        "Policy tags use this vocabulary",
+        "Needs source validation",
     ):
         assert text in docs

@@ -180,6 +180,7 @@ def test_source_types_prefers_transcripts_default(client):
     payload = response.json()
     assert payload["default_source_type"] == "transcripts"
     assert payload["source_types"] == [{"id": "transcripts", "label": "Transcripts", "count": 3}]
+    assert any(item["id"] == "needs_source_validation" for item in payload["policy_stop_definitions"])
 
 
 def test_board_groups_thoughts_by_current_stage_once_and_splits_counts(client):
@@ -195,6 +196,7 @@ def test_board_groups_thoughts_by_current_stage_once_and_splits_counts(client):
         "cortexdb",
     ]
     assert next(c for c in payload["columns"] if c["id"] == "ready_for_cortexdb")["label"] == "Ready for CortexDB"
+    assert any(item["id"] == "sensitive_detail" for item in payload["policy_stop_definitions"])
     assert payload["total_counts"] == payload["visible_counts"] == payload["metrics"]
     assert payload["total_counts"]["source_units"] == 3
     assert payload["total_counts"]["thoughts"] == 5

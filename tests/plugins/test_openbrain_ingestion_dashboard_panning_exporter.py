@@ -132,8 +132,53 @@ def test_imported_duplicate_and_derived_lineage_rows_map_correctly_without_sqlit
 
     pending = thoughts["cand_003_pending"]
     assert pending["lineage_id"].startswith("lineage-")
-    assert pending["current_stage"] == "ready_for_cortexdb"
+    assert pending["current_stage"] == "shaped"
     assert pending["disposition"] == "in_progress"
+
+
+def test_degraded_exact_only_dedupe_keeps_candidate_in_shaped(tmp_path):
+    exporter = _load_exporter()
+    run_root = tmp_path / "semantic-pending-run"
+    shutil.copytree(FIXTURE_RUN_ROOT, run_root)
+
+    candidates_path = run_root / "capture-candidates.jsonl"
+    candidate = {
+        "source_id": "otter-package:transcript-003",
+        "candidate_id": "cand_008_exact_only",
+        "content_fingerprint": "sha256:fp_exact_only_008",
+        "title": "Exact-only candidate should wait for semantic dedupe",
+        "summary": "Candidate passed exact dedupe only and should not be Ready yet.",
+        "final_memory_text": "Exact-only dedupe is not enough for OpenBrain capture readiness.",
+        "stage": "ready",
+    }
+    with candidates_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(candidate, sort_keys=True) + "\n")
+
+    receipts_path = run_root / "dedupe-receipts.jsonl"
+    receipt = {
+        "source_id": "otter-package:transcript-003",
+        "candidate_id": "cand_008_exact_only",
+        "content_fingerprint": "sha256:fp_exact_only_008",
+        "decision": "degraded_exact_only",
+        "capture_action": "degraded_created",
+        "degraded_reason": "semantic matcher not configured; exact-only batch check",
+        "embedding_available": False,
+        "matched_similarity": None,
+        "matched_thought_id": None,
+        "matches": [],
+    }
+    with receipts_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(receipt, sort_keys=True) + "\n")
+
+    thoughts = {
+        thought["candidate_id"]: thought
+        for unit in _snapshot(exporter, run_root=run_root)["source_units"]
+        for thought in unit.get("thoughts", [])
+    }
+
+    exact_only = thoughts["cand_008_exact_only"]
+    assert exact_only["current_stage"] == "shaped"
+    assert exact_only["disposition"] == "in_progress"
 
 
 def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, monkeypatch):
@@ -194,6 +239,135 @@ def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, m
                 },
                 ensure_ascii=False,
             ),
+            json.dumps(
+                {
+                    "source_id": "otter-package:transcript-003",
+                    "candidate_id": "cand_006_durable_context",
+                    "thread_id": "thread_durable_context",
+                    "content_fingerprint": "sha256:fp_durable_006",
+                    "capture_content": "REFERENCE / MERGE: Hawaii remains preferred long-term environment.",
+                    "capture_recommendation": False,
+                    "final_capture_action": "not_applicable",
+                    "verdict": "REFERENCE / MERGE",
+                    "reason": "Useful durable context for values and relocation motivation, but not a separate immediate action.",
+                    "title": "Hawaii remains preferred long-term environment",
+                    "idea": "Ken sees Hawaii as the preferred long-term environment.",
+                    "category": "personal",
+                    "connections": ["Hawaii relocation", "values"],
+                    "metadata": {
+                        "historical_archive": {
+                            "historical_memory_type": "reference_or_merge",
+                            "historical_verdict": "REFERENCE / MERGE",
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "source_id": "otter-package:transcript-003",
+                    "candidate_id": "cand_007_duplicate_wording_not_dedupe",
+                    "thread_id": "thread_duplicate_wording_not_dedupe",
+                    "content_fingerprint": "sha256:fp_duplicate_wording_007",
+                    "capture_content": "RESEARCH MORE: A staged release might duplicate work if the architecture is wrong.",
+                    "capture_recommendation": False,
+                    "final_capture_action": "not_applicable",
+                    "verdict": "RESEARCH MORE",
+                    "reason": "This is a planning concern with prose about duplicate work, not a dedupe result.",
+                    "title": "Staged release may duplicate work",
+                    "idea": "A staged release might duplicate work if the architecture is wrong.",
+                    "category": "technical",
+                    "dedupe": {"decision": "not_capture_candidate", "capture_action": "not_applicable"},
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "source_id": "otter-package:transcript-003",
+                    "candidate_id": "cand_009_needs_current_validation",
+                    "thread_id": "thread_needs_current_validation",
+                    "content_fingerprint": "sha256:fp_validation_009",
+                    "capture_content": "NEEDS CURRENT VALIDATION: Relationship note from outline only.",
+                    "capture_recommendation": False,
+                    "final_capture_action": "not_applicable",
+                    "verdict": "NEEDS CURRENT VALIDATION",
+                    "reason": "Potentially useful, but verify against the full transcript before capture.",
+                    "title": "Relationship note from outline only",
+                    "idea": "A relationship note appears only in an auto-generated outline.",
+                    "category": "relationship",
+                    "metadata": {
+                        "historical_archive": {
+                            "historical_memory_type": "needs_current_validation",
+                            "historical_verdict": "NEEDS CURRENT VALIDATION",
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "source_id": "otter-package:transcript-003",
+                    "candidate_id": "cand_010_sensitive_detail",
+                    "thread_id": "thread_sensitive_detail",
+                    "content_fingerprint": "sha256:fp_sensitive_010",
+                    "capture_content": "PARK: Case/reference handle for a benefits issue.",
+                    "capture_recommendation": False,
+                    "final_capture_action": "not_applicable",
+                    "verdict": "PARK",
+                    "reason": "The raw identifier is sensitive and should not be broadly captured.",
+                    "title": "Case/reference handle for follow-up",
+                    "idea": "A case/reference handle exists for a benefits issue.",
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "source_id": "otter-package:transcript-003",
+                    "candidate_id": "cand_011_stale_task",
+                    "thread_id": "thread_stale_task",
+                    "content_fingerprint": "sha256:fp_stale_011",
+                    "capture_content": "RESEARCH MORE: Follow up with a 2023 project owner.",
+                    "capture_recommendation": False,
+                    "final_capture_action": "not_applicable",
+                    "verdict": "RESEARCH MORE",
+                    "reason": "This should not be reactivated without confirming whether it was completed.",
+                    "title": "Follow up with a 2023 project owner",
+                    "idea": "Someone needed a 2023 follow-up.",
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "source_id": "otter-package:transcript-003",
+                    "candidate_id": "cand_012_obsolete_internal",
+                    "thread_id": "thread_obsolete_internal",
+                    "content_fingerprint": "sha256:fp_internal_012",
+                    "capture_content": "PARK: EY internal process checklist.",
+                    "capture_recommendation": False,
+                    "final_capture_action": "not_applicable",
+                    "verdict": "PARK",
+                    "reason": "Obsolete EY internal process mechanics with no current use.",
+                    "title": "EY internal process checklist",
+                    "idea": "The source described an EY internal process checklist.",
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "source_id": "otter-package:transcript-003",
+                    "candidate_id": "cand_013_too_thin",
+                    "thread_id": "thread_too_thin",
+                    "content_fingerprint": "sha256:fp_too_thin_013",
+                    "capture_content": "PARK: Calendar follow-up.",
+                    "capture_recommendation": False,
+                    "final_capture_action": "not_applicable",
+                    "verdict": "PARK",
+                    "reason": "Too vague and not enough detail to preserve safely.",
+                    "title": "Calendar follow-up",
+                    "idea": "There was a calendar follow-up.",
+                },
+                ensure_ascii=False,
+            ),
         ]
     )
     inventory_path.write_text("\n".join(inventory_rows) + "\n", encoding="utf-8")
@@ -206,20 +380,40 @@ def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, m
     }
 
     reference = thoughts["cand_004_reference_merge"]
-    assert reference["disposition"] == "stopped"
-    assert reference["current_stage"] == "policy"
-    assert reference["stop_code"] == "reference_merge"
-    assert reference["stop_stage_id"] == "policy"
-    assert reference["stopped_reason"].startswith("Historical background")
+    assert reference["disposition"] == "in_progress"
+    assert reference["current_stage"] == "shaped"
+    assert "stop_code" not in reference
+    assert "stopped_reason" not in reference
 
     obsolete = thoughts["cand_005_obsolete_skip"]
     assert obsolete["disposition"] == "stopped"
     assert obsolete["current_stage"] == "policy"
-    assert obsolete["stop_code"] == "obsolete"
+    assert obsolete["stop_code"] == "no_durable_value"
     assert obsolete["stop_stage_id"] == "policy"
     assert obsolete["stopped_reason"].startswith("Time-specific travel logistics")
 
-    assert sum(len(unit.get("thoughts", [])) for unit in validated["source_units"]) == 5
+    durable_context = thoughts["cand_006_durable_context"]
+    assert durable_context["disposition"] == "in_progress"
+    assert durable_context["current_stage"] == "shaped"
+    assert "stop_code" not in durable_context
+    assert "stopped_reason" not in durable_context
+
+    duplicate_wording = thoughts["cand_007_duplicate_wording_not_dedupe"]
+    assert duplicate_wording["disposition"] == "in_progress"
+    assert duplicate_wording["current_stage"] == "shaped"
+    assert "stop_code" not in duplicate_wording
+
+    needs_validation = thoughts["cand_009_needs_current_validation"]
+    assert needs_validation["disposition"] == "stopped"
+    assert needs_validation["current_stage"] == "policy"
+    assert needs_validation["stop_code"] == "needs_source_validation"
+
+    assert thoughts["cand_010_sensitive_detail"]["stop_code"] == "sensitive_detail"
+    assert thoughts["cand_011_stale_task"]["stop_code"] == "stale_task"
+    assert thoughts["cand_012_obsolete_internal"]["stop_code"] == "obsolete_internal"
+    assert thoughts["cand_013_too_thin"]["stop_code"] == "too_thin"
+
+    assert sum(len(unit.get("thoughts", [])) for unit in validated["source_units"]) == 12
 
     hermes_home = tmp_path / ".hermes"
     out_path = hermes_home / "openbrain-ingestion-dashboard" / "snapshot.json"
@@ -233,12 +427,22 @@ def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, m
     client = TestClient(app)
 
     board = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
-    assert board["total_counts"]["thoughts"] == 5
-    assert board["total_counts"]["stopped"] == 3
+    assert board["total_counts"]["thoughts"] == 12
+    assert board["total_counts"]["stopped"] == 7
     assert board["total_counts"]["deduped"] == 1
-    assert board["total_counts"]["policy"] == 2
+    assert board["total_counts"]["policy"] == 6
+    assert board["total_counts"]["shaped"] == 4
+    assert board["total_counts"]["ready_for_cortexdb"] == 0
     stop_codes = {card.get("stop_code") for card in _all_cards(board) if card.get("stop_code")}
-    assert {"duplicate", "reference_merge", "obsolete"}.issubset(stop_codes)
+    assert {
+        "duplicate",
+        "no_durable_value",
+        "needs_source_validation",
+        "sensitive_detail",
+        "stale_task",
+        "obsolete_internal",
+        "too_thin",
+    }.issubset(stop_codes)
 
 
 def test_exported_snapshot_is_read_by_dashboard_board_api(tmp_path, monkeypatch):
@@ -272,7 +476,8 @@ def test_exported_snapshot_is_read_by_dashboard_board_api(tmp_path, monkeypatch)
     assert board["total_counts"]["in_progress"] == 1
     assert board["total_counts"]["cortexdb"] == 1
     assert board["total_counts"]["deduped"] == 1
-    assert board["total_counts"]["ready_for_cortexdb"] == 1
+    assert board["total_counts"]["shaped"] == 1
+    assert board["total_counts"]["ready_for_cortexdb"] == 0
     assert board["total_counts"]["zero_thoughts"] == 1
 
     first_row = next(row for row in board["rows"] if row["label"].startswith("2023-11-30"))
