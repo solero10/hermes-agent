@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -66,6 +68,12 @@ def hermes_home(tmp_path, monkeypatch):
                         "disposition": "imported",
                         "needs_review": False,
                         "topics": ["delivery", "stakeholder-risk"],
+                        "metadata": {
+                            "type": "observation",
+                            "source": "panning",
+                            "source_type": "transcripts",
+                            "topics": ["delivery", "stakeholder-risk"],
+                        },
                         "confidence": 0.86,
                         "source_snippet": "The work was not only technical.",
                         "final_memory_text": "Stakeholder acceptance is delivery risk.",
@@ -73,6 +81,12 @@ def hermes_home(tmp_path, monkeypatch):
                             "id": "thought_demo_7f3a",
                             "type": "observation",
                             "captured_at": "2026-06-21T04:39:54Z",
+                            "updated_at": "2026-06-21T04:40:11Z",
+                            "content_fingerprint": "receipt-fingerprint-demo",
+                            "importance": 4,
+                            "quality_score": 82,
+                            "sensitivity_tier": "standard",
+                            "enriched": True,
                             "ingestion_run_id": "run_20260621_043954Z",
                             "source_unit_id": "transcript-a",
                             "candidate_id": "cand_42_18_a",
@@ -321,6 +335,24 @@ def test_thought_detail_imported_has_normalized_timeline_and_receipt(client):
     ]
     assert next(stage for stage in thought["stages"] if stage["id"] == "ready_for_cortexdb")["label"] == "Ready for CortexDB"
 
+    db_fields = {field["name"]: field for field in thought["database_fields"]}
+    assert list(db_fields)[:4] == ["id", "content", "embedding", "metadata"]
+    assert db_fields["id"]["value"] == "thought_demo_7f3a"
+    assert db_fields["content"]["value"] == "Stakeholder acceptance is delivery risk."
+    assert db_fields["embedding"]["value"] == "[embedding vector omitted]"
+    assert db_fields["source"]["value"] == "panning"
+    assert db_fields["source_type"]["value"] == "transcripts"
+    assert db_fields["metadata"]["value"]["topics"] == ["delivery", "stakeholder-risk"]
+    assert db_fields["metadata"]["value"]["source_unit_id"] == "transcript-a"
+    assert db_fields["created_at"]["value"] == "2026-06-21T04:39:54Z"
+    assert db_fields["updated_at"]["value"] == "2026-06-21T04:40:11Z"
+    assert db_fields["content_fingerprint"]["value"] == "receipt-fingerprint-demo"
+    assert db_fields["importance"]["value"] == 4
+    assert db_fields["quality_score"]["value"] == 82
+    assert db_fields["sensitivity_tier"]["value"] == "standard"
+    assert db_fields["enriched"]["value"] is True
+    assert db_fields["derivation_layer"]["value"] == "primary"
+
 
 def test_thought_detail_stopped_duplicate_strips_receipt(client):
     response = client.get("/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_dup_1")
@@ -337,6 +369,34 @@ def test_thought_detail_stopped_duplicate_strips_receipt(client):
     assert "cortexdb_receipt" not in thought or thought["cortexdb_receipt"] in ({}, None)
     later = [stage for stage in thought["stages"] if stage["id"] in {"policy", "ready_for_cortexdb", "cortexdb"}]
     assert all(stage["status"] == "not_reached" for stage in later)
+
+    db_fields = {field["name"]: field for field in thought["database_fields"]}
+    assert db_fields["id"]["populated"] is False
+    assert db_fields["content"]["populated"] is False
+    assert db_fields["source"]["populated"] is False
+    assert db_fields["importance"]["populated"] is False
+    assert db_fields["quality_score"]["populated"] is False
+    assert db_fields["sensitivity_tier"]["populated"] is False
+    assert db_fields["derivation_layer"]["populated"] is False
+
+
+def test_database_fields_derive_imported_content_fingerprint_when_snapshot_omits_column(api_module):
+    thought = {
+        "lineage_id": "lineage-imported-no-fingerprint",
+        "current_stage": "cortexdb",
+        "disposition": "imported",
+        "final_memory_text": "  Normalized\nContent  ",
+        "cortexdb_receipt": {"id": "thought-no-fingerprint"},
+    }
+    source_unit = {"id": "source-a", "source_type": "transcripts", "label": "Source A"}
+
+    fields = {field["name"]: field for field in api_module._database_fields(thought, source_unit)}
+    expected = hashlib.sha256(
+        re.sub(r"\s+", " ", "  Normalized\nContent  ").strip().lower().encode("utf-8")
+    ).hexdigest()
+
+    assert fields["content_fingerprint"]["value"] == expected
+    assert "Derived with database normalization" in fields["content_fingerprint"]["note"]
 
 
 def test_source_scoped_lineage_identity_allows_duplicate_candidate_ids(client):

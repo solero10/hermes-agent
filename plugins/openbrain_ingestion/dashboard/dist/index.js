@@ -628,6 +628,45 @@
     );
   }
 
+  function DatabaseFieldValue(props) {
+    const field = props.field || {};
+    const value = field.value;
+    if (!field.populated || value === undefined || value === null || value === "") {
+      return h("span", { className: "ob-db-empty", "aria-label": "No value in snapshot" }, "—");
+    }
+    if (value && typeof value === "object") {
+      return h("pre", { className: "ob-db-json" }, JSON.stringify(value, null, 2));
+    }
+    return h("span", { className: "ob-db-value" }, String(value));
+  }
+
+  function DatabaseFields(props) {
+    const fields = asArray(props.thought && props.thought.database_fields);
+    const headingId = "ob-database-fields-title";
+    return h("section", { className: "ob-database-fields", "aria-labelledby": headingId },
+      h("div", { className: "ob-section-heading" },
+        h("h3", { id: headingId }, "Database fields"),
+        h("span", { className: "ob-db-table-name" }, "public.thoughts")
+      ),
+      h("p", { className: "ob-db-note" }, "Actual CortexDB/OpenBrain thought-table columns. A dash means this dashboard snapshot does not have a value for that field."),
+      fields.length ? h("dl", { className: "ob-db-field-grid" }, fields.map(function (field) {
+        return h("div", {
+          key: field.name,
+          className: cx("ob-db-field-row", field.populated ? "ob-db-field-row--populated" : "ob-db-field-row--empty"),
+        },
+          h("dt", { className: "ob-db-field-key" },
+            h("code", null, safeText(field.name)),
+            field.description ? h("span", null, safeText(field.description)) : null
+          ),
+          h("dd", { className: "ob-db-field-value" },
+            h(DatabaseFieldValue, { field: field }),
+            field.note ? h("small", null, safeText(field.note)) : null
+          )
+        );
+      })) : h("p", { className: "ob-muted" }, "No database field metadata in this detail payload.")
+    );
+  }
+
   function ThoughtDetail(props) {
     const thought = props.thought;
     const dialogTitleId = "ob-detail-title";
@@ -682,7 +721,8 @@
             h(ReadOnlyButton, null, "Promote later"),
             h(ReadOnlyButton, null, "Mark for review later")
           ) : null,
-          h(RelatedMemories, { thought: thought })
+          h(RelatedMemories, { thought: thought }),
+          h(DatabaseFields, { thought: thought })
         ) : null
       )
     );

@@ -642,7 +642,8 @@
 .ob-final-memory,
 .ob-imported-receipt,
 .ob-stopped-receipt,
-.ob-related {
+.ob-related,
+.ob-database-fields {
   border: 1px solid var(--ob-border);
   border-radius: calc(var(--ob-radius) * 0.75);
   background: color-mix(in srgb, var(--ob-bg) 74%, transparent);
@@ -741,6 +742,87 @@
   font-size: 0.78rem;
 }
 
+.ob-db-table-name {
+  border: 1px solid var(--ob-border);
+  border-radius: 999px;
+  color: var(--ob-muted);
+  font-family: var(--ob-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+  font-size: 0.75rem;
+  padding: 0.22rem 0.5rem;
+}
+
+.ob-db-note {
+  color: var(--ob-muted);
+  font-size: 0.82rem;
+  margin: 0.55rem 0 0;
+}
+
+.ob-db-field-grid {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  margin-top: 0.7rem;
+}
+
+.ob-db-field-row {
+  display: grid;
+  grid-template-columns: minmax(10rem, 0.42fr) minmax(0, 1fr);
+  gap: 0.65rem;
+  align-items: start;
+  border: 1px solid color-mix(in srgb, var(--ob-border) 74%, transparent);
+  border-radius: calc(var(--ob-radius) * 0.6);
+  padding: 0.55rem;
+}
+
+.ob-db-field-row--empty {
+  background: color-mix(in srgb, var(--ob-bg-strong) 38%, transparent);
+}
+
+.ob-db-field-key {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0;
+  min-width: 0;
+}
+
+.ob-db-field-key code {
+  color: var(--ob-text);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.ob-db-field-key span,
+.ob-db-field-value small {
+  color: var(--ob-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.ob-db-field-value {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ob-db-json {
+  max-height: 14rem;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px solid color-mix(in srgb, var(--ob-border) 70%, transparent);
+  border-radius: calc(var(--ob-radius) * 0.5);
+  background: color-mix(in srgb, var(--ob-bg-strong) 80%, #000);
+  color: var(--ob-text);
+  font-size: 0.76rem;
+  padding: 0.55rem;
+}
+
+.ob-db-empty {
+  color: var(--ob-muted);
+}
+
 @media (max-width: 1200px) {
   .ob-toolbar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -765,7 +847,8 @@
   .ob-row-header,
   .ob-id-strip,
   .ob-detail-list,
-  .ob-related-memory {
+  .ob-related-memory,
+  .ob-db-field-row {
     grid-template-columns: 1fr;
   }
 

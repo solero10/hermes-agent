@@ -80,6 +80,8 @@ def test_frontend_declares_all_required_components_before_registration():
         "ImportedReceipt",
         "StoppedReceipt",
         "RelatedMemories",
+        "DatabaseFields",
+        "DatabaseFieldValue",
         "stopCodeLabel",
         "stopTargetText",
     ]
@@ -153,6 +155,12 @@ def test_board_detail_and_state_strings_are_present():
         "Ready for CortexDB",
         "CortexDB receipt",
         "Related memories",
+        "Database fields",
+        "public.thoughts",
+        "Actual CortexDB/OpenBrain thought-table columns",
+        "A dash means this dashboard snapshot does not have a value for that field.",
+        "No value in snapshot",
+        "database_fields",
         "Stopped reason",
         "Policy tag",
         "Stop target",
@@ -194,10 +202,39 @@ def test_abbreviated_thought_cards_do_not_render_stage_or_lineage_metadata():
     assert "Lineage ID" in frontend  # detail view keeps the lineage identifier.
 
 
+def test_database_fields_are_wired_into_detail_bottom_and_render_field_payloads():
+    frontend = _read(FRONTEND_JS_PATH)
+    detail_start = frontend.index("function ThoughtDetail")
+    detail_end = frontend.index("function OpenBrainIngestionPage")
+    detail = frontend[detail_start:detail_end]
+
+    assert "h(RelatedMemories, { thought: thought })" in detail
+    assert "h(DatabaseFields, { thought: thought })" in detail
+    assert detail.index("h(RelatedMemories, { thought: thought })") < detail.index(
+        "h(DatabaseFields, { thought: thought })"
+    )
+
+    fields_start = frontend.index("function DatabaseFields")
+    fields_end = frontend.index("function ThoughtDetail")
+    database_fields = frontend[fields_start:fields_end]
+
+    for required in (
+        "props.thought && props.thought.database_fields",
+        'h("dl", { className: "ob-db-field-grid" }',
+        'h("dt", { className: "ob-db-field-key" }',
+        'h("dd", { className: "ob-db-field-value" }',
+        "safeText(field.name)",
+        "field.description",
+        "h(DatabaseFieldValue, { field: field })",
+        "field.note",
+    ):
+        assert required in database_fields
+
+
 def test_css_uses_ob_namespace_and_required_selectors():
     css = _read(FRONTEND_CSS_PATH)
 
-    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges", ".ob-policy-tag", ".ob-policy-legend"):
+    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges", ".ob-policy-tag", ".ob-policy-legend", ".ob-database-fields", ".ob-db-field-row"):
         assert selector in css
     assert "ready-for-cortexdb" in css
     assert ":disabled" in css or "[disabled]" in css

@@ -77,6 +77,8 @@ If a non-imported card reaches a later stage in the snapshot, the API intentiona
 
 Imported cards show a **CortexDB receipt** in the detail dialog, including fields such as receipt ID, type, capture time, ingestion run ID, source unit ID, and candidate ID. The receipt indicates that the candidate crossed the boundary into CortexDB/OpenBrain memory storage.
 
+At the bottom of every detail dialog, the dashboard also lists the known `public.thoughts` database fields. Values are filled from the sanitized snapshot, CortexDB receipt, or safe database/upsert defaults when the card has actually been imported. A dash means the snapshot does not contain a value for that field.
+
 ## Snapshot path
 
 The backend reads the sanitized snapshot from:

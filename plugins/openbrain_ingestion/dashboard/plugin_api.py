@@ -9,6 +9,7 @@ canonical stage IDs.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -115,6 +116,33 @@ _ALLOWED_FILTERS = {
     "zero_thoughts",
 }
 _ALLOWED_SORTS = {"default", "newest", "oldest", "most_thoughts", "most_stopped"}
+
+# Known public.thoughts columns from current and legacy OpenBrain schema/migrations.
+# The dashboard is snapshot-backed, so detail responses fill only values that
+# are present in the sanitized snapshot/receipt or safe schema defaults; missing
+# values stay visible but blank in the UI.
+THOUGHT_DATABASE_FIELDS: tuple[dict[str, str], ...] = (
+    {"name": "id", "description": "CortexDB thought UUID"},
+    {"name": "content", "description": "Captured thought text"},
+    {"name": "embedding", "description": "Semantic-search vector; omitted from dashboard payload"},
+    {"name": "metadata", "description": "Structured JSON metadata"},
+    {"name": "source", "description": "Legacy capture source column, when present"},
+    {"name": "created_at", "description": "Database creation timestamp"},
+    {"name": "updated_at", "description": "Database update timestamp"},
+    {"name": "content_fingerprint", "description": "Normalized-content SHA-256 fingerprint"},
+    {"name": "type", "description": "Thought type"},
+    {"name": "source_type", "description": "Source family/type"},
+    {"name": "importance", "description": "OpenBrain importance score, 0–6"},
+    {"name": "quality_score", "description": "Capture quality score, 0–100"},
+    {"name": "sensitivity_tier", "description": "OpenBrain sensitivity tier"},
+    {"name": "status", "description": "Workflow status for tasks/ideas"},
+    {"name": "status_updated_at", "description": "Workflow status timestamp"},
+    {"name": "enriched", "description": "Whether enrichment has completed"},
+    {"name": "derived_from", "description": "Parent thought IDs for derived artifacts"},
+    {"name": "derivation_method", "description": "How a derived thought was generated"},
+    {"name": "derivation_layer", "description": "primary or derived"},
+    {"name": "supersedes", "description": "Prior thought UUID replaced by this row"},
+)
 
 _SENSITIVE_KEY_PARTS = (
     "access_token",
@@ -576,6 +604,16 @@ class CortexDBReceipt(BaseModel):
     candidate_id: str | None = None
 
 
+class DatabaseFieldRecord(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+    description: str | None = None
+    value: Any = None
+    populated: bool = False
+    note: str | None = None
+
+
 class ProducerInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -831,6 +869,7 @@ class ThoughtDetail(BaseModel):
     related_memories: list[RelatedMemory] = Field(default_factory=list)
     cortexdb_receipt: CortexDBReceipt | None = None
     cortexdb_id: str | None = None
+    database_fields: list[DatabaseFieldRecord] = Field(default_factory=list)
 
     @field_validator("current_stage", mode="before")
     @classmethod
@@ -926,6 +965,171 @@ def _receipt_id(thought: dict[str, Any]) -> str | None:
     if isinstance(receipt, dict) and receipt.get("id"):
         return str(receipt["id"])
     return None
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if value == [] or value == {}:
+            continue
+        return value
+    return None
+
+
+def _database_metadata(thought: dict[str, Any], source_unit: Any) -> dict[str, Any]:
+    raw_metadata = thought.get("metadata")
+    metadata = copy.deepcopy(raw_metadata) if isinstance(raw_metadata, dict) else {}
+
+    for key in ("type", "source", "source_type", "importance", "quality_score", "sensitivity_tier"):
+        value = thought.get(key)
+        if value is not None and key not in metadata:
+            metadata[key] = value
+    for key in ("topics", "people", "dates_mentioned", "action_items", "tags"):
+        value = thought.get(key)
+        if value and key not in metadata:
+            metadata[key] = copy.deepcopy(value)
+    for key in ("lineage_id", "candidate_id"):
+        value = thought.get(key)
+        if value and key not in metadata:
+            metadata[key] = value
+
+    source_summary = _source_unit_summary(source_unit)
+    if source_summary.get("id") and "source_unit_id" not in metadata:
+        metadata["source_unit_id"] = source_summary["id"]
+    if source_summary.get("label") and "source_label" not in metadata:
+        metadata["source_label"] = source_summary["label"]
+    if source_summary.get("source_type") and "dashboard_source_type" not in metadata:
+        metadata["dashboard_source_type"] = source_summary["source_type"]
+
+    return {key: value for key, value in metadata.items() if value is not None and value != [] and value != {}}
+
+
+def _embedding_field_value(value: Any, *, imported: bool) -> tuple[Any, str | None]:
+    if isinstance(value, list):
+        return f"[embedding vector omitted; {len(value)} dimensions]", "Vector values are intentionally omitted from dashboard detail payloads."
+    if isinstance(value, str) and value.strip():
+        return "[embedding vector omitted]", "Vector values are intentionally omitted from dashboard detail payloads."
+    if imported:
+        return "[embedding vector omitted]", "Imported CortexDB rows normally have an embedding; the raw vector is intentionally omitted."
+    return None, "No embedding is stored until the thought is captured."
+
+
+def _receipt_field_value(receipt: dict[str, Any], field_name: str) -> Any:
+    aliases = {
+        "id": ("id", "thought_id", "uuid"),
+        "created_at": ("created_at", "captured_at"),
+        "content_fingerprint": ("content_fingerprint", "fingerprint"),
+    }
+    for key in aliases.get(field_name, (field_name,)):
+        value = receipt.get(key)
+        if value is not None and value != "" and value != [] and value != {}:
+            return value
+    return None
+
+
+def _content_fingerprint(content: Any) -> str | None:
+    if not isinstance(content, str) or not content.strip():
+        return None
+    normalized = re.sub(r"\s+", " ", content).strip().lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _database_default_value(field_name: str, metadata: dict[str, Any]) -> tuple[Any, str | None]:
+    if field_name == "type":
+        return "observation", "Database/upsert default shown because no explicit value was present in the snapshot."
+    if field_name == "source_type":
+        source = _first_present(metadata.get("source"), "unknown")
+        note = "Database/upsert derives source_type from metadata.source when source_type is absent."
+        return source, note
+    if field_name == "status":
+        thought_type = _first_present(metadata.get("type"), "observation")
+        if thought_type in {"task", "idea"}:
+            return "new", "Database/upsert default for task/idea rows when status is absent."
+        return None, None
+    defaults = {
+        "importance": 3,
+        "quality_score": 70,
+        "sensitivity_tier": "standard",
+        "source": "mcp",
+        "enriched": False,
+        "derivation_layer": "primary",
+    }
+    if field_name not in defaults:
+        return None, None
+    return defaults[field_name], "Database/upsert default shown because no explicit value was present in the snapshot."
+
+
+def _database_field_value(
+    *,
+    field_name: str,
+    thought: dict[str, Any],
+    source_unit: Any,
+    metadata: dict[str, Any],
+) -> tuple[Any, str | None]:
+    raw_receipt = thought.get("cortexdb_receipt")
+    receipt: dict[str, Any] = raw_receipt if isinstance(raw_receipt, dict) else {}
+    imported = thought.get("disposition") == "imported"
+
+    receipt_value = _receipt_field_value(receipt, field_name)
+    explicit_value = _first_present(thought.get(field_name), receipt_value, metadata.get(field_name))
+    if field_name == "id":
+        return _receipt_id(thought), None
+    if field_name == "content":
+        return _first_present(explicit_value, receipt.get("content"), thought.get("final_memory_text")), None
+    if field_name == "embedding":
+        return _embedding_field_value(thought.get("embedding"), imported=imported)
+    if field_name == "metadata":
+        return _first_present(receipt.get("metadata"), metadata or None), None
+    if field_name == "created_at":
+        return _first_present(explicit_value, receipt.get("captured_at")), None
+    if field_name == "content_fingerprint":
+        if explicit_value is not None:
+            return explicit_value, None
+        if imported:
+            content = _first_present(receipt.get("content"), thought.get("final_memory_text"), thought.get("content"))
+            fingerprint = _content_fingerprint(content)
+            if fingerprint:
+                return fingerprint, "Derived with database normalization because the snapshot did not include this column."
+        return None, None
+    if field_name == "source":
+        if explicit_value is not None:
+            return explicit_value, None
+        return _first_present(metadata.get("source")), None
+    if field_name == "source_type":
+        return _first_present(explicit_value, metadata.get("source_type"), metadata.get("source")), None
+    if explicit_value is not None:
+        return explicit_value, None
+    if imported:
+        return _database_default_value(field_name, metadata)
+    return None, None
+
+
+def _database_fields(thought: dict[str, Any], source_unit: Any) -> list[dict[str, Any]]:
+    metadata = _database_metadata(thought, source_unit)
+    fields: list[dict[str, Any]] = []
+    for spec in THOUGHT_DATABASE_FIELDS:
+        name = spec["name"]
+        value, note = _database_field_value(
+            field_name=name,
+            thought=thought,
+            source_unit=source_unit,
+            metadata=metadata,
+        )
+        populated = value is not None and value != "" and value != [] and value != {}
+        entry: dict[str, Any] = {
+            "name": name,
+            "description": spec.get("description"),
+            "populated": populated,
+        }
+        if populated:
+            entry["value"] = _sanitize_node(value, name)
+        if note:
+            entry["note"] = note
+        fields.append(DatabaseFieldRecord.model_validate(entry).model_dump(mode="json", exclude_none=True))
+    return fields
 
 
 def _card(thought: Any, source_unit_id: str) -> dict[str, Any]:
@@ -1178,6 +1382,7 @@ def _thought_detail(thought: ThoughtRecord, source_unit: SourceUnit) -> dict[str
         t["cortexdb_id"] = _receipt_id(t)
     t["source_unit"] = _source_unit_summary(source_unit)
     t["stages"] = _stage_timeline(t)
+    t["database_fields"] = _database_fields(t, source_unit)
     return ThoughtDetail.model_validate(t).model_dump(mode="json", exclude_none=True)
 
 
