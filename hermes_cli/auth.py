@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
@@ -1259,14 +1259,79 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
             if isinstance(existing, list) and existing:
                 continue
             merged[gp_key] = list(gp_entries)
+        for key, entries in list(merged.items()):
+            if isinstance(entries, list):
+                merged[key] = [
+                    entry for entry in entries
+                    if not (isinstance(entry, dict) and _entry_matches_removed_credential(auth_store, key, entry))
+                ]
         return merged
 
     provider_entries = pool.get(provider_id)
     if isinstance(provider_entries, list) and provider_entries:
-        return list(provider_entries)
+        return [
+            entry for entry in provider_entries
+            if not (isinstance(entry, dict) and _entry_matches_removed_credential(auth_store, provider_id, entry))
+        ]
     # Profile has no entries for this provider — fall back to global.
     global_entries = global_pool.get(provider_id)
-    return list(global_entries) if isinstance(global_entries, list) else []
+    if not isinstance(global_entries, list):
+        return []
+    return [
+        entry for entry in global_entries
+        if not (isinstance(entry, dict) and _entry_matches_removed_credential(auth_store, provider_id, entry))
+    ]
+
+
+_CREDENTIAL_POOL_REMOVED_KEY = "credential_pool_removed"
+_REMOVED_CREDENTIAL_IDENTITY_KEYS = ("id", "label", "stored_label", "display_label", "account_id")
+
+
+def _normalize_credential_identity(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _removed_credential_records(auth_store: Dict[str, Any], provider_id: str) -> List[Dict[str, Any]]:
+    tombstones = auth_store.get(_CREDENTIAL_POOL_REMOVED_KEY)
+    if not isinstance(tombstones, dict):
+        return []
+    records = tombstones.get(provider_id)
+    if not isinstance(records, list):
+        return []
+    return [record for record in records if isinstance(record, dict)]
+
+
+def _credential_entry_identity_values(entry: Dict[str, Any]) -> Set[str]:
+    values = []
+    for key in ("id", "label", "stored_label", "display_label", "account_id", "chatgpt_account_id", "ChatGPT-Account-Id"):
+        value = entry.get(key)
+        if value:
+            values.append(value)
+    tokens = entry.get("tokens")
+    if isinstance(tokens, dict):
+        for key in ("account_id", "chatgpt_account_id", "ChatGPT-Account-Id"):
+            value = tokens.get(key)
+            if value:
+                values.append(value)
+    return {_normalize_credential_identity(value) for value in values if value}
+
+
+def _removed_record_identity_values(record: Dict[str, Any]) -> Set[str]:
+    return {
+        _normalize_credential_identity(record.get(key))
+        for key in _REMOVED_CREDENTIAL_IDENTITY_KEYS
+        if record.get(key)
+    }
+
+
+def _entry_matches_removed_credential(auth_store: Dict[str, Any], provider_id: str, entry: Dict[str, Any]) -> bool:
+    entry_values = _credential_entry_identity_values(entry)
+    if not entry_values:
+        return False
+    for record in _removed_credential_records(auth_store, provider_id):
+        if entry_values & _removed_record_identity_values(record):
+            return True
+    return False
 
 
 def write_credential_pool(provider_id: str, entries: List[Dict[str, Any]]) -> Path:
@@ -1282,10 +1347,18 @@ def write_credential_pool(provider_id: str, entries: List[Dict[str, Any]]) -> Pa
         if not isinstance(pool, dict):
             pool = {}
             auth_store["credential_pool"] = pool
+        filtered_entries = [
+            entry
+            for entry in entries
+            if not (
+                isinstance(entry, dict)
+                and _entry_matches_removed_credential(auth_store, provider_id, entry)
+            )
+        ]
         pool[provider_id] = [
             sanitize_borrowed_credential_payload(entry, provider_id)
             if isinstance(entry, dict) else entry
-            for entry in entries
+            for entry in filtered_entries
         ]
         return _save_auth_store(auth_store)
 
