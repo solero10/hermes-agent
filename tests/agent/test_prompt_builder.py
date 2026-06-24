@@ -2,6 +2,7 @@
 
 import builtins
 import importlib
+import json
 import logging
 import sys
 
@@ -323,6 +324,74 @@ class TestBuildSkillsSystemPrompt:
         # Unfiltered call must not be served from the compacted cache entry.
         full = build_skills_system_prompt()
         assert "Write threads" in full
+
+    def test_usage_tiered_catalog_promotes_main_demotes_rare_and_hides_unused(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        skills = {
+            ("productivity", "heavy-skill"): "Heavy desc",
+            ("productivity", "moderate-skill"): "Moderate desc",
+            ("productivity", "rare-skill"): "Rare desc",
+            ("productivity", "unused-skill"): "Unused desc",
+            ("social-media", "demoted-main"): "Demoted desc",
+        }
+        for (category, name), desc in skills.items():
+            d = tmp_path / "skills" / category / name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(
+                f"---\nname: {name}\ndescription: {desc}\n---\n"
+            )
+
+        (tmp_path / "skills" / ".usage.json").write_text(
+            json.dumps(
+                {
+                    "heavy-skill": {"use_count": 50},
+                    "moderate-skill": {"use_count": 10},
+                    "rare-skill": {"use_count": 1},
+                    "demoted-main": {"use_count": 25},
+                }
+            )
+        )
+
+        result = build_skills_system_prompt(
+            compact_categories=frozenset({"social-media"})
+        )
+
+        assert "Main skills (heavy/moderate use; descriptions shown)" in result
+        assert "- heavy-skill: Heavy desc" in result
+        assert "- moderate-skill: Moderate desc" in result
+
+        assert "Rare/contextual skills [names only" in result
+        assert "rare-skill" in result
+        assert "Rare desc" not in result
+
+        assert "social-media [names only]: demoted-main" in result
+        assert "Demoted desc" not in result
+
+        assert "unused-skill" not in result
+        assert "unused/niche skill(s) are hidden" in result
+
+    def test_usage_signature_keeps_tiered_catalog_cache_fresh(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        d = tmp_path / "skills" / "coding" / "cache-skill"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            "---\nname: cache-skill\ndescription: Cache sensitive desc\n---\n"
+        )
+        usage_path = tmp_path / "skills" / ".usage.json"
+        usage_path.write_text(json.dumps({"cache-skill": {"use_count": 1}}))
+
+        first = build_skills_system_prompt()
+        assert "cache-skill" in first
+        assert "Cache sensitive desc" not in first
+
+        usage_path.write_text(json.dumps({"cache-skill": {"use_count": 10}}))
+        second = build_skills_system_prompt()
+        assert "- cache-skill: Cache sensitive desc" in second
 
     def test_excludes_incompatible_platform_skills(self, monkeypatch, tmp_path):
         """Skills with platforms: [macos] should not appear on Linux."""

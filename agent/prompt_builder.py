@@ -966,6 +966,8 @@ _SKILLS_PROMPT_CACHE_MAX = 8
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
 _SKILLS_SNAPSHOT_VERSION = 1
+_SKILL_MAIN_USE_COUNT_THRESHOLD = 10
+_SKILL_RARE_USE_COUNT_THRESHOLD = 1
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1031,6 +1033,53 @@ def _write_skills_snapshot(
         atomic_json_write(_skills_prompt_snapshot_path(), payload)
     except Exception as e:
         logger.debug("Could not write skills prompt snapshot: %s", e)
+
+
+def _skill_usage_signature(skills_dir: Path) -> Optional[tuple[int, int]]:
+    """Return a cheap cache signature for the usage sidecar, if present."""
+    usage_path = skills_dir / ".usage.json"
+    try:
+        st = usage_path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _coerce_usage_count(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _load_skill_use_counts() -> dict[str, int]:
+    """Load best-effort per-skill use counts for catalog tiering.
+
+    ``tools.skill_usage`` is imported lazily so this module remains cheap to
+    import and independent from the skills tool registry. ``use_count`` is the
+    primary signal; older/partial records that only have view or patch activity
+    use that as a fallback so real prior activity still keeps the skill visible.
+    """
+    try:
+        from tools.skill_usage import load_usage
+
+        usage = load_usage()
+    except Exception as e:
+        logger.debug("Could not load skill usage telemetry: %s", e)
+        return {}
+
+    counts: dict[str, int] = {}
+    for name, record in usage.items():
+        if not isinstance(record, dict):
+            continue
+        use_count = _coerce_usage_count(record.get("use_count"))
+        if use_count <= 0:
+            use_count = max(
+                _coerce_usage_count(record.get("view_count")),
+                _coerce_usage_count(record.get("patch_count")),
+            )
+        counts[str(name)] = max(0, use_count)
+    return counts
 
 
 def _build_snapshot_entry(
@@ -1173,6 +1222,7 @@ def build_skills_system_prompt(
         _platform_hint,
         tuple(sorted(disabled)),
         tuple(sorted(compact_categories or ())),
+        _skill_usage_signature(skills_dir),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1307,51 +1357,113 @@ def build_skills_system_prompt(
                 logger.debug("Could not read external skill description %s: %s", desc_file, e)
 
     # Posture-driven category demotion (e.g. non-coding skills while pairing
-    # on code). Demoted categories stay in the index as a single names-only
-    # line — descriptions are dropped to cut noise, but every skill name
-    # remains visible so memory-anchored recall ("load <name>") keeps working.
-    # NEVER remove entries entirely: agent-created skills are the model's
-    # project memory, and models don't reach for skills_list to rediscover
-    # what the index stops showing them. Match on the top-level category
-    # segment so nested categories ("social-media/twitter") are demoted with
-    # their parent.
+    # on code). Demoted categories stay names-only when they are shown.
+    # Usage-driven tiering below keeps the heavily/moderately used working set
+    # prominent, demotes rare skills to names-only, and hides never-used/niche
+    # skills from the startup prompt. Explicit skill_view/skills_list calls can
+    # still load every enabled skill.
     demoted = frozenset(
         cat for cat in skills_by_category
         if cat.split("/", 1)[0] in (compact_categories or frozenset())
     )
 
-    hidden_note = ""
+    disclosure_notes: list[str] = []
     if demoted:
-        hidden_note = (
-            "\n(Categories marked [names only] are outside the current coding "
-            "context, so their descriptions are omitted — the skills work "
-            "normally and load with skill_view(name) as usual.)"
+        disclosure_notes.append(
+            "Categories marked [names only] are outside the current coding "
+            "context, so their descriptions are omitted; the skills work "
+            "normally and load with skill_view(name)."
         )
 
     if not skills_by_category:
         result = ""
     else:
+        usage_counts = _load_skill_use_counts()
+        usage_matched = any(
+            name in usage_counts
+            for skills in skills_by_category.values()
+            for name, _desc in skills
+        )
         index_lines = []
-        for category in sorted(skills_by_category.keys()):
-            # Deduplicate and sort skills within each category
-            seen = set()
-            if category in demoted:
-                names = sorted({name for name, _ in skills_by_category[category]})
-                index_lines.append(f"  {category} [names only]: {', '.join(names)}")
-                continue
-            cat_desc = category_descriptions.get(category, "")
-            if cat_desc:
-                index_lines.append(f"  {category}: {cat_desc}")
-            else:
-                index_lines.append(f"  {category}:")
-            for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
-                if name in seen:
+
+        if usage_counts and usage_matched:
+            main_by_category: dict[str, list[tuple[str, str, int]]] = {}
+            names_only_by_category: dict[str, list[str]] = {}
+            hidden_unused = 0
+
+            for category in sorted(skills_by_category.keys()):
+                seen = set()
+                for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    use_count = usage_counts.get(name, 0)
+                    if use_count >= _SKILL_MAIN_USE_COUNT_THRESHOLD and category not in demoted:
+                        main_by_category.setdefault(category, []).append((name, desc, use_count))
+                    elif use_count >= _SKILL_RARE_USE_COUNT_THRESHOLD:
+                        names_only_by_category.setdefault(category, []).append(name)
+                    else:
+                        hidden_unused += 1
+
+            if main_by_category:
+                index_lines.append(
+                    "  Main skills (heavy/moderate use; descriptions shown):"
+                )
+                for category in sorted(main_by_category.keys()):
+                    cat_desc = category_descriptions.get(category, "")
+                    if cat_desc:
+                        index_lines.append(f"    {category}: {cat_desc}")
+                    else:
+                        index_lines.append(f"    {category}:")
+                    for name, desc, _use_count in sorted(
+                        main_by_category[category], key=lambda x: (-x[2], x[0])
+                    ):
+                        if desc:
+                            index_lines.append(f"      - {name}: {desc}")
+                        else:
+                            index_lines.append(f"      - {name}")
+
+            if names_only_by_category:
+                index_lines.append(
+                    "  Rare/contextual skills [names only; load with skill_view(name)]:"
+                )
+                for category in sorted(names_only_by_category.keys()):
+                    marker = " [names only]" if category in demoted else ""
+                    names = ", ".join(sorted(set(names_only_by_category[category])))
+                    index_lines.append(f"    {category}{marker}: {names}")
+
+            if hidden_unused:
+                disclosure_notes.append(
+                    f"{hidden_unused} unused/niche skill(s) are hidden from this compact "
+                    "startup catalog; use skills_list or skill_view(name) for exact requests."
+                )
+        else:
+            # Bootstrap/fallback path: without usable telemetry, preserve the old
+            # fully discoverable catalog so fresh installs don't start blind.
+            for category in sorted(skills_by_category.keys()):
+                # Deduplicate and sort skills within each category
+                seen = set()
+                if category in demoted:
+                    names = sorted({name for name, _ in skills_by_category[category]})
+                    index_lines.append(f"  {category} [names only]: {', '.join(names)}")
                     continue
-                seen.add(name)
-                if desc:
-                    index_lines.append(f"    - {name}: {desc}")
+                cat_desc = category_descriptions.get(category, "")
+                if cat_desc:
+                    index_lines.append(f"  {category}: {cat_desc}")
                 else:
-                    index_lines.append(f"    - {name}")
+                    index_lines.append(f"  {category}:")
+                for name, desc in sorted(skills_by_category[category], key=lambda x: x[0]):
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    if desc:
+                        index_lines.append(f"    - {name}: {desc}")
+                    else:
+                        index_lines.append(f"    - {name}")
+
+        hidden_note = ""
+        if disclosure_notes:
+            hidden_note = "\n(" + " ".join(disclosure_notes) + ")"
 
         result = (
             "## Skills (mandatory)\n"
