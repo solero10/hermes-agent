@@ -18,6 +18,24 @@ We value contributions in this order:
 
 ---
 
+## Before You Start: Search First
+
+A quick search before you build saves your time and keeps the PR queue clean — duplicates are common here, so it's worth a minute up front.
+
+- **Search both open *and* merged PRs and issues** for your topic or error symptom — the duplicate-check in the PR template fires at review time, after you've already done the work:
+  ```bash
+  gh search issues --repo NousResearch/hermes-agent "<your terms>"
+  gh search prs --repo NousResearch/hermes-agent --state all "<your terms>"
+  ```
+  Or use the web UI: [issues](https://github.com/NousResearch/hermes-agent/issues?q=) · [PRs (all states)](https://github.com/NousResearch/hermes-agent/pulls?q=is%3Apr).
+- **The issue tracker can lag the code.** Many requested features are already implemented in-tree, so also search the source (`search_files`, or your editor's grep) for the capability before proposing it.
+- **If an open PR already addresses it**, consider reviewing or improving that one instead of opening a competing duplicate.
+- **For larger work**, comment on the issue to signal you're working on it, so others don't start the same thing.
+
+Related: #38284 covers the agent-side analog — Hermes itself checking existing issues and PRs before deep self-troubleshooting. This section is the human-contributor complement.
+
+---
+
 ## Should it be a Skill or a Tool?
 
 This is the most common question for new contributors. The answer is almost always **skill**.
@@ -353,8 +371,10 @@ You must still add the tool name to the appropriate list in `toolsets.py`
 registers but is never exposed to the agent. If you introduce a new toolset,
 add it in `toolsets.py` and wire it into the relevant platform presets.
 
-See `AGENTS.md` (section **Adding New Tools**) for profile-aware paths and
-plugin vs core guidance.
+See the root [`AGENTS.md` Profile-Safe Paths section](AGENTS.md#profile-safe-paths)
+for profile-aware paths, and this document's
+[Footprint Ladder](#the-footprint-ladder-new-capability-decision) for plugin
+vs. core guidance.
 
 ---
 
@@ -411,6 +431,12 @@ Brief intro.
 
 ## When to Use
 Trigger conditions — when should the agent load this skill?
+
+## Prerequisites
+Env vars, install steps, MCP setup, API key sourcing.
+
+## How to Run
+Canonical invocation through the `terminal` tool.
 
 ## Quick Reference
 Table of common commands or API calls.

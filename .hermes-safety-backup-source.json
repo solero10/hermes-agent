@@ -1,7 +1,7 @@
 {
   "backup_branch": "ken/hermes-live-safety-backup",
   "purpose": "Backup-only snapshot of Ken's live Hermes source tree",
-  "source_branch": "ken/v016-phase4-ken-safe-20260615_155453",
-  "source_head": "4b65ebe97aa079584fa5f63f150393509ebbf7b8",
+  "source_branch": "ken/v017-keep-custom-fixes-20260625_164732",
+  "source_head": "befaa14b2f20bdff6a0f4aa7ccaa8fc89e16542f",
   "source_repo": "/home/kernk/.hermes/hermes-agent"
 }

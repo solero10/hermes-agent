@@ -67,5 +67,22 @@ def profile_env(tmp_path, monkeypatch):
     return home
 ```
 
----
+### Deterministic IDs in tool call history
+When projecting or replaying tool calls from another runtime, derive stable
+`tool_call.id` values from the source item ID or a deterministic content key.
+Random IDs make prefix caches miss and can break assistant/tool correlation
+across replays.
 
+### Bare test doubles skip __init__
+Some gateway tests build lightweight objects with `object.__new__(Class)` to
+avoid heavy adapter or runner initialization. Code paths exercised by those
+tests should use safe `getattr` defaults for optional attributes instead of
+assuming `__init__` populated every field.
+
+### Boolean auth gates require real bool markers
+Authorization gates for adapter-verified facts (for example role allowlists)
+should compare with `is True`, not generic truthiness. This prevents MagicMock
+or other truthy stand-ins from accidentally authorizing a request in tests or
+fixture-heavy paths.
+
+---

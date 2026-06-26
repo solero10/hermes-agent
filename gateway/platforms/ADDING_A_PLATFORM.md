@@ -361,10 +361,12 @@ identifiers are masked in ALL log output, not just your adapter's logs.
 | File | What to update |
 |------|---------------|
 | `README.md` | Platform list in feature table + documentation table |
-| `AGENTS.md` | Gateway description + env var config section |
+| `AGENTS.md` | Only the compact root summary, if the platform changes always-loaded architecture guidance |
+| `ARCHITECTURE.md` | Gateway/platform architecture notes, if the integration changes boundaries or invariants |
+| `CONTRIBUTING.md` | Contributor-facing rules, if the platform changes review, config, or tool-footprint guidance |
 | `website/docs/user-guide/messaging/<platform>.md` | **NEW** — Full setup guide (see existing platform docs for template) |
 | `website/docs/user-guide/messaging/index.md` | Architecture diagram, toolset table, security examples, Next Steps links |
-| `website/docs/reference/environment-variables.md` | All env vars for the platform |
+| `website/docs/reference/environment-variables.md` | All env vars/config knobs for the platform |
 
 ---
 
