@@ -23,6 +23,7 @@
     over: "#ef4444",
     unknown: "#94a3b8",
   };
+  const ACCOUNT_QUERY_PARAM = "account";
   const NEAR_VERTICAL_MIN_DX = 20;
   const NEAR_VERTICAL_MIN_DY = 8;
 
@@ -191,6 +192,31 @@
       h("div", { className: "codex-usage-reset-credits-count" }, info.label),
       h("div", { className: "codex-usage-reset-credits-expiry" }, info.expiresText)
     );
+  }
+
+  function accountRouteId(account, index) {
+    const raw = account && (account.id || account.stored_label || account.label || account.display_label);
+    const value = raw === null || raw === undefined || raw === "" ? "account-" + index : String(raw);
+    return value;
+  }
+
+  function selectedAccountIdFromLocation() {
+    try {
+      const url = new URL(window.location.href);
+      return url.searchParams.get(ACCOUNT_QUERY_PARAM) || "";
+    } catch (_err) {
+      return "";
+    }
+  }
+
+  function buildAccountDetailUrl(accountId) {
+    const url = new URL(window.location.href);
+    if (accountId) {
+      url.searchParams.set(ACCOUNT_QUERY_PARAM, accountId);
+    } else {
+      url.searchParams.delete(ACCOUNT_QUERY_PARAM);
+    }
+    return url.pathname + url.search + url.hash;
   }
 
   function normalizeHistory(history, windowData) {
@@ -445,7 +471,8 @@
     const remaining = formatPercent(windowData.remaining_percent);
     const onPace = toPercent(windowData.on_pace_remaining_percent);
     const onPaceText = onPace === null ? null : " (" + formatPercent(onPace) + " on pace)";
-    return h("div", { className: "codex-usage-window" },
+    const className = "codex-usage-window" + (props.className ? " " + props.className : "");
+    return h("div", { className: className },
       h("div", { className: "codex-usage-window-head" },
         h("span", { className: "codex-usage-window-title" }, props.title),
         h("span", { className: "codex-usage-window-value" }, remaining, onPaceText, " remaining")
@@ -516,10 +543,35 @@
     const planLabel = planLabelForAccount(account);
     const drop = toPercent(account.active_drop_percent);
     const activeText = drop === null ? "recent quota drop" : "recent quota drop · " + formatPercent(drop);
-    const cardClass = "codex-usage-card" + (exhausted ? " codex-usage-card-exhausted" : "");
+    const clickable = typeof props.onOpen === "function";
+    const cardClass = "codex-usage-card" +
+      (exhausted ? " codex-usage-card-exhausted" : "") +
+      (clickable ? " codex-usage-card-clickable" : "");
     const helperText = exhausted ? exhaustedReasonForAccount(account) : "Remaining usage since first sample";
 
-    return h(Card, { className: cardClass, "data-exhausted": exhausted ? "true" : "false", style: { "--codex-account-accent": accent } },
+    function activateCard() {
+      if (clickable) props.onOpen(account, props.index || 0);
+    }
+
+    function handleCardKeyDown(event) {
+      if (!clickable) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        activateCard();
+      }
+    }
+
+    return h(Card, {
+      className: cardClass,
+      "data-exhausted": exhausted ? "true" : "false",
+      "data-account-id": accountRouteId(account, props.index || 0),
+      role: clickable ? "button" : undefined,
+      "aria-label": clickable ? "Open details for " + label : undefined,
+      tabIndex: clickable ? 0 : undefined,
+      onClick: clickable ? activateCard : undefined,
+      onKeyDown: clickable ? handleCardKeyDown : undefined,
+      style: { "--codex-account-accent": accent },
+    },
       h(CardContent, { className: "codex-usage-card-content" },
         h("div", { className: "codex-usage-account-head" },
           h("div", { className: "codex-usage-account-title" },
@@ -540,6 +592,34 @@
     );
   }
 
+  function AccountDetailPage(props) {
+    const account = props.account || {};
+    const windows = account.windows || {};
+    const accent = colorForAccount(account, props.index || 0);
+    const label = account.label || account.stored_label || account.id || "Codex account";
+    const planLabel = planLabelForAccount(account);
+    const drop = toPercent(account.active_drop_percent);
+    const activeText = drop === null ? "recent quota drop" : "recent quota drop · " + formatPercent(drop);
+
+    return h("section", { className: "codex-usage-detail", style: { "--codex-account-accent": accent } },
+      h("div", { className: "codex-usage-detail-head" },
+        h("button", { type: "button", className: "codex-usage-detail-back", "aria-label": "Back to Codex account list", onClick: props.onBack }, "← Accounts"),
+        h("div", { className: "codex-usage-detail-title" },
+          h("span", { className: "codex-usage-dot", "aria-hidden": "true" }),
+          h("div", null,
+            h("div", { className: "codex-usage-detail-name" }, label),
+            h("div", { className: "codex-usage-detail-subtitle" }, planLabel, account.active_now ? " · " + activeText : "")
+          )
+        ),
+        h("span", { className: "codex-usage-detail-badge" }, "5-hour + weekly")
+      ),
+      h("div", { className: "codex-usage-detail-charts" },
+        h(WindowMetric, { title: "5-hour", windowData: windows.five_hour, className: "codex-usage-window-detail" }),
+        h(WindowMetric, { title: "Weekly", windowData: windows.weekly, className: "codex-usage-window-detail" })
+      )
+    );
+  }
+
   function CodexUsageMonitor() {
     const state = useState(null);
     const snapshot = state[0];
@@ -550,6 +630,9 @@
     const errorState = useState(null);
     const error = errorState[0];
     const setError = errorState[1];
+    const selectedAccountState = useState(selectedAccountIdFromLocation);
+    const selectedAccountId = selectedAccountState[0];
+    const setSelectedAccountId = selectedAccountState[1];
 
     useEffect(function () {
       let alive = true;
@@ -576,6 +659,16 @@
       };
     }, []);
 
+    useEffect(function () {
+      function handlePopState() {
+        setSelectedAccountId(selectedAccountIdFromLocation());
+      }
+      window.addEventListener("popstate", handlePopState);
+      return function () {
+        window.removeEventListener("popstate", handlePopState);
+      };
+    }, []);
+
     const accounts = useMemo(function () {
       const rawAccounts = snapshot && Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
       return rawAccounts.slice().sort(function (a, b) {
@@ -589,12 +682,37 @@
       });
     }, [snapshot]);
 
+    const selectedAccountEntry = useMemo(function () {
+      if (!selectedAccountId) return null;
+      for (let index = 0; index < accounts.length; index += 1) {
+        const account = accounts[index];
+        if (accountRouteId(account, index) === selectedAccountId) return { account: account, index: index };
+      }
+      return null;
+    }, [accounts, selectedAccountId]);
+
     const source = snapshot && snapshot.source ? snapshot.source : {};
     const noCommand = snapshot && source.available === false;
     const dataError = snapshot && snapshot.ok === false ? (source.last_error || snapshot.error || "Codex usage data is not available yet.") : null;
     const showBlockingError = !snapshot && error;
     const showSetup = noCommand;
     const showEmpty = snapshot && !showSetup && !dataError && accounts.length === 0;
+
+    function openAccountDetail(account, index) {
+      const accountId = accountRouteId(account, index);
+      window.history.pushState({ codexUsageAccountId: accountId }, "", buildAccountDetailUrl(accountId));
+      setSelectedAccountId(accountId);
+    }
+
+    function closeAccountDetail() {
+      const state = window.history.state || {};
+      if (state.codexUsageAccountId && window.history.length > 1) {
+        window.history.back();
+        return;
+      }
+      window.history.replaceState({ codexUsageAccountId: "" }, "", buildAccountDetailUrl(""));
+      setSelectedAccountId("");
+    }
 
     return h("div", { className: "codex-usage-monitor" },
       h("header", { className: "codex-usage-hero" },
@@ -612,10 +730,17 @@
       snapshot && dataError && !showSetup ? h(StatePanel, { tone: "error", title: "Usage snapshot unavailable", message: "The usage wrapper returned an error.", detail: dataError }) : null,
       showEmpty ? h(StatePanel, { tone: "empty", title: "No Codex accounts yet", message: "The usage command ran, but it did not return any accounts. Once samples arrive, account tiles and charts will appear here." }) : null,
       snapshot && error && accounts.length > 0 ? h("div", { className: "codex-usage-inline-error" }, "Refresh failed: ", error) : null,
+      snapshot && selectedAccountId && !selectedAccountEntry ? h("div", { className: "codex-usage-inline-error" }, "Selected account was not found. Showing all accounts.") : null,
 
-      accounts.length > 0 ? h("section", { className: "codex-usage-grid", "aria-label": "Codex account usage" },
+      selectedAccountEntry ? h(AccountDetailPage, {
+        account: selectedAccountEntry.account,
+        index: selectedAccountEntry.index,
+        onBack: closeAccountDetail,
+      }) : null,
+
+      accounts.length > 0 && !selectedAccountEntry ? h("section", { className: "codex-usage-grid", "aria-label": "Codex account usage" },
         accounts.map(function (account, index) {
-          return h(AccountCard, { key: account.id || account.label || index, account: account, index: index });
+          return h(AccountCard, { key: account.id || account.label || index, account: account, index: index, onOpen: openAccountDetail });
         })
       ) : null
     );

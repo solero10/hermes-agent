@@ -5,7 +5,7 @@
   "icon": "Activity",
   "version": "0.1.0",
   "tab": { "path": "/codex-usage", "position": "after:analytics" },
-  "entry": "dist/index.js?v=20260621-exhausted-cards-v2",
-  "css": "dist/style.css?v=20260621-exhausted-cards-v2",
+  "entry": "dist/index.js?v=20260625-account-detail-v1",
+  "css": "dist/style.css?v=20260625-account-detail-v1",
   "api": "plugin_api.py"
 }

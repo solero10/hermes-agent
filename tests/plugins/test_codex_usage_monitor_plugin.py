@@ -135,8 +135,8 @@ def test_manifest_registers_expected_dashboard_plugin():
         "icon": "Activity",
         "version": "0.1.0",
         "tab": {"path": "/codex-usage", "position": "after:analytics"},
-        "entry": "dist/index.js?v=20260621-exhausted-cards-v2",
-        "css": "dist/style.css?v=20260621-exhausted-cards-v2",
+        "entry": "dist/index.js?v=20260625-account-detail-v1",
+        "css": "dist/style.css?v=20260625-account-detail-v1",
         "api": "plugin_api.py",
     }
 
@@ -939,6 +939,57 @@ def test_frontend_does_not_render_pace_as_x_axis_zones():
 
     for text in forbidden:
         assert text not in frontend
+
+
+def test_frontend_supports_account_detail_url_routing():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+
+    assert "ACCOUNT_QUERY_PARAM" in frontend
+    assert '"account"' in frontend
+    assert "selectedAccountIdFromLocation" in frontend
+    assert "window.history.pushState" in frontend
+    assert "window.addEventListener(\"popstate\"" in frontend
+    assert "window.removeEventListener(\"popstate\"" in frontend
+    assert "openAccountDetail" in frontend
+    assert "closeAccountDetail" in frontend
+
+
+def test_frontend_account_cards_are_clickable_and_accessible():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+
+    assert "onOpen" in frontend
+    assert "role: clickable ? \"button\" : undefined" in frontend
+    assert "tabIndex: clickable ? 0 : undefined" in frontend
+    assert "onKeyDown" in frontend
+    assert "event.key === \"Enter\"" in frontend
+    assert "event.key === \" \"" in frontend
+    assert "codex-usage-card-clickable" in frontend
+
+
+def test_frontend_account_detail_page_stacks_five_hour_and_weekly_without_toggle():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+
+    assert "function AccountDetailPage" in frontend
+    assert "codex-usage-detail" in frontend
+    assert "codex-usage-detail-charts" in frontend
+    assert "← Accounts" in frontend
+    assert 'h(WindowMetric, { title: "5-hour"' in frontend
+    assert 'h(WindowMetric, { title: "Weekly"' in frontend
+    assert "codex-usage-detail-toggle" not in frontend
+    assert "segmented" not in frontend.lower()
+
+
+def test_css_styles_account_detail_page_and_clickable_cards():
+    css = FRONTEND_CSS_PATH.read_text(encoding="utf-8")
+
+    assert ".codex-usage-card-clickable" in css
+    assert "cursor: pointer;" in css
+    assert ".codex-usage-detail" in css
+    assert ".codex-usage-detail-head" in css
+    assert ".codex-usage-detail-back" in css
+    assert ".codex-usage-detail-charts" in css
+    assert ".codex-usage-window-detail" in css
+    assert "grid-template-columns: minmax(0, 1fr);" in css
 
 
 def test_css_has_desktop_grid_and_mobile_stack():
