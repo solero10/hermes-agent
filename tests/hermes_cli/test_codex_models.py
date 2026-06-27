@@ -113,6 +113,18 @@ def test_fetch_from_api_keeps_supported_in_api_false_models(monkeypatch):
     assert "gpt-5-internal" not in models
 
 
+def test_get_codex_model_ids_keeps_new_live_codex_slugs(monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.codex_models._fetch_models_from_api",
+        lambda access_token: ["gpt-5.6-codex-beta"],
+    )
+
+    models = get_codex_model_ids(access_token="codex-access-token")
+
+    assert "gpt-5.6-codex-beta" in models
+    assert "gpt-5.6-codex-beta" not in DEFAULT_CODEX_MODELS
+
+
 def test_model_command_uses_runtime_access_token_for_codex_list(monkeypatch):
     from hermes_cli.main import _model_flow_openai_codex
 

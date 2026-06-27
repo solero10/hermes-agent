@@ -18,6 +18,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import type { HermesGateway } from '@/hermes'
 import { getGlobalModelOptions, getMoaModels } from '@/hermes'
 import { useI18n } from '@/i18n'
+import { filterChatGptOAuthCodexProviders } from '@/lib/model-picker-filters'
 import {
   currentPickerSelection,
   displayModelName,
@@ -111,10 +112,11 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
       : String(modelOptions.error)
     : null
 
-  const providers = modelOptions.data?.providers
+  const rawProviders = modelOptions.data?.providers
+  const providers = useMemo(() => filterChatGptOAuthCodexProviders(rawProviders ?? []), [rawProviders])
 
   const effectiveVisibleModels = useMemo(
-    () => effectiveVisibleKeys(visibleModels, providers ?? []),
+    () => effectiveVisibleKeys(visibleModels, providers),
     [visibleModels, providers]
   )
 
@@ -191,7 +193,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, requestGateway }: Model
 
   const groups = useMemo(
     () =>
-      groupModels(providers ?? [], search, { model: optionsModel, provider: optionsProvider }, effectiveVisibleModels),
+      groupModels(providers, search, { model: optionsModel, provider: optionsProvider }, effectiveVisibleModels),
     [providers, search, optionsModel, optionsProvider, effectiveVisibleModels]
   )
 

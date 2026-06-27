@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import { useI18n } from '@/i18n'
+import { filterChatGptOAuthCodexProviders } from '@/lib/model-picker-filters'
 import { currentPickerSelection } from '@/lib/model-status-label'
 import type { ModelOptionProvider, ModelOptionsResponse, ModelPricing } from '@/types/hermes'
 
@@ -66,7 +67,7 @@ export function ModelPickerDialog({
     enabled: open
   })
 
-  const providers = modelOptions.data?.providers ?? []
+  const providers = filterChatGptOAuthCodexProviders(modelOptions.data?.providers ?? [])
 
   const { model: optionsModel, provider: optionsProvider } = currentPickerSelection(
     !!sessionId,
