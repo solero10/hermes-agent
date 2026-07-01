@@ -24,6 +24,14 @@
     unknown: "#94a3b8",
   };
   const ACCOUNT_QUERY_PARAM = "account";
+  const FIVE_HOUR_RANGE_PARAM = "five_hour_range";
+  const WEEKLY_RANGE_PARAM = "weekly_range";
+  const FIVE_HOUR_FROM_PARAM = "five_hour_from";
+  const FIVE_HOUR_TO_PARAM = "five_hour_to";
+  const WEEKLY_FROM_PARAM = "weekly_from";
+  const WEEKLY_TO_PARAM = "weekly_to";
+  const FIVE_HOUR_RANGES = ["1h", "5h", "1d", "7d", "30d"];
+  const WEEKLY_RANGES = ["1w", "4w", "12w", "26w", "all"];
   const NEAR_VERTICAL_MIN_DX = 20;
   const NEAR_VERTICAL_MIN_DY = 8;
 
@@ -61,6 +69,12 @@
       hour: "2-digit",
       minute: "2-digit",
     });
+  }
+
+  function dateInputValue(value) {
+    const date = parseDate(value);
+    if (!date) return "";
+    return date.toISOString().slice(0, 10);
   }
 
   function secondsLeft(windowData) {
@@ -219,11 +233,115 @@
     return url.pathname + url.search + url.hash;
   }
 
-  function normalizeHistory(history, windowData) {
+  function rangeDefaults() {
+    return {
+      five_hour: { range: "5h", from: "", to: "" },
+      weekly: { range: "4w", from: "", to: "" },
+    };
+  }
+
+  function rangeConfig(windowKey) {
+    if (windowKey === "weekly") {
+      return { rangeParam: WEEKLY_RANGE_PARAM, fromParam: WEEKLY_FROM_PARAM, toParam: WEEKLY_TO_PARAM, ranges: WEEKLY_RANGES, fallback: "4w" };
+    }
+    return { rangeParam: FIVE_HOUR_RANGE_PARAM, fromParam: FIVE_HOUR_FROM_PARAM, toParam: FIVE_HOUR_TO_PARAM, ranges: FIVE_HOUR_RANGES, fallback: "5h" };
+  }
+
+  function sanitizeRangeValue(value, config) {
+    const raw = String(value || "").trim().toLowerCase();
+    if (raw === "custom") return "custom";
+    return config.ranges.indexOf(raw) >= 0 ? raw : config.fallback;
+  }
+
+  function rangeStateFromLocation() {
+    const state = rangeDefaults();
+    try {
+      const url = new URL(window.location.href);
+      ["five_hour", "weekly"].forEach(function (windowKey) {
+        const config = rangeConfig(windowKey);
+        state[windowKey] = {
+          range: sanitizeRangeValue(url.searchParams.get(config.rangeParam), config),
+          from: url.searchParams.get(config.fromParam) || "",
+          to: url.searchParams.get(config.toParam) || "",
+        };
+      });
+    } catch (_err) { /* defaults are safe */ }
+    return state;
+  }
+
+  function buildDetailUrl(accountId, rangeState) {
+    const url = new URL(window.location.href);
+    if (accountId) url.searchParams.set(ACCOUNT_QUERY_PARAM, accountId);
+    else url.searchParams.delete(ACCOUNT_QUERY_PARAM);
+    const state = rangeState || rangeDefaults();
+    ["five_hour", "weekly"].forEach(function (windowKey) {
+      const config = rangeConfig(windowKey);
+      const value = state[windowKey] || {};
+      const range = sanitizeRangeValue(value.range, config);
+      if (range === config.fallback) url.searchParams.delete(config.rangeParam);
+      else url.searchParams.set(config.rangeParam, range);
+      if (value.from) url.searchParams.set(config.fromParam, value.from);
+      else url.searchParams.delete(config.fromParam);
+      if (value.to) url.searchParams.set(config.toParam, value.to);
+      else url.searchParams.delete(config.toParam);
+    });
+    return url.pathname + url.search + url.hash;
+  }
+
+  function rangeLabel(value) {
+    const labels = { "1h": "1h", "5h": "5h", "1d": "1d", "7d": "7d", "30d": "30d", "1w": "1w", "4w": "4w", "12w": "12w", "26w": "26w", all: "All", custom: "Custom" };
+    return labels[value] || value;
+  }
+
+  function rangePayloadForWindow(windowData, windowKey, state) {
+    const longHistory = windowData && windowData.long_history && typeof windowData.long_history === "object" ? windowData.long_history : {};
+    const config = rangeConfig(windowKey);
+    const rangeState = state || { range: config.fallback, from: "", to: "" };
+    const range = sanitizeRangeValue(rangeState.range, config);
+    const base = range === "custom"
+      ? (longHistory.all || longHistory[config.ranges[config.ranges.length - 1]] || longHistory[config.fallback])
+      : longHistory[range];
+    if (!base || typeof base !== "object") return null;
+    const payload = Object.assign({}, base, { points: Array.isArray(base.points) ? base.points.slice() : [], preset: range });
+    if (range === "custom") {
+      const from = parseDate(rangeState.from);
+      const to = parseDate(rangeState.to);
+      payload.requested_from = from ? from.toISOString() : base.requested_from;
+      payload.requested_to = to ? new Date(to.getTime() + 24 * 60 * 60 * 1000 - 1).toISOString() : base.requested_to;
+      payload.custom_range = true;
+      if (from && to && from.getTime() > to.getTime()) {
+        payload.points = [];
+        payload.empty_reason = "invalid_range";
+      } else if (from || to) {
+        payload.points = payload.points.filter(function (point) {
+          const generated = parseDate(point && point.generated_at);
+          if (!generated) return false;
+          if (from && generated < from) return false;
+          if (to && generated > new Date(to.getTime() + 24 * 60 * 60 * 1000 - 1)) return false;
+          return true;
+        });
+        if (!payload.points.length) payload.empty_reason = "outside_retention";
+      } else {
+        payload.empty_reason = "custom_dates_required";
+        payload.points = [];
+      }
+    }
+    return payload;
+  }
+
+  function emptyHistoryMessage(reason) {
+    if (reason === "invalid_range") return "Choose a start date before the end date.";
+    if (reason === "custom_dates_required") return "Choose both dates, then apply the custom range.";
+    if (reason === "outside_retention") return "No retained samples for this range.";
+    return "waiting for samples";
+  }
+
+  function normalizeHistory(history, windowData, options) {
+    const longRange = Boolean(options && options.longRange);
     const resetDate = parseDate(windowData && windowData.reset_at);
     const periodSeconds = toNumber(windowData && windowData.period_seconds);
     const windowEnd = resetDate ? resetDate.getTime() : null;
-    const windowStart = resetDate && periodSeconds && periodSeconds > 0 ? windowEnd - periodSeconds * 1000 : null;
+    const windowStart = !longRange && resetDate && periodSeconds && periodSeconds > 0 ? windowEnd - periodSeconds * 1000 : null;
     const rawPoints = Array.isArray(history) ? history : [];
     const points = rawPoints
       .map(function (point) {
@@ -290,12 +408,15 @@
     const age = formatAge(snapshot.age_seconds);
     const interval = toNumber(snapshot.poll_interval_seconds) || 30;
     const ageSeconds = toNumber(snapshot.age_seconds);
-    const isStale = ageSeconds !== null && ageSeconds > interval * 2;
+    const staleAfter = toNumber(snapshot.stale_after_seconds) || interval * 2;
+    const collectorStatus = snapshot.collector_status ? String(snapshot.collector_status) : "";
+    const isStale = ageSeconds !== null && ageSeconds > staleAfter;
 
     return h("div", { className: "codex-usage-meta" },
       updated ? h("span", null, "Last updated ", updated) : null,
       age ? h("span", null, age) : null,
       snapshot.cached ? h(StatusBadge, { tone: "cached" }, "cached") : null,
+      collectorStatus ? h(StatusBadge, { tone: collectorStatus === "fresh" ? "cached" : "stale" }, "collector " + collectorStatus) : null,
       isStale ? h(StatusBadge, { tone: "stale" }, "stale") : null
     );
   }
@@ -356,7 +477,8 @@
   }
 
   function UsageChart(props) {
-    const points = normalizeHistory(props.history, props.windowData);
+    const rangePayload = props.rangePayload || null;
+    const points = normalizeHistory(rangePayload ? rangePayload.points : props.history, props.windowData, { longRange: Boolean(rangePayload) });
     const width = 320;
     const height = 168;
     const layout = {
@@ -371,8 +493,10 @@
     const plotWidth = layout.right - layout.left;
     const resetDate = parseDate(props.windowData && props.windowData.reset_at);
     const periodSeconds = toNumber(props.windowData && props.windowData.period_seconds);
-    const scaleEnd = resetDate ? resetDate.getTime() : null;
-    const scaleStart = resetDate && periodSeconds && periodSeconds > 0 ? scaleEnd - periodSeconds * 1000 : null;
+    const rangeStart = rangePayload ? parseDate(rangePayload.clamped_from || rangePayload.requested_from) : null;
+    const rangeEnd = rangePayload ? parseDate(rangePayload.clamped_to || rangePayload.requested_to) : null;
+    const scaleEnd = rangeEnd ? rangeEnd.getTime() : (resetDate ? resetDate.getTime() : null);
+    const scaleStart = rangeStart ? rangeStart.getTime() : (resetDate && periodSeconds && periodSeconds > 0 ? scaleEnd - periodSeconds * 1000 : null);
 
     function xForPoint(point) {
       if (scaleStart !== null && scaleEnd !== null && scaleEnd > scaleStart) {
@@ -402,6 +526,28 @@
       h("line", { key: "axis-x", className: "codex-usage-chart-axis", x1: layout.left, x2: layout.right, y1: layout.bottom, y2: layout.bottom }),
     ];
 
+    function xForTimestamp(value) {
+      const date = parseDate(value);
+      if (!date || scaleStart === null || scaleEnd === null || scaleEnd <= scaleStart) return null;
+      const ratio = Math.max(0, Math.min(1, (date.getTime() - scaleStart) / (scaleEnd - scaleStart)));
+      return layout.left + plotWidth * ratio;
+    }
+
+    if (rangePayload && Array.isArray(rangePayload.reset_markers)) {
+      rangePayload.reset_markers.forEach(function (marker, index) {
+        const x = xForTimestamp(marker && marker.at);
+        if (x === null) return;
+        children.push(h("line", {
+          key: "reset-marker-" + index,
+          className: "codex-usage-reset-marker",
+          x1: x,
+          x2: x,
+          y1: layout.top,
+          y2: layout.bottom,
+        }));
+      });
+    }
+
     if (points.length === 0) {
       children.push(h("text", {
         key: "waiting",
@@ -410,7 +556,7 @@
         y: layout.top + layout.plotHeight / 2,
         textAnchor: "middle",
         dominantBaseline: "middle",
-      }, "waiting for samples"));
+      }, emptyHistoryMessage(rangePayload && rangePayload.empty_reason)));
     } else {
       function xForVisiblePoint(point) {
         const exact = xForPoint(point);
@@ -466,8 +612,49 @@
     }, children);
   }
 
+  function RangeControls(props) {
+    const config = rangeConfig(props.windowKey);
+    const state = props.state || { range: config.fallback, from: "", to: "" };
+    const selected = sanitizeRangeValue(state.range, config);
+    const customId = "codex-usage-custom-" + props.windowKey;
+    return h("div", { className: "codex-usage-range-controls", "aria-label": props.title + " history range" },
+      h("div", { className: "codex-usage-range-buttons", role: "group", "aria-label": props.title + " presets" },
+        config.ranges.map(function (range) {
+          return h("button", {
+            key: range,
+            type: "button",
+            className: "codex-usage-range-button" + (selected === range ? " codex-usage-range-button-active" : ""),
+            "aria-pressed": selected === range ? "true" : "false",
+            onClick: function () { props.onChange(props.windowKey, { range: range }); },
+          }, rangeLabel(range));
+        }),
+        h("button", {
+          type: "button",
+          className: "codex-usage-range-button" + (selected === "custom" ? " codex-usage-range-button-active" : ""),
+          "aria-pressed": selected === "custom" ? "true" : "false",
+          onClick: function () { props.onChange(props.windowKey, { range: "custom" }); },
+        }, "Custom")
+      ),
+      selected === "custom" ? h("div", { className: "codex-usage-custom-range", id: customId },
+        h("label", null, "From", h("input", {
+          type: "date",
+          value: dateInputValue(state.from),
+          max: dateInputValue(state.to) || undefined,
+          onChange: function (event) { props.onChange(props.windowKey, { range: "custom", from: event.target.value }); },
+        })),
+        h("label", null, "To", h("input", {
+          type: "date",
+          value: dateInputValue(state.to),
+          min: dateInputValue(state.from) || undefined,
+          onChange: function (event) { props.onChange(props.windowKey, { range: "custom", to: event.target.value }); },
+        }))
+      ) : null
+    );
+  }
+
   function WindowMetric(props) {
     const windowData = props.windowData || {};
+    const rangePayload = props.rangePayload || null;
     const remaining = formatPercent(windowData.remaining_percent);
     const onPace = toPercent(windowData.on_pace_remaining_percent);
     const onPaceText = onPace === null ? null : " (" + formatPercent(onPace) + " on pace)";
@@ -478,7 +665,9 @@
         h("span", { className: "codex-usage-window-value" }, remaining, onPaceText, " remaining")
       ),
       h("div", { className: "codex-usage-reset" }, formatReset(windowData, props.title)),
-      h(UsageChart, { history: windowData.history, label: props.title, windowData: windowData })
+      props.rangeState && props.onRangeChange ? h(RangeControls, { title: props.title, windowKey: props.windowKey, state: props.rangeState, onChange: props.onRangeChange }) : null,
+      rangePayload ? h("div", { className: "codex-usage-range-meta" }, rangeLabel(rangePayload.preset), " · ", rangePayload.points && rangePayload.points.length ? rangePayload.points.length + " points" : emptyHistoryMessage(rangePayload.empty_reason)) : null,
+      h(UsageChart, { history: windowData.history, label: props.title, windowData: windowData, rangePayload: rangePayload })
     );
   }
 
@@ -614,8 +803,24 @@
         h("span", { className: "codex-usage-detail-badge" }, "5-hour + weekly")
       ),
       h("div", { className: "codex-usage-detail-charts" },
-        h(WindowMetric, { title: "5-hour", windowData: windows.five_hour, className: "codex-usage-window-detail" }),
-        h(WindowMetric, { title: "Weekly", windowData: windows.weekly, className: "codex-usage-window-detail" })
+        h(WindowMetric, {
+          title: "5-hour",
+          windowKey: "five_hour",
+          windowData: windows.five_hour,
+          className: "codex-usage-window-detail",
+          rangeState: props.rangeState && props.rangeState.five_hour,
+          rangePayload: rangePayloadForWindow(windows.five_hour, "five_hour", props.rangeState && props.rangeState.five_hour),
+          onRangeChange: props.onRangeChange,
+        }),
+        h(WindowMetric, {
+          title: "Weekly",
+          windowKey: "weekly",
+          windowData: windows.weekly,
+          className: "codex-usage-window-detail",
+          rangeState: props.rangeState && props.rangeState.weekly,
+          rangePayload: rangePayloadForWindow(windows.weekly, "weekly", props.rangeState && props.rangeState.weekly),
+          onRangeChange: props.onRangeChange,
+        })
       )
     );
   }
@@ -633,6 +838,9 @@
     const selectedAccountState = useState(selectedAccountIdFromLocation);
     const selectedAccountId = selectedAccountState[0];
     const setSelectedAccountId = selectedAccountState[1];
+    const rangeStateHook = useState(rangeStateFromLocation);
+    const detailRangeState = rangeStateHook[0];
+    const setDetailRangeState = rangeStateHook[1];
 
     useEffect(function () {
       let alive = true;
@@ -662,6 +870,7 @@
     useEffect(function () {
       function handlePopState() {
         setSelectedAccountId(selectedAccountIdFromLocation());
+        setDetailRangeState(rangeStateFromLocation());
       }
       window.addEventListener("popstate", handlePopState);
       return function () {
@@ -700,8 +909,21 @@
 
     function openAccountDetail(account, index) {
       const accountId = accountRouteId(account, index);
-      window.history.pushState({ codexUsageAccountId: accountId }, "", buildAccountDetailUrl(accountId));
+      window.history.pushState({ codexUsageAccountId: accountId, codexUsageRangeState: detailRangeState }, "", buildDetailUrl(accountId, detailRangeState));
       setSelectedAccountId(accountId);
+    }
+
+    function updateDetailRange(windowKey, patch) {
+      const next = Object.assign({}, detailRangeState || rangeDefaults());
+      const current = Object.assign({}, next[windowKey] || { range: rangeConfig(windowKey).fallback, from: "", to: "" });
+      const updated = Object.assign(current, patch || {});
+      if (updated.range !== "custom") {
+        updated.from = "";
+        updated.to = "";
+      }
+      next[windowKey] = updated;
+      setDetailRangeState(next);
+      window.history.pushState({ codexUsageAccountId: selectedAccountId, codexUsageRangeState: next }, "", buildDetailUrl(selectedAccountId, next));
     }
 
     function closeAccountDetail() {
@@ -710,7 +932,7 @@
         window.history.back();
         return;
       }
-      window.history.replaceState({ codexUsageAccountId: "" }, "", buildAccountDetailUrl(""));
+      window.history.replaceState({ codexUsageAccountId: "", codexUsageRangeState: detailRangeState }, "", buildDetailUrl("", detailRangeState));
       setSelectedAccountId("");
     }
 
@@ -735,6 +957,8 @@
       selectedAccountEntry ? h(AccountDetailPage, {
         account: selectedAccountEntry.account,
         index: selectedAccountEntry.index,
+        rangeState: detailRangeState,
+        onRangeChange: updateDetailRange,
         onBack: closeAccountDetail,
       }) : null,
 

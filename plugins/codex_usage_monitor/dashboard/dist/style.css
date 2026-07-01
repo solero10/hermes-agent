@@ -535,6 +535,74 @@
   height: clamp(8.5rem, 24vh, 13rem);
 }
 
+.codex-usage-range-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.codex-usage-range-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.codex-usage-range-button {
+  border: 1px solid color-mix(in srgb, var(--color-border) 78%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-card) 82%, #000);
+  color: var(--color-muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.68rem;
+  padding: 0.28rem 0.55rem;
+}
+
+.codex-usage-range-button:hover,
+.codex-usage-range-button:focus-visible,
+.codex-usage-range-button-active {
+  border-color: color-mix(in srgb, var(--codex-account-accent) 72%, var(--color-border));
+  background: color-mix(in srgb, var(--codex-account-accent) 14%, transparent);
+  color: var(--color-foreground);
+  outline: none;
+}
+
+.codex-usage-custom-range {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.codex-usage-custom-range label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--color-muted-foreground);
+  font-size: 0.7rem;
+}
+
+.codex-usage-custom-range input {
+  border: 1px solid var(--color-border);
+  border-radius: calc(var(--radius) * 0.55);
+  background: color-mix(in srgb, var(--color-card) 82%, #000);
+  color: var(--color-foreground);
+  font: inherit;
+  padding: 0.22rem 0.35rem;
+}
+
+.codex-usage-range-meta {
+  color: var(--color-muted-foreground);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.66rem;
+}
+
+.codex-usage-reset-marker {
+  stroke: color-mix(in srgb, #f59e0b 58%, transparent);
+  stroke-dasharray: 3 3;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
 @media (max-width: 1100px) {
   .codex-usage-hero {
     grid-template-columns: minmax(10rem, max-content) minmax(0, 1fr);

@@ -139,6 +139,31 @@ function isSessionBusyError(error: unknown): boolean {
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
+const VOICE_TRANSCRIPTION_BACKEND_RETRY_DELAY_MS = 2_000
+
+function isTransientVoiceTranscriptionBackendError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+
+  return /timed out connecting to hermes backend/i.test(message)
+}
+
+export async function transcribeAudioWithTransientRetry(
+  dataUrl: string,
+  mimeType?: string
+): Promise<Awaited<ReturnType<typeof transcribeAudio>>> {
+  try {
+    return await transcribeAudio(dataUrl, mimeType)
+  } catch (error) {
+    if (!isTransientVoiceTranscriptionBackendError(error)) {
+      throw error
+    }
+
+    await sleep(VOICE_TRANSCRIPTION_BACKEND_RETRY_DELAY_MS)
+
+    return await transcribeAudio(dataUrl, mimeType)
+  }
+}
+
 // Retry a gateway call across transient "session busy" so it never reaches the
 // user — the turn settles within the deadline and the call lands.
 async function withSessionBusyRetry<T>(call: () => Promise<T>): Promise<T> {
@@ -1497,7 +1522,7 @@ export function usePromptActions({
       }
 
       const dataUrl = await blobToDataUrl(audio)
-      const result = await transcribeAudio(dataUrl, audio.type)
+      const result = await transcribeAudioWithTransientRetry(dataUrl, audio.type)
 
       return result.transcript
     },

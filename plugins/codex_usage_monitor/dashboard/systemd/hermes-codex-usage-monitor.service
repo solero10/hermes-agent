@@ -1,0 +1,10 @@
+[Unit]
+Description=Hermes Codex Usage Monitor collector
+Documentation=man:systemd.service(5)
+
+[Service]
+Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=%h/.hermes/hermes-agent/plugins/codex_usage_monitor/dashboard
+ExecStart=/usr/bin/env python3 %h/.hermes/hermes-agent/plugins/codex_usage_monitor/dashboard/collector.py once
+Nice=5

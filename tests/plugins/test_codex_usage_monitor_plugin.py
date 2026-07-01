@@ -23,6 +23,7 @@ MANIFEST_PATH = PLUGIN_MODULE_PATH.with_name("manifest.json")
 PLUGIN_YAML_PATH = PLUGIN_MODULE_PATH.parents[1] / "plugin.yaml"
 FRONTEND_JS_PATH = PLUGIN_MODULE_PATH.with_name("dist") / "index.js"
 FRONTEND_CSS_PATH = PLUGIN_MODULE_PATH.with_name("dist") / "style.css"
+SYSTEMD_DIR = PLUGIN_MODULE_PATH.with_name("systemd")
 
 
 @pytest.fixture
@@ -124,6 +125,7 @@ def test_dynamic_module_load_exports_router(plugin_api):
     assert plugin_api.router is not None
     route_paths = {getattr(route, "path", None) for route in plugin_api.router.routes}
     assert "/snapshot" in route_paths
+    assert "/refresh" in route_paths
 
 
 def test_manifest_registers_expected_dashboard_plugin():
@@ -135,8 +137,8 @@ def test_manifest_registers_expected_dashboard_plugin():
         "icon": "Activity",
         "version": "0.1.0",
         "tab": {"path": "/codex-usage", "position": "after:analytics"},
-        "entry": "dist/index.js?v=20260625-account-detail-v1",
-        "css": "dist/style.css?v=20260625-account-detail-v1",
+        "entry": "dist/index.js?v=20260701-background-collector-v1",
+        "css": "dist/style.css?v=20260701-background-collector-v1",
         "api": "plugin_api.py",
     }
 
@@ -145,6 +147,38 @@ def test_manifest_registers_expected_dashboard_plugin():
     assert "kind: dashboard" in plugin_yaml
     assert "version: 0.1.0" in plugin_yaml
     assert "author: Hermes Agent" in plugin_yaml
+
+
+def test_systemd_runner_assets_are_profile_safe_and_secret_free():
+    service = (SYSTEMD_DIR / "hermes-codex-usage-monitor.service").read_text(encoding="utf-8")
+    timer = (SYSTEMD_DIR / "hermes-codex-usage-monitor.timer").read_text(encoding="utf-8")
+    readme = (SYSTEMD_DIR / "README.md").read_text(encoding="utf-8")
+    combined = "\n".join([service, timer, readme])
+
+    assert "collector.py once" in service
+    assert "OnUnitActiveSec=60s" in timer
+    assert "%h" in service
+    assert "/home/kernk" not in combined
+    assert "Authorization" not in combined
+    assert "access_token" not in combined
+    assert "refresh_token" not in combined
+    assert "systemctl --user enable --now" in readme
+
+
+def test_cache_helpers_are_profile_safe_and_atomic(plugin_api, tmp_path):
+    cache_path = plugin_api.cache_helpers.latest_path()
+    assert str(cache_path).startswith(str(tmp_path / ".hermes"))
+    assert str(cache_path).endswith("codex-usage-monitor/latest.json")
+
+    plugin_api.cache_helpers.write_json_atomic(cache_path, {"ok": True, "schema_version": 1})
+    assert plugin_api.cache_helpers.read_json_file(cache_path) == {"ok": True, "schema_version": 1}
+
+    def reject(_data):
+        raise ValueError("reject candidate")
+
+    with pytest.raises(ValueError):
+        plugin_api.cache_helpers.write_json_atomic(cache_path, {"ok": False}, validator=reject)
+    assert plugin_api.cache_helpers.read_json_file(cache_path) == {"ok": True, "schema_version": 1}
 
 
 def test_parse_dt_returns_timezone_aware_utc(plugin_api):
@@ -383,7 +417,7 @@ def test_route_mounts_in_bare_fastapi_testclient_and_returns_json(plugin_api, mo
     assert seen == {"history_points": 20, "force": True}
 
 
-def test_mocked_snapshot_endpoint_returns_normalized_accounts(plugin_api, monkeypatch):
+def test_refresh_endpoint_collects_and_writes_cached_normalized_accounts(plugin_api, monkeypatch):
     now = datetime.now(timezone.utc)
 
     def fake_run_usage_command():
@@ -402,12 +436,17 @@ def test_mocked_snapshot_endpoint_returns_normalized_accounts(plugin_api, monkey
 
     monkeypatch.setattr(plugin_api, "run_usage_command", fake_run_usage_command)
     monkeypatch.setattr(plugin_api, "run_reset_credits_command", fake_run_reset_credits_command)
-    response = _client(plugin_api).get("/api/plugins/codex_usage_monitor/snapshot?history_points=20")
+    response = _client(plugin_api).post("/api/plugins/codex_usage_monitor/refresh")
 
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["ok"] is True
     assert data["cached"] is False
+    assert data["collector_status"] == "fresh"
+    assert data["snapshot_source"] == "collector_cache"
+    assert data["history_source"] == "collector_compact"
+    assert data["history_contract"]["compact_history_retention_days"] >= 183
+    assert data["history_contract"]["raw_jsonl_retention_days"] == 30
     assert data["source"] == {
         "command": "husage --json usage",
         "available": True,
@@ -429,9 +468,13 @@ def test_mocked_snapshot_endpoint_returns_normalized_accounts(plugin_api, monkey
     assert five_hour_history[0]["synthetic"] is True
     assert five_hour_history[0]["remaining_percent"] == 100.0
     assert five_hour_history[-1]["remaining_percent"] == 70.0
+    assert set(account["windows"]["five_hour"]["long_history"]) == {"1h", "5h", "1d", "7d", "30d"}
+    assert set(account["windows"]["weekly"]["long_history"]) == {"1w", "4w", "12w", "26w", "all"}
+    assert (plugin_api.cache_helpers.latest_with_history_path()).exists()
+    assert (plugin_api.cache_helpers.collector_status_path()).exists()
 
 
-def test_build_snapshot_cache_coalesces_immediate_calls(plugin_api, monkeypatch):
+def test_normal_snapshot_uses_cache_and_does_not_shell_out(plugin_api, monkeypatch):
     calls = {"usage": 0, "resets": 0}
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -454,14 +497,19 @@ def test_build_snapshot_cache_coalesces_immediate_calls(plugin_api, monkeypatch)
     monkeypatch.setattr(plugin_api, "run_usage_command", fake_run_usage_command)
     monkeypatch.setattr(plugin_api, "run_reset_credits_command", fake_run_reset_credits_command)
 
+    refreshed = plugin_api.refresh_snapshot()
+    assert refreshed["ok"] is True
+    calls_after_refresh = dict(calls)
     first = plugin_api.build_snapshot(history_points=20)
     second = plugin_api.build_snapshot(history_points=20)
 
-    assert calls == {"usage": 1, "resets": 1}
-    assert first["cached"] is False
+    assert calls_after_refresh == {"usage": 1, "resets": 1}
+    assert calls == calls_after_refresh
+    assert first["cached"] is True
     assert second["cached"] is True
     assert second["accounts"][0]["id"] == "acct-one"
     assert second["accounts"][0]["reset_credits"]["available_count"] == 2
+    assert second["history_contract"]["presets"]["weekly"][-1] == "all"
 
 
 def test_history_writes_sanitized_jsonl_and_downsampling_keeps_first_last(plugin_api, tmp_path):
@@ -952,6 +1000,37 @@ def test_frontend_supports_account_detail_url_routing():
     assert "window.removeEventListener(\"popstate\"" in frontend
     assert "openAccountDetail" in frontend
     assert "closeAccountDetail" in frontend
+    assert "rangeStateFromLocation" in frontend
+    assert "buildDetailUrl" in frontend
+    assert "five_hour_range" in frontend
+    assert "weekly_range" in frontend
+    assert "five_hour_from" in frontend
+    assert "weekly_to" in frontend
+    assert "setDetailRangeState(rangeStateFromLocation())" in frontend
+
+
+def test_frontend_account_detail_range_controls_and_custom_dates():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+    css = FRONTEND_CSS_PATH.read_text(encoding="utf-8")
+
+    assert "function RangeControls" in frontend
+    assert "FIVE_HOUR_RANGES" in frontend
+    assert "WEEKLY_RANGES" in frontend
+    assert '["1h", "5h", "1d", "7d", "30d"]' in frontend
+    assert '["1w", "4w", "12w", "26w", "all"]' in frontend
+    assert "rangePayloadForWindow" in frontend
+    assert "long_history" in frontend
+    assert "type: \"date\"" in frontend
+    assert "invalid_range" in frontend
+    assert "outside_retention" in frontend
+    assert "custom_dates_required" in frontend
+    assert "aria-pressed" in frontend
+    assert "codex-usage-range-controls" in frontend
+    assert "codex-usage-custom-range" in frontend
+    assert "codex-usage-reset-marker" in frontend
+    assert ".codex-usage-range-controls" in css
+    assert ".codex-usage-custom-range" in css
+    assert ".codex-usage-reset-marker" in css
 
 
 def test_frontend_account_cards_are_clickable_and_accessible():

@@ -644,7 +644,17 @@
         // ``current`` file — same rationale as ``withBoard()`` above.
         // Regression: #20879.
         if (board) wsParams.board = board;
-        SDK.buildWsUrl(`${API}/events`, wsParams).then(function (url) {
+        const buildWsUrl = SDK.buildWsUrl;
+        if (typeof buildWsUrl !== "function") {
+          // Older dashboard host bundles did not expose the WS helper on the
+          // plugin SDK. Keep the Kanban board usable via REST instead of
+          // crashing the whole tab; live event streaming resumes after the
+          // host bundle is rebuilt/upgraded.
+          // eslint-disable-next-line no-console
+          console.warn("Kanban live updates disabled: SDK.buildWsUrl is unavailable");
+          return;
+        }
+        buildWsUrl.call(SDK, `${API}/events`, wsParams).then(function (url) {
           if (wsClosedRef.current) return;
           let ws;
           try { ws = new WebSocket(url); } catch (_e) { return; }

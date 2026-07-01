@@ -211,6 +211,23 @@ def test_dashboard_select_filters_use_sdk_value_change_handler():
     assert "selectChangeHandler(props.setAssigneeFilter)" in js
 
 
+def test_dashboard_does_not_crash_when_host_sdk_lacks_ws_helper():
+    """Older built dashboard hosts may not expose ``SDK.buildWsUrl``.
+
+    The Kanban tab should still render and poll REST data instead of throwing a
+    TypeError during the live-event WebSocket effect.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    js = bundle.read_text()
+
+    assert 'const buildWsUrl = SDK.buildWsUrl;' in js
+    assert 'typeof buildWsUrl !== "function"' in js
+    assert "Kanban live updates disabled: SDK.buildWsUrl is unavailable" in js
+    assert "buildWsUrl.call(SDK" in js
+
+
 def test_dashboard_client_side_filtering_includes_tenant_filter():
     """The rendered board must also filter by tenant.
 

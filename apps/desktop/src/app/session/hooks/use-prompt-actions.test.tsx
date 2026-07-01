@@ -3,12 +3,13 @@ import type { MutableRefObject } from 'react'
 import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { transcribeAudio } from '@/hermes'
 import { textPart } from '@/lib/chat-messages'
 import { $composerAttachments, type ComposerAttachment } from '@/store/composer'
 import { $busy, $connection, $messages, $sessions, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
-import { uploadComposerAttachment, usePromptActions } from './use-prompt-actions'
+import { transcribeAudioWithTransientRetry, uploadComposerAttachment, usePromptActions } from './use-prompt-actions'
 
 vi.mock('@/hermes', () => ({
   getProfiles: vi.fn(async () => ({ profiles: [] })),
@@ -48,6 +49,8 @@ interface HarnessHandle {
   steerPrompt: (text: string) => Promise<boolean>
   submitText: (text: string, options?: { attachments?: ComposerAttachment[]; fromQueue?: boolean }) => Promise<boolean>
 }
+
+const transcribeAudioMock = vi.mocked(transcribeAudio)
 
 function Harness({
   busyRef,
@@ -117,6 +120,45 @@ function Harness({
 
   return null
 }
+
+describe('usePromptActions voice transcription', () => {
+  beforeEach(() => {
+    transcribeAudioMock.mockReset()
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
+
+  it('retries a Hermes backend timeout once after a short cooldown', async () => {
+    vi.useFakeTimers()
+    transcribeAudioMock
+      .mockRejectedValueOnce(new Error('Timed out connecting to Hermes backend after 15000ms'))
+      .mockResolvedValueOnce({ transcript: 'retried transcript' } as never)
+
+    const promise = transcribeAudioWithTransientRetry('data:audio/webm;base64,dm9pY2U=', 'audio/webm')
+
+    await vi.waitFor(() => expect(transcribeAudioMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(1_999)
+    expect(transcribeAudioMock).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await expect(promise).resolves.toEqual({ transcript: 'retried transcript' })
+    expect(transcribeAudioMock).toHaveBeenCalledTimes(2)
+    expect(transcribeAudioMock).toHaveBeenNthCalledWith(1, 'data:audio/webm;base64,dm9pY2U=', 'audio/webm')
+    expect(transcribeAudioMock).toHaveBeenNthCalledWith(2, 'data:audio/webm;base64,dm9pY2U=', 'audio/webm')
+  })
+
+  it('does not retry non-timeout transcription failures', async () => {
+    transcribeAudioMock.mockRejectedValueOnce(new Error('STT provider rejected the request'))
+
+    await expect(transcribeAudioWithTransientRetry('data:audio/webm;base64,dm9pY2U=', 'audio/webm')).rejects.toThrow(
+      'STT provider rejected the request'
+    )
+    expect(transcribeAudioMock).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('usePromptActions /title', () => {
   beforeEach(() => {

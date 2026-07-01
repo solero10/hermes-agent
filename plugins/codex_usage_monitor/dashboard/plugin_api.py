@@ -20,6 +20,7 @@ import math
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,14 @@ from typing import Any, Iterable
 from fastapi import APIRouter, Query
 
 from hermes_constants import get_hermes_home
+
+_PLUGIN_DIR = Path(__file__).resolve().parent
+if str(_PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_DIR))
+
+import cache as cache_helpers
+import collector as collector_core
+from history_contract import attach_long_history_to_snapshot
 
 router = APIRouter()
 
@@ -784,7 +793,7 @@ def merge_reset_credits(accounts: list[dict[str, Any]], raw_reset_snapshot: Any)
 
 
 def history_path() -> Path:
-    return get_hermes_home() / "cache" / HISTORY_DIRNAME / "history.jsonl"
+    return cache_helpers.history_path()
 
 
 def _history_row_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -1298,26 +1307,100 @@ def _with_runtime_fields(
     snapshot["cached"] = cached
     snapshot["age_seconds"] = round(max(0.0, (now_dt - generated_dt).total_seconds()), 3)
     snapshot["poll_interval_seconds"] = POLL_INTERVAL_SECONDS
-    if history_rows is None:
-        history_rows = load_history_rows(now=now_dt, prune=False)
+    snapshot.setdefault("dashboard_poll_interval_seconds", POLL_INTERVAL_SECONDS)
     accounts = snapshot.get("accounts")
-    if isinstance(accounts, list):
+    if isinstance(accounts, list) and history_rows is not None:
         snapshot["accounts"] = _attach_history_to_accounts(accounts, history_rows, history_points)
     snapshot["source"] = sanitize(snapshot.get("source") or {})
     return sanitize(snapshot)
 
 
+def _collector_deps() -> dict[str, Any]:
+    return {
+        "normalize_snapshot": normalize_snapshot,
+        "merge_reset_credits": merge_reset_credits,
+        "sanitize": sanitize,
+        "run_usage_command": run_usage_command,
+        "run_reset_credits_command": run_reset_credits_command,
+        "append_history_snapshot": append_history_snapshot,
+        "load_history_rows": load_history_rows,
+        "attach_history_to_accounts": _attach_history_to_accounts,
+    }
+
+
+def _collector_metadata(now_dt: datetime, cached_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    status = cache_helpers.read_json_file(cache_helpers.collector_status_path()) or {}
+    generated = parse_dt((cached_snapshot or {}).get("generated_at"))
+    age = round(max(0.0, (now_dt - generated).total_seconds()), 3) if generated else None
+    collector_status = status.get("collector_status")
+    if not collector_status:
+        if generated is None:
+            collector_status = "warming"
+        elif age is not None and age > cache_helpers.STALE_AFTER_SECONDS:
+            collector_status = "stale"
+        else:
+            collector_status = "fresh"
+    return {
+        "dashboard_poll_interval_seconds": POLL_INTERVAL_SECONDS,
+        "collector_enabled": bool(status.get("collector_enabled", True)),
+        "collector_interval_seconds": int(status.get("collector_interval_seconds") or cache_helpers.COLLECTOR_INTERVAL_SECONDS),
+        "stale_after_seconds": int(status.get("stale_after_seconds") or cache_helpers.STALE_AFTER_SECONDS),
+        "collector_status": collector_status,
+        "collector_last_attempt_at": status.get("collector_last_attempt_at"),
+        "collector_last_success_at": status.get("collector_last_success_at") or (cached_snapshot or {}).get("generated_at"),
+        "collector_last_error_at": status.get("collector_last_error_at"),
+        "collector_last_error": status.get("collector_last_error"),
+        "snapshot_source": status.get("snapshot_source") or "collector_cache",
+        "history_source": status.get("history_source") or "collector_compact",
+    }
+
+
+def _warming_snapshot(now_dt: datetime) -> dict[str, Any]:
+    contract = attach_long_history_to_snapshot({"accounts": []}, [], now=now_dt).get("history_contract")
+    return {
+        "schema_version": cache_helpers.SCHEMA_VERSION,
+        "ok": False,
+        "generated_at": _iso(now_dt),
+        "cached": False,
+        "age_seconds": 0.0,
+        "poll_interval_seconds": POLL_INTERVAL_SECONDS,
+        "dashboard_poll_interval_seconds": POLL_INTERVAL_SECONDS,
+        "collector_enabled": True,
+        "collector_interval_seconds": cache_helpers.COLLECTOR_INTERVAL_SECONDS,
+        "stale_after_seconds": cache_helpers.STALE_AFTER_SECONDS,
+        "collector_status": "warming",
+        "snapshot_source": "none",
+        "history_source": "none",
+        "source": {"command": None, "available": True, "last_error": None},
+        "accounts": [],
+        "history_contract": contract,
+    }
+
+
 def build_snapshot(history_points: int = 240, force: bool = False) -> dict[str, Any]:
-    """Build the API snapshot, using a short TTL cache to coalesce tabs."""
+    """Build the API snapshot from collector cache."""
     points = _clamp_history_points(history_points)
     now_dt = _utcnow()
     monotonic_now = time.monotonic()
 
     global _SNAPSHOT_CACHE
     with _CACHE_LOCK:
+        if force:
+            base_snapshot = collector_core.collect_once(deps=_collector_deps(), now=now_dt)
+            _SNAPSHOT_CACHE = {
+                "monotonic": monotonic_now,
+                "snapshot": copy.deepcopy(base_snapshot),
+            }
+            return _with_runtime_fields(
+                base_snapshot,
+                cached=False,
+                now_dt=now_dt,
+                history_points=points,
+                history_rows=None,
+            )
+
         if (
-            not force
-            and _SNAPSHOT_CACHE is not None
+            _SNAPSHOT_CACHE is not None
             and monotonic_now - float(_SNAPSHOT_CACHE.get("monotonic", 0.0)) < CACHE_TTL_SECONDS
         ):
             return _with_runtime_fields(
@@ -1325,48 +1408,14 @@ def build_snapshot(history_points: int = 240, force: bool = False) -> dict[str, 
                 cached=True,
                 now_dt=now_dt,
                 history_points=points,
+                history_rows=None,
             )
 
-        history_rows = load_history_rows(now=now_dt, prune=True)
-        previous_by_id = _previous_accounts_from_history(history_rows)
-        raw, source = run_usage_command()
-        if raw is None:
-            base_snapshot = _base_error_snapshot(now_dt, source)
+        base_snapshot = cache_helpers.read_json_file(cache_helpers.latest_with_history_path())
+        if not base_snapshot:
+            base_snapshot = _warming_snapshot(now_dt)
         else:
-            normalized = normalize_snapshot(raw, now=now_dt, previous=previous_by_id)
-            reset_raw, reset_source = run_reset_credits_command()
-            accounts = normalized.get("accounts", [])
-            if reset_raw is not None and isinstance(accounts, list):
-                accounts = merge_reset_credits(accounts, reset_raw)
-            source = sanitize(source)
-            reset_source = sanitize(reset_source)
-            if not isinstance(source, dict):
-                source = {}
-            if not isinstance(reset_source, dict):
-                reset_source = {}
-            last_error = source.get("last_error")
-            if not normalized.get("ok", True) and not last_error:
-                last_error = normalized.get("error") or "Codex usage wrapper reported an error."
-            reset_last_error = reset_source.get("last_error")
-            base_snapshot = {
-                "ok": bool(normalized.get("ok", True)),
-                "generated_at": normalized.get("generated_at") or _iso(now_dt),
-                "poll_interval_seconds": POLL_INTERVAL_SECONDS,
-                "cached": False,
-                "age_seconds": 0.0,
-                "source": {
-                    "command": source.get("command"),
-                    "available": bool(source.get("available", True)),
-                    "last_error": sanitize(last_error) if last_error else None,
-                },
-                "reset_credits_source": {
-                    "command": reset_source.get("command"),
-                    "available": bool(reset_source.get("available", False)),
-                    "last_error": sanitize(reset_last_error) if reset_last_error else None,
-                },
-                "accounts": accounts if isinstance(accounts, list) else [],
-            }
-            history_rows = append_history_snapshot(base_snapshot, now=now_dt)
+            base_snapshot.update(_collector_metadata(now_dt, base_snapshot))
 
         _SNAPSHOT_CACHE = {
             "monotonic": monotonic_now,
@@ -1377,8 +1426,22 @@ def build_snapshot(history_points: int = 240, force: bool = False) -> dict[str, 
             cached=False,
             now_dt=now_dt,
             history_points=points,
-            history_rows=history_rows,
+            history_rows=None,
         )
+
+
+def refresh_snapshot() -> dict[str, Any]:
+    now_dt = _utcnow()
+    base_snapshot = collector_core.collect_once(deps=_collector_deps(), now=now_dt)
+    global _SNAPSHOT_CACHE
+    _SNAPSHOT_CACHE = {"monotonic": time.monotonic(), "snapshot": copy.deepcopy(base_snapshot)}
+    return _with_runtime_fields(
+        base_snapshot,
+        cached=False,
+        now_dt=now_dt,
+        history_points=240,
+        history_rows=None,
+    )
 
 
 @router.get("/snapshot")
@@ -1388,3 +1451,9 @@ def get_snapshot(
 ) -> dict[str, Any]:
     """Return the normalized Codex OAuth usage snapshot for dashboard tiles."""
     return build_snapshot(history_points=history_points, force=force)
+
+
+@router.post("/refresh")
+def post_refresh() -> dict[str, Any]:
+    """Run one live collector pass and return the refreshed snapshot."""
+    return refresh_snapshot()
