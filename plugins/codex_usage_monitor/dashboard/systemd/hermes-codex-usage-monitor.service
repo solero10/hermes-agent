@@ -5,6 +5,8 @@ Documentation=man:systemd.service(5)
 [Service]
 Type=oneshot
 Environment=PYTHONUNBUFFERED=1
-WorkingDirectory=%h/.hermes/hermes-agent/plugins/codex_usage_monitor/dashboard
-ExecStart=/usr/bin/env python3 %h/.hermes/hermes-agent/plugins/codex_usage_monitor/dashboard/collector.py once
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONPATH=%h/.hermes/hermes-agent:%h/.hermes/hermes-agent/plugins/codex_usage_monitor/dashboard
+WorkingDirectory=%h/.hermes/hermes-agent
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python %h/.hermes/hermes-agent/plugins/codex_usage_monitor/dashboard/collector.py once
 Nice=5

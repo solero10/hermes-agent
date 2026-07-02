@@ -13,7 +13,7 @@ import hashlib
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -1188,13 +1188,20 @@ def _parse_datetime(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def _source_date_value(source_unit: Any) -> Any:
+    su = _model_dump(source_unit)
+    return _first_present(su.get("source_date"), su.get("occurred_at"), su.get("processed_at"))
+
+
 def _source_unit_summary(source_unit: Any) -> dict[str, Any]:
     su = _model_dump(source_unit)
+    source_date = _source_date_value(su)
     summary: dict[str, Any] = {
         "id": su.get("id"),
         "source_type": su.get("source_type"),
         "label": su.get("label"),
         "subtitle": su.get("subtitle"),
+        "source_date": source_date,
         "occurred_at": su.get("occurred_at"),
         "processed_at": su.get("processed_at"),
         "source_ref": su.get("source_ref") or None,
@@ -1446,6 +1453,47 @@ def _sort_rows(rows: list[dict[str, Any]], sort_value: str) -> list[dict[str, An
     return rows
 
 
+def _parse_date_filter(value: str | None, *, end: bool = False) -> datetime | None:
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    us_date_match = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", raw)
+    if us_date_match:
+        month, day, year = (int(part) for part in us_date_match.groups())
+        try:
+            dt = datetime(year, month, day, tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid source date filter: {value}") from exc
+        return dt + timedelta(days=1) if end else dt
+    is_date_only = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw))
+    dt = _parse_datetime(raw)
+    if dt is None:
+        raise HTTPException(status_code=400, detail=f"Invalid source date filter: {value}")
+    if end and is_date_only:
+        return dt + timedelta(days=1)
+    return dt
+
+
+def _matches_source_date_filter(
+    source_unit: SourceUnit,
+    *,
+    start: datetime | None,
+    end_exclusive: datetime | None,
+) -> bool:
+    if start is None and end_exclusive is None:
+        return True
+    source_dt = _parse_datetime(_source_date_value(source_unit))
+    if source_dt is None:
+        return False
+    if start is not None and source_dt < start:
+        return False
+    if end_exclusive is not None and source_dt >= end_exclusive:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # API routes
 # ---------------------------------------------------------------------------
@@ -1470,6 +1518,8 @@ def board(
     filter_value: str | None = Query(default=None, alias="filter"),
     sort: str | None = None,
     search: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
 ) -> dict[str, Any]:
     snapshot = _load_snapshot()
     selected_source_type = source_type or _default_source_type(snapshot)
@@ -1480,6 +1530,10 @@ def board(
         raise HTTPException(status_code=400, detail=f"Unknown filter: {filter_value}")
     if normalized_sort not in _ALLOWED_SORTS:
         raise HTTPException(status_code=400, detail=f"Unknown sort: {sort}")
+    source_date_start = _parse_date_filter(date_from)
+    source_date_end = _parse_date_filter(date_to, end=True)
+    if source_date_start is not None and source_date_end is not None and source_date_start >= source_date_end:
+        raise HTTPException(status_code=400, detail="Source date from must be before or equal to source date to")
 
     units = [unit for unit in snapshot.source_units if unit.source_type == selected_source_type]
     total_counts = _counts_for_units(units)
@@ -1487,6 +1541,12 @@ def board(
     rows: list[dict[str, Any]] = []
     search_query = search.strip() if isinstance(search, str) else None
     for source_unit in units:
+        if not _matches_source_date_filter(
+            source_unit,
+            start=source_date_start,
+            end_exclusive=source_date_end,
+        ):
+            continue
         all_thoughts = list(source_unit.thoughts)
         row = _row_base(source_unit)
 
@@ -1539,6 +1599,8 @@ def board(
         "filter": normalized_filter,
         "sort": normalized_sort,
         "search": search_query or "",
+        "date_from": date_from or "",
+        "date_to": date_to or "",
     }
 
 

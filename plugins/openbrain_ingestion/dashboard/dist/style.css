@@ -101,7 +101,7 @@
 
 .ob-toolbar {
   display: grid;
-  grid-template-columns: minmax(12rem, 0.8fr) minmax(16rem, 1.2fr) minmax(24rem, 2fr) minmax(12rem, 0.8fr);
+  grid-template-columns: minmax(11rem, 0.8fr) minmax(14rem, 1fr) repeat(2, minmax(9rem, 0.55fr)) minmax(18rem, 1.4fr) minmax(11rem, 0.7fr);
   gap: 0.75rem;
   align-items: end;
   border: 1px solid var(--ob-border);
@@ -237,43 +237,25 @@
   font-weight: 760;
 }
 
-.ob-policy-legend {
+.ob-policy-definition-dialog {
   display: grid;
-  grid-template-columns: minmax(16rem, 0.7fr) minmax(0, 2fr);
-  gap: 0.75rem;
-  border: 1px solid color-mix(in srgb, var(--ob-warning) 34%, var(--ob-border));
+  width: min(34rem, 100%);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--ob-warning) 52%, var(--ob-border));
   border-radius: var(--ob-radius);
-  background: color-mix(in srgb, var(--ob-bg) 88%, transparent);
-  padding: 0.85rem;
+  background: color-mix(in srgb, var(--ob-bg-strong) 94%, #000);
+  box-shadow: 0 24px 80px color-mix(in srgb, #000 54%, transparent);
 }
 
-.ob-policy-legend h2 {
+.ob-policy-definition-body {
+  padding: 1rem;
+}
+
+.ob-policy-definition-body p {
   margin: 0;
-  font-size: 0.98rem;
-}
-
-.ob-policy-legend p {
-  margin: 0.35rem 0 0;
   color: var(--ob-muted);
-  font-size: 0.78rem;
-  line-height: 1.45;
-}
-
-.ob-policy-legend-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
-  gap: 0.55rem;
-}
-
-.ob-policy-definition {
-  border: 1px solid color-mix(in srgb, var(--ob-border) 70%, transparent);
-  border-radius: calc(var(--ob-radius) * 0.65);
-  background: color-mix(in srgb, var(--ob-bg-strong) 58%, transparent);
-  padding: 0.6rem;
-}
-
-.ob-policy-definition p {
-  margin-top: 0.45rem;
+  font-size: 0.9rem;
+  line-height: 1.5;
 }
 
 .ob-board {
@@ -498,6 +480,16 @@
   cursor: help;
   text-decoration: underline dotted currentColor;
   text-underline-offset: 0.18rem;
+}
+
+.ob-policy-tag-button {
+  background: transparent;
+  font: inherit;
+}
+
+.ob-policy-tag-button:hover {
+  border-color: color-mix(in srgb, var(--ob-warning) 72%, var(--ob-border));
+  background: color-mix(in srgb, var(--ob-warning) 12%, var(--ob-bg-strong));
 }
 
 .ob-badge--needs-review,

@@ -70,7 +70,8 @@ def test_frontend_declares_all_required_components_before_registration():
         "Toolbar",
         "BoardView",
         "Metrics",
-        "PolicyLegend",
+        "PolicyTag",
+        "PolicyDefinitionDialog",
         "SourceRow",
         "StageColumn",
         "ThoughtCard",
@@ -89,6 +90,8 @@ def test_frontend_declares_all_required_components_before_registration():
         definition = f"function {component}"
         assert definition in frontend
         assert frontend.index(definition) < registration_index
+    assert "function PolicyLegend" not in frontend
+    assert "ob-policy-legend" not in frontend
 
 
 def test_frontend_calls_expected_plugin_api_routes_with_query_params():
@@ -99,6 +102,11 @@ def test_frontend_calls_expected_plugin_api_routes_with_query_params():
     assert '"&filter="' in frontend
     assert '"&sort="' in frontend
     assert '"&search="' in frontend
+    assert '"&date_from="' in frontend
+    assert '"&date_to="' in frontend
+    assert "sourceDateQueryValue(dateFrom)" in frontend
+    assert "sourceDateInputNextDay(value)" in frontend
+    assert "onDateFromChange: handleDateFromChange" in frontend
     assert 'API_BASE + "/source-units/"' in frontend
     assert '"/thoughts/"' in frontend
     assert "source_unit_id" in frontend
@@ -111,6 +119,9 @@ def test_toolbar_accessibility_board_labels_and_read_only_placeholders_present()
     for label in (
         "Source type",
         "Search",
+        "Source date from",
+        "Source date to",
+        "MM/DD/YYYY",
         "All",
         "Needs review",
         "Stopped",
@@ -144,11 +155,23 @@ def test_toolbar_accessibility_board_labels_and_read_only_placeholders_present()
     assert "No mutation" not in frontend  # action buttons are placeholders, not hidden mutation controls.
 
 
+def test_frontend_source_date_from_auto_fills_empty_to_date_only():
+    frontend = _read(FRONTEND_JS_PATH)
+
+    assert "function handleDateFromChange(value)" in frontend
+    assert "setDateFrom(value);" in frontend
+    assert "setDateTo(function (current)" in frontend
+    assert "if (String(current || \"\").trim()) return current;" in frontend
+    assert "return sourceDateInputNextDay(value) || current;" in frontend
+    assert 'return padDatePart(date.getUTCMonth() + 1) + "/" + padDatePart(date.getUTCDate()) + "/" + date.getUTCFullYear();' in frontend
+
+
 def test_board_detail_and_state_strings_are_present():
     frontend = _read(FRONTEND_JS_PATH)
 
     for text in (
         "No durable thoughts extracted",
+        "Source date:",
         "Details →",
         "Lineage ID",
         "Candidate ID",
@@ -163,9 +186,10 @@ def test_board_detail_and_state_strings_are_present():
         "database_fields",
         "Stopped reason",
         "Policy tag",
+        "Policy tag definition",
+        "Click for policy definition",
         "Stop target",
         "Stop stage",
-        "Policy tag definitions",
         "Needs source validation",
         "Sensitive detail",
         "Stale task",
@@ -174,7 +198,6 @@ def test_board_detail_and_state_strings_are_present():
         "No durable value",
         "Evidence is weak, outline-only, voicemail-derived, or ambiguous.",
         "raw private identifier",
-        "Good-but-unverified or needs-shaping material should stay in Shaped",
         "Duplicate of",
         "Merged into",
         "Not reached",
@@ -198,7 +221,7 @@ def test_abbreviated_thought_cards_do_not_render_stage_or_lineage_metadata():
     assert "safeText(card.lineage_id || card.id)" not in thought_card
     assert "effectiveStopCode(card)" in thought_card
     assert "isDuplicateText(card.summary, card.stopped_reason)" in thought_card
-    assert "ob-policy-tag" in thought_card
+    assert "h(PolicyTag" in thought_card
     assert "Lineage ID" in frontend  # detail view keeps the lineage identifier.
 
 
@@ -234,7 +257,7 @@ def test_database_fields_are_wired_into_detail_bottom_and_render_field_payloads(
 def test_css_uses_ob_namespace_and_required_selectors():
     css = _read(FRONTEND_CSS_PATH)
 
-    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges", ".ob-policy-tag", ".ob-policy-legend", ".ob-database-fields", ".ob-db-field-row"):
+    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges", ".ob-policy-tag", ".ob-policy-definition-dialog", ".ob-database-fields", ".ob-db-field-row"):
         assert selector in css
     assert "ready-for-cortexdb" in css
     assert ":disabled" in css or "[disabled]" in css

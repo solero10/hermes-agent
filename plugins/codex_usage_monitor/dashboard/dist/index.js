@@ -233,6 +233,18 @@
     return url.pathname + url.search + url.hash;
   }
 
+  function buildAccountListUrl() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete(ACCOUNT_QUERY_PARAM);
+    ["five_hour", "weekly"].forEach(function (windowKey) {
+      const config = rangeConfig(windowKey);
+      url.searchParams.delete(config.rangeParam);
+      url.searchParams.delete(config.fromParam);
+      url.searchParams.delete(config.toParam);
+    });
+    return url.pathname + url.search + url.hash;
+  }
+
   function rangeDefaults() {
     return {
       five_hour: { range: "5h", from: "", to: "" },
@@ -558,6 +570,18 @@
         dominantBaseline: "middle",
       }, emptyHistoryMessage(rangePayload && rangePayload.empty_reason)));
     } else {
+      if (points.length === 1) {
+        const point = points[0];
+        children.push(h("line", {
+          key: "single-sample-guide",
+          className: "codex-usage-chart-single-sample-guide",
+          x1: layout.left,
+          y1: yAt(point.remaining),
+          x2: layout.right,
+          y2: yAt(point.remaining),
+          stroke: paceColor(point.pace),
+        }));
+      }
       function xForVisiblePoint(point) {
         const exact = xForPoint(point);
         return exact === null ? layout.left + plotWidth / 2 : exact;
@@ -880,15 +904,8 @@
 
     const accounts = useMemo(function () {
       const rawAccounts = snapshot && Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
-      return rawAccounts.slice().sort(function (a, b) {
-        const priorityA = toNumber(a && a.priority);
-        const priorityB = toNumber(b && b.priority);
-        if (priorityA !== null || priorityB !== null) return (priorityA === null ? 9999 : priorityA) - (priorityB === null ? 9999 : priorityB);
-        const indexA = toNumber(a && a.index);
-        const indexB = toNumber(b && b.index);
-        if (indexA !== null || indexB !== null) return (indexA === null ? 9999 : indexA) - (indexB === null ? 9999 : indexB);
-        return String((a && a.label) || "").localeCompare(String((b && b.label) || ""));
-      });
+      // Preserve the wrapper/cache order exactly so the dashboard matches `husage`.
+      return rawAccounts.slice();
     }, [snapshot]);
 
     const selectedAccountEntry = useMemo(function () {
@@ -909,7 +926,7 @@
 
     function openAccountDetail(account, index) {
       const accountId = accountRouteId(account, index);
-      window.history.pushState({ codexUsageAccountId: accountId, codexUsageRangeState: detailRangeState }, "", buildDetailUrl(accountId, detailRangeState));
+      window.history.pushState({ codexUsageAccountId: accountId, codexUsageRangeState: detailRangeState, codexUsageFromAccountList: true }, "", buildDetailUrl(accountId, detailRangeState));
       setSelectedAccountId(accountId);
     }
 
@@ -923,17 +940,19 @@
       }
       next[windowKey] = updated;
       setDetailRangeState(next);
-      window.history.pushState({ codexUsageAccountId: selectedAccountId, codexUsageRangeState: next }, "", buildDetailUrl(selectedAccountId, next));
+      const currentState = window.history.state || {};
+      window.history.replaceState({ codexUsageAccountId: selectedAccountId, codexUsageRangeState: next, codexUsageFromAccountList: Boolean(currentState.codexUsageFromAccountList) }, "", buildDetailUrl(selectedAccountId, next));
     }
 
     function closeAccountDetail() {
       const state = window.history.state || {};
-      if (state.codexUsageAccountId && window.history.length > 1) {
+      if (state.codexUsageAccountId && state.codexUsageFromAccountList && window.history.length > 1) {
         window.history.back();
         return;
       }
-      window.history.replaceState({ codexUsageAccountId: "", codexUsageRangeState: detailRangeState }, "", buildDetailUrl("", detailRangeState));
+      window.history.replaceState({ codexUsageAccountId: "", codexUsageRangeState: rangeDefaults() }, "", buildAccountListUrl());
       setSelectedAccountId("");
+      setDetailRangeState(rangeDefaults());
     }
 
     return h("div", { className: "codex-usage-monitor" },

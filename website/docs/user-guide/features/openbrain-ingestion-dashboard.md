@@ -21,7 +21,7 @@ The board is organized by **source unit**. Each row represents one item from the
 5. Ready for CortexDB
 6. CortexDB
 
-The top metrics show **visible / total** counts for source units, thoughts, review items, stopped items, imported items, and zero-thought sources. Visible counts follow the current filters and search; total counts describe the selected source type in the snapshot.
+The top metrics show **visible / total** counts for source units, thoughts, review items, stopped items, imported items, and zero-thought sources. Visible counts follow the current filters, source-date range, and search; total counts describe the selected source type in the snapshot.
 
 ## Source-type dropdown
 
@@ -34,8 +34,10 @@ Use the **Source type** dropdown to switch between material lanes in the snapsho
 The board itself is loaded from:
 
 ```text
-/api/plugins/openbrain_ingestion/board?source_type=<type>&filter=<filter>&sort=<sort>&search=<query>
+/api/plugins/openbrain_ingestion/board?source_type=<type>&filter=<filter>&sort=<sort>&search=<query>&date_from=<yyyy-mm-dd>&date_to=<yyyy-mm-dd>
 ```
+
+Use the **Source date from** and **Source date to** controls to filter source units by source date. The UI accepts `MM/DD/YYYY`; the API also accepts `YYYY-MM-DD`. When **Source date to** is empty, entering a complete **Source date from** automatically fills **Source date to** with the following day. For transcript sources, source date is the source occurrence/recording date when available and falls back to processed time only when no source occurrence date exists.
 
 ## Current-state rule: each thought card appears exactly once
 
@@ -55,7 +57,7 @@ Open a card's detail dialog to see the full lineage timeline, including complete
 
 Stopped cards are candidates or inventory rows that did not become CortexDB records. Duplicate stops remain in **Deduped**. The **Policy** column is reserved only for thoughts blocked by a clearly defined capture policy; useful historical/reference material that merely needs rewriting, merging, or semantic dedupe should remain in **Shaped**.
 
-Policy tags use this vocabulary:
+Click a policy tag on a card or detail dialog to show its definition. Policy tags use this vocabulary:
 
 - **Needs source validation** — potentially useful, but the supporting evidence is weak, outline-only, voicemail-derived, or ambiguous. Verify against the source before capture.
 - **Sensitive detail** — contains a raw private identifier, case/reference/account number, emergency/contact detail, or similar information that belongs in controlled evidence rather than general memory.

@@ -149,6 +149,34 @@
     return definitions.length ? definitions : DEFAULT_POLICY_STOP_DEFINITIONS;
   }
 
+  function policyDefinitionFromCode(code, definitions) {
+    const slug = stopCodeSlug(code);
+    const match = policyDefinitionFor(slug, definitions);
+    const label = match ? match.label : stopCodeLabel(slug);
+    const definition = match ? match.definition : stopCodeTitle(slug);
+    return {
+      id: slug,
+      label: label,
+      definition: definition || "No policy definition supplied for this tag.",
+    };
+  }
+
+  function PolicyTag(props) {
+    const code = props.code;
+    const definition = policyDefinitionFromCode(code, props.definitions);
+    if (!definition.label) return null;
+    return h("button", {
+      type: "button",
+      className: cx("ob-badge", "ob-badge--stopped", "ob-policy-tag", "ob-policy-tag-button"),
+      title: "Click for policy definition",
+      "aria-label": definition.label + ": click for policy definition",
+      onClick: function (event) {
+        event.stopPropagation();
+        if (props.onShow) props.onShow(definition);
+      },
+    }, definition.label);
+  }
+
   function effectiveStopCode(card) {
     if (!card) return "";
     if (stopCodeSlug(card.stop_code)) return card.stop_code;
@@ -206,6 +234,25 @@
     });
   }
 
+  function formatSourceDate(value) {
+    if (!value) return "";
+    const dateOnly = String(value).match(/^(\d{4})-(\d{2})-(\d{2})(?:T00:00:00(?:\.000)?Z)?$/);
+    const date = dateOnly
+      ? new Date(Date.UTC(Number(dateOnly[1]), Number(dateOnly[2]) - 1, Number(dateOnly[3])))
+      : new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      timeZone: dateOnly ? "UTC" : undefined,
+    });
+  }
+
+  function sourceDateText(row) {
+    return formatSourceDate(row.source_date || row.occurred_at || row.processed_at);
+  }
+
   function errorMessage(error) {
     if (!error) return "Unknown error";
     const raw = error.message ? String(error.message) : String(error);
@@ -220,11 +267,61 @@
     return body || raw || "Unknown error";
   }
 
-  function boardURL(sourceType, filter, sort, search) {
+  function sourceDateQueryValue(value) {
+    const raw = String(value || "").trim();
+    let match;
+    if (!raw) return "";
+    match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (match) return match[1] + "-" + match[2].padStart(2, "0") + "-" + match[3].padStart(2, "0");
+    match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (match) return match[3] + "-" + match[1].padStart(2, "0") + "-" + match[2].padStart(2, "0");
+    if (/^\d{1,2}\/\d{0,2}\/?\d{0,3}$/.test(raw)) return "";
+    if (/^\d{1,4}-\d{0,2}-?\d{0,2}$/.test(raw)) return "";
+    return raw;
+  }
+
+  function padDatePart(value) {
+    return String(value).padStart(2, "0");
+  }
+
+  function utcDateFromParts(year, month, day) {
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+    return date;
+  }
+
+  function sourceDateInputNextDay(value) {
+    const raw = String(value || "").trim();
+    let match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (match) {
+      const month = Number(match[1]);
+      const day = Number(match[2]);
+      const year = Number(match[3]);
+      const date = utcDateFromParts(year, month, day);
+      if (!date) return "";
+      date.setUTCDate(date.getUTCDate() + 1);
+      return padDatePart(date.getUTCMonth() + 1) + "/" + padDatePart(date.getUTCDate()) + "/" + date.getUTCFullYear();
+    }
+    match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+    if (match) {
+      const year = Number(match[1]);
+      const month = Number(match[2]);
+      const day = Number(match[3]);
+      const date = utcDateFromParts(year, month, day);
+      if (!date) return "";
+      date.setUTCDate(date.getUTCDate() + 1);
+      return date.getUTCFullYear() + "-" + padDatePart(date.getUTCMonth() + 1) + "-" + padDatePart(date.getUTCDate());
+    }
+    return "";
+  }
+
+  function boardURL(sourceType, filter, sort, search, dateFrom, dateTo) {
     return API_BASE + "/board?source_type=" + encodeURIComponent(sourceType || "") +
       "&filter=" + encodeURIComponent(filter || "all") +
       "&sort=" + encodeURIComponent(sort || "newest") +
-      "&search=" + encodeURIComponent(search || "");
+      "&search=" + encodeURIComponent(search || "") +
+      "&date_from=" + encodeURIComponent(sourceDateQueryValue(dateFrom)) +
+      "&date_to=" + encodeURIComponent(sourceDateQueryValue(dateTo));
   }
 
   function detailURL(sourceUnitId, lineageId) {
@@ -316,6 +413,26 @@
           "aria-label": "Search thought cards",
         })
       ),
+      h("label", { className: "ob-field" },
+        h("span", null, "Source date from"),
+        h("input", {
+          type: "text",
+          value: props.dateFrom || "",
+          placeholder: "MM/DD/YYYY",
+          onChange: function (event) { props.onDateFromChange(event.target.value); },
+          "aria-label": "Source date from",
+        })
+      ),
+      h("label", { className: "ob-field" },
+        h("span", null, "Source date to"),
+        h("input", {
+          type: "text",
+          value: props.dateTo || "",
+          placeholder: "MM/DD/YYYY",
+          onChange: function (event) { props.onDateToChange(event.target.value); },
+          "aria-label": "Source date to",
+        })
+      ),
       h("div", { className: "ob-filter-chips", role: "group", "aria-label": "Filter cards" },
         FILTERS.map(function (filter) {
           const pressed = props.filter === filter.value;
@@ -363,23 +480,27 @@
     );
   }
 
-  function PolicyLegend(props) {
-    const board = props.board || {};
-    const total = (board.total_counts || board.metrics || {}).policy || 0;
-    const definitions = policyDefinitions(board);
-    if (!Number(total)) return null;
-    return h("section", { className: "ob-policy-legend", "aria-label": "Policy tag definitions" },
-      h("div", { className: "ob-policy-legend-intro" },
-        h("h2", null, "Policy tag definitions"),
-        h("p", null, "Policy means a thought is blocked from CortexDB capture for a specific reason. Good-but-unverified or needs-shaping material should stay in Shaped, not Policy.")
-      ),
-      h("div", { className: "ob-policy-legend-grid" }, definitions.map(function (item) {
-        const label = item.label || stopCodeLabel(item.id);
-        return h("article", { className: "ob-policy-definition", key: item.id || label },
-          h("span", { className: cx("ob-badge", "ob-badge--stopped", "ob-policy-tag") }, label),
-          h("p", null, item.definition || stopCodeTitle(item.id))
-        );
-      }))
+  function PolicyDefinitionDialog(props) {
+    const definition = props.definition || {};
+    if (!definition.label) return null;
+    return h("div", { className: "ob-dialog-backdrop ob-policy-definition-backdrop" },
+      h("section", {
+        className: "ob-policy-definition-dialog",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-label": "Policy tag definition",
+      },
+        h("header", { className: "ob-detail-header" },
+          h("div", null,
+            h("div", { className: "ob-kicker" }, "Policy tag definition"),
+            h("h2", null, definition.label)
+          ),
+          h("button", { type: "button", className: "ob-close", onClick: props.onClose, "aria-label": "Close policy tag definition" }, "×")
+        ),
+        h("div", { className: "ob-policy-definition-body" },
+          h("p", null, definition.definition || "No policy definition supplied for this tag.")
+        )
+      )
     );
   }
 
@@ -400,8 +521,7 @@
     return h(React.Fragment, null,
       props.error ? h(StatePanel, { tone: "error", role: "alert", title: "Refresh failed", message: "Showing the last loaded board data.", detail: props.error }) : null,
       h(Metrics, { board: board }),
-      h(PolicyLegend, { board: board }),
-      rows.length === 0 ? h(StatePanel, { tone: "empty", title: "No source units match this filter", message: "Try All, a different source type, or a broader search." }) :
+      rows.length === 0 ? h(StatePanel, { tone: "empty", title: "No source units match this filter", message: "Try All, a different source type, broader dates, or a broader search." }) :
         h("section", { className: "ob-board", "aria-label": "OpenBrain ingestion source rows" },
           rows.map(function (row) {
             return h(SourceRow, {
@@ -411,6 +531,8 @@
               expanded: props.expandedRows[row.id] !== false,
               onToggle: props.onToggleRow,
               onOpenDetail: props.onOpenDetail,
+              policyDefinitions: policyDefinitions(board),
+              onPolicyDefinition: props.onPolicyDefinition,
             });
           })
         )
@@ -422,6 +544,7 @@
     const rowKey = row.id || row.label || "source";
     const bodyId = "ob-row-body-" + String(rowKey).replace(/[^a-z0-9_-]+/gi, "-");
     const expanded = props.expanded;
+    const sourceDate = sourceDateText(row);
     return h("article", { className: "ob-row" },
       h("header", { className: "ob-row-header" },
         h("button", {
@@ -436,6 +559,7 @@
           h("p", null, safeText(row.subtitle || row.source_type || row.id, "Source metadata unavailable"))
         ),
         h("div", { className: "ob-row-counts" },
+          sourceDate ? h("span", { className: "ob-row-source-date", title: "Source date" }, "Source date: ", sourceDate) : null,
           h("span", null, countOf(row, "thought_count"), " thoughts"),
           countOf(row, "stopped_count") ? h("span", null, countOf(row, "stopped_count"), " stopped") : null
         )
@@ -449,6 +573,8 @@
                 column: column,
                 cards: asArray(row.columns && row.columns[column.id]),
                 onOpenDetail: props.onOpenDetail,
+                policyDefinitions: props.policyDefinitions,
+                onPolicyDefinition: props.onPolicyDefinition,
               });
             })
           )
@@ -465,7 +591,13 @@
         h("span", { className: "ob-stage-count" }, cards.length)
       ),
       cards.length ? cards.map(function (card) {
-        return h(ThoughtCard, { key: card.id || card.lineage_id, card: card, onOpenDetail: props.onOpenDetail });
+        return h(ThoughtCard, {
+          key: card.id || card.lineage_id,
+          card: card,
+          onOpenDetail: props.onOpenDetail,
+          policyDefinitions: props.policyDefinitions,
+          onPolicyDefinition: props.onPolicyDefinition,
+        });
       }) : h("div", { className: "ob-stage-empty" }, "No cards")
     );
   }
@@ -482,11 +614,11 @@
         h("h3", null, safeText(card.title || card.summary || card.lineage_id, "Untitled thought")),
         h("div", { className: "ob-card-badges" },
           h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(disposition)) }, dispositionLabel(disposition)),
-          stopCode ? h("span", {
-            className: cx("ob-badge", "ob-badge--stopped", "ob-policy-tag"),
-            title: stopTitle || stopCode,
-            "aria-label": stopTitle ? stopCode + ": " + stopTitle : stopCode,
-          }, stopCode) : null
+          stopCode ? h(PolicyTag, {
+            code: effectiveCode,
+            definitions: props.policyDefinitions,
+            onShow: props.onPolicyDefinition,
+          }) : null
         )
       ),
       cardSummary ? h("p", { className: "ob-card-summary" }, cardSummary) : null,
@@ -518,7 +650,7 @@
         h("div", null, h("dt", null, "Source unit"), h("dd", null, safeText(sourceUnit.id))),
         h("div", null, h("dt", null, "Label"), h("dd", null, safeText(sourceUnit.label))),
         h("div", null, h("dt", null, "Type"), h("dd", null, safeText(sourceUnit.source_type))),
-        h("div", null, h("dt", null, "Occurred"), h("dd", null, formatDate(sourceUnit.occurred_at))),
+        h("div", null, h("dt", null, "Source date"), h("dd", null, formatSourceDate(sourceUnit.source_date || sourceUnit.occurred_at))),
         h("div", null, h("dt", null, "Processed"), h("dd", null, formatDate(sourceUnit.processed_at))),
         sourceRef.display_path ? h("div", null, h("dt", null, "Display path"), h("dd", null, sourceRef.display_path)) : null
       )
@@ -581,11 +713,11 @@
       ),
       h("dl", { className: "ob-detail-list" },
         h("div", null, h("dt", null, "Policy tag"), h("dd", null,
-          h("span", {
-            className: cx("ob-badge", "ob-badge--stopped", "ob-policy-tag"),
-            title: stopTitle || stopLabel || "Stopped",
-            "aria-label": stopTitle ? stopLabel + ": " + stopTitle : stopLabel || "Stopped",
-          }, safeText(stopLabel, "Stopped"))
+          h(PolicyTag, {
+            code: effectiveCode,
+            definitions: props.policyDefinitions,
+            onShow: props.onPolicyDefinition,
+          })
         )),
         thought.stop_target_label ? h("div", null, h("dt", null, "Stop target"), h("dd", null, stopTargetText(thought))) : null,
         thought.stop_stage_id ? h("div", null, h("dt", null, "Stop stage"), h("dd", null, stageLabel(thought.stop_stage_id))) : null,
@@ -695,11 +827,11 @@
           h("div", { className: "ob-detail-summary" },
             h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(thought.disposition)) }, dispositionLabel(thought.disposition)),
             h("span", { className: cx("ob-badge", stageClass(thought.current_stage)) }, stageLabel(thought.current_stage)),
-            thought.disposition === "stopped" && detailStopLabel ? h("span", {
-              className: cx("ob-badge", "ob-badge--stopped", "ob-policy-tag"),
-              title: detailStopTitle || detailStopLabel,
-              "aria-label": detailStopTitle ? detailStopLabel + ": " + detailStopTitle : detailStopLabel,
-            }, detailStopLabel) : null,
+            thought.disposition === "stopped" && detailStopLabel ? h(PolicyTag, {
+              code: detailStopCode,
+              definitions: props.policyDefinitions,
+              onShow: props.onPolicyDefinition,
+            }) : null,
             thought.current_stage === "ready_for_cortexdb" ? h("span", { className: "ob-ready-label" }, "Ready for CortexDB") : null
           ),
           h(DetailIDs, { thought: thought }),
@@ -715,7 +847,11 @@
             thought.final_memory_text ? h("p", null, thought.final_memory_text) : h("p", { className: "ob-muted" }, "No final memory text in this snapshot.")
           ),
           thought.disposition === "imported" ? h(ImportedReceipt, { thought: thought }) : null,
-          thought.disposition === "stopped" ? h(StoppedReceipt, { thought: thought }) : null,
+          thought.disposition === "stopped" ? h(StoppedReceipt, {
+            thought: thought,
+            policyDefinitions: props.policyDefinitions,
+            onPolicyDefinition: props.onPolicyDefinition,
+          }) : null,
           thought.disposition !== "stopped" ? h("div", { className: "ob-readonly-actions" },
             h(ReadOnlyButton, null, "Reopen later"),
             h(ReadOnlyButton, null, "Promote later"),
@@ -747,6 +883,12 @@
     const searchState = useState("");
     const search = searchState[0];
     const setSearch = searchState[1];
+    const dateFromState = useState("");
+    const dateFrom = dateFromState[0];
+    const setDateFrom = dateFromState[1];
+    const dateToState = useState("");
+    const dateTo = dateToState[0];
+    const setDateTo = dateToState[1];
     const boardState = useState(null);
     const board = boardState[0];
     const setBoard = boardState[1];
@@ -768,6 +910,9 @@
     const detailErrorState = useState(null);
     const detailError = detailErrorState[0];
     const setDetailError = detailErrorState[1];
+    const policyDefinitionState = useState(null);
+    const policyDefinition = policyDefinitionState[0];
+    const setPolicyDefinition = policyDefinitionState[1];
 
     useEffect(function () {
       let alive = true;
@@ -799,7 +944,7 @@
       async function loadBoard() {
         setLoading(true);
         try {
-          const data = await SDK.fetchJSON(boardURL(sourceType, filter, sort, search));
+          const data = await SDK.fetchJSON(boardURL(sourceType, filter, sort, search, dateFrom, dateTo));
           if (!alive) return;
           setBoard(data || null);
           setError(null);
@@ -812,7 +957,7 @@
       }
       loadBoard();
       return function () { alive = false; };
-    }, [sourceType, filter, sort, search]);
+    }, [sourceType, filter, sort, search, dateFrom, dateTo]);
 
     const selectedSourceTypes = useMemo(function () {
       return sourceTypeOptions(sourceTypes);
@@ -846,16 +991,28 @@
       setDetailLoading(false);
     }
 
+    function handleDateFromChange(value) {
+      setDateFrom(value);
+      setDateTo(function (current) {
+        if (String(current || "").trim()) return current;
+        return sourceDateInputNextDay(value) || current;
+      });
+    }
+
     return h("div", { className: "ob-ingestion" },
       h(Header, { board: board, sourceMeta: sourceMeta }),
       h(Toolbar, {
         sourceTypes: selectedSourceTypes,
         sourceType: sourceType,
         search: search,
+        dateFrom: dateFrom,
+        dateTo: dateTo,
         filter: filter,
         sort: sort,
         onSourceTypeChange: setSourceType,
         onSearchChange: setSearch,
+        onDateFromChange: handleDateFromChange,
+        onDateToChange: setDateTo,
         onFilterChange: setFilter,
         onSortChange: setSort,
       }),
@@ -866,12 +1023,19 @@
         expandedRows: expandedRows,
         onToggleRow: toggleRow,
         onOpenDetail: openDetail,
+        onPolicyDefinition: setPolicyDefinition,
       }),
       (detail || detailLoading || detailError) ? h(ThoughtDetail, {
         thought: detail,
         loading: detailLoading,
         error: detailError,
+        policyDefinitions: board ? policyDefinitions(board) : DEFAULT_POLICY_STOP_DEFINITIONS,
+        onPolicyDefinition: setPolicyDefinition,
         onClose: closeDetail,
+      }) : null,
+      policyDefinition ? h(PolicyDefinitionDialog, {
+        definition: policyDefinition,
+        onClose: function () { setPolicyDefinition(null); },
       }) : null
     );
   }

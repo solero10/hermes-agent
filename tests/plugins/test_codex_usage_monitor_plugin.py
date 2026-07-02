@@ -137,8 +137,8 @@ def test_manifest_registers_expected_dashboard_plugin():
         "icon": "Activity",
         "version": "0.1.0",
         "tab": {"path": "/codex-usage", "position": "after:analytics"},
-        "entry": "dist/index.js?v=20260701-background-collector-v1",
-        "css": "dist/style.css?v=20260701-background-collector-v1",
+        "entry": "dist/index.js?v=20260701-detail-back-range-history-v1",
+        "css": "dist/style.css?v=20260701-detail-back-range-history-v1",
         "api": "plugin_api.py",
     }
 
@@ -156,7 +156,11 @@ def test_systemd_runner_assets_are_profile_safe_and_secret_free():
     combined = "\n".join([service, timer, readme])
 
     assert "collector.py once" in service
+    assert "venv/bin/python" in service
+    assert "Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin" in service
     assert "OnUnitActiveSec=60s" in timer
+    assert "PYTHONPATH=%h/.hermes/hermes-agent" in service
+    assert "WorkingDirectory=%h/.hermes/hermes-agent" in service
     assert "%h" in service
     assert "/home/kernk" not in combined
     assert "Authorization" not in combined
@@ -973,6 +977,20 @@ def test_frontend_lifts_zero_percent_line_and_reduces_point_clutter():
     assert "NEAR_VERTICAL_MIN_DY" in frontend
 
 
+def test_frontend_preserves_wrapper_account_order_and_single_sample_visibility():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+    css = FRONTEND_CSS_PATH.read_text(encoding="utf-8")
+
+    assert "Preserve the wrapper/cache order exactly so the dashboard matches `husage`" in frontend
+    assert "priorityA" not in frontend
+    assert "indexA" not in frontend
+    assert "localeCompare" not in frontend
+    assert "points.length === 1" in frontend
+    assert "codex-usage-chart-single-sample-guide" in frontend
+    assert ".codex-usage-chart-single-sample-guide" in css
+    assert "stroke-dasharray: 5 5;" in css
+
+
 def test_frontend_does_not_render_pace_as_x_axis_zones():
     frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8").lower()
     forbidden = [
@@ -1002,11 +1020,17 @@ def test_frontend_supports_account_detail_url_routing():
     assert "closeAccountDetail" in frontend
     assert "rangeStateFromLocation" in frontend
     assert "buildDetailUrl" in frontend
+    assert "buildAccountListUrl" in frontend
     assert "five_hour_range" in frontend
     assert "weekly_range" in frontend
     assert "five_hour_from" in frontend
     assert "weekly_to" in frontend
     assert "setDetailRangeState(rangeStateFromLocation())" in frontend
+    assert "codexUsageFromAccountList: true" in frontend
+    assert "codexUsageFromAccountList: Boolean(currentState.codexUsageFromAccountList)" in frontend
+    assert "window.history.replaceState({ codexUsageAccountId: selectedAccountId" in frontend
+    assert "if (state.codexUsageAccountId && state.codexUsageFromAccountList && window.history.length > 1)" in frontend
+    assert "window.history.replaceState({ codexUsageAccountId: \"\", codexUsageRangeState: rangeDefaults() }, \"\", buildAccountListUrl())" in frontend
 
 
 def test_frontend_account_detail_range_controls_and_custom_dates():

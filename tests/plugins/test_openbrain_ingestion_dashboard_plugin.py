@@ -220,6 +220,9 @@ def test_board_groups_thoughts_by_current_stage_once_and_splits_counts(client):
     assert payload["total_counts"]["zero_thoughts"] == 1
 
     first = next(row for row in payload["rows"] if row["id"] == "transcript-a")
+    assert first["source_date"] == "2023-11-30T20:00:00Z"
+    assert first["occurred_at"] == "2023-11-30T20:00:00Z"
+    assert first["processed_at"] == "2026-06-21T04:39:54Z"
     all_card_ids = [card["id"] for cards in first["columns"].values() for card in cards]
     assert all_card_ids.count("lineage_demo_7f3a") == 1
     assert all_card_ids.count("lineage_dup_1") == 1
@@ -314,6 +317,38 @@ def test_board_sort_options(client):
     assert [row["id"] for row in most_stopped["rows"]][0] == "transcript-a"
 
 
+def test_board_source_date_filters_are_inclusive_and_source_scoped(client):
+    response = client.get(
+        "/api/plugins/openbrain_ingestion/board?source_type=transcripts&date_from=2023-12-01&date_to=2023-12-01"
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert [row["id"] for row in payload["rows"]] == ["transcript-b"]
+    assert payload["total_counts"]["source_units"] == 3
+    assert payload["visible_counts"]["source_units"] == 1
+    assert payload["date_from"] == "2023-12-01"
+    assert payload["date_to"] == "2023-12-01"
+
+    open_ended = client.get(
+        "/api/plugins/openbrain_ingestion/board?source_type=transcripts&date_from=2024-01-01"
+    ).json()
+    assert [row["id"] for row in open_ended["rows"]] == ["transcript-empty"]
+
+    us_date = client.get(
+        "/api/plugins/openbrain_ingestion/board?source_type=transcripts&date_from=12/01/2023&date_to=12/01/2023"
+    ).json()
+    assert [row["id"] for row in us_date["rows"]] == ["transcript-b"]
+
+
+def test_board_source_date_filter_rejects_bad_bounds(client):
+    assert client.get(
+        "/api/plugins/openbrain_ingestion/board?source_type=transcripts&date_from=not-a-date"
+    ).status_code == 400
+    assert client.get(
+        "/api/plugins/openbrain_ingestion/board?source_type=transcripts&date_from=2024-01-01&date_to=2023-01-01"
+    ).status_code == 400
+
+
 def test_thought_detail_imported_has_normalized_timeline_and_receipt(client):
     response = client.get(
         "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_demo_7f3a"
@@ -322,6 +357,7 @@ def test_thought_detail_imported_has_normalized_timeline_and_receipt(client):
     thought = response.json()["thought"]
     assert thought["lineage_id"] == "lineage_demo_7f3a"
     assert thought["source_unit"]["id"] == "transcript-a"
+    assert thought["source_unit"]["source_date"] == "2023-11-30T20:00:00Z"
     assert thought["disposition"] == "imported"
     assert thought["cortexdb_receipt"]["id"] == "thought_demo_7f3a"
     assert thought["related_memories"][0]["title"] == "Stakeholder acceptance"

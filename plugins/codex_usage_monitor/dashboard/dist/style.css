@@ -383,6 +383,15 @@
   vector-effect: non-scaling-stroke;
 }
 
+.codex-usage-chart-single-sample-guide {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 2;
+  stroke-dasharray: 5 5;
+  opacity: 0.72;
+  vector-effect: non-scaling-stroke;
+}
+
 .codex-usage-chart-point {
   stroke: color-mix(in srgb, var(--color-card) 82%, #000);
   stroke-width: 1.25;
