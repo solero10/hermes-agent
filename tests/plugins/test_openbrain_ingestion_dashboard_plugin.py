@@ -204,8 +204,8 @@ def test_board_groups_thoughts_by_current_stage_once_and_splits_counts(client):
     assert [c["id"] for c in payload["columns"]] == [
         "extracted",
         "shaped",
-        "deduped",
         "policy",
+        "deduped",
         "ready_for_cortexdb",
         "cortexdb",
     ]
@@ -364,8 +364,8 @@ def test_thought_detail_imported_has_normalized_timeline_and_receipt(client):
     assert [stage["id"] for stage in thought["stages"]] == [
         "extracted",
         "shaped",
-        "deduped",
         "policy",
+        "deduped",
         "ready_for_cortexdb",
         "cortexdb",
     ]
@@ -403,7 +403,8 @@ def test_thought_detail_stopped_duplicate_strips_receipt(client):
     assert thought["stop_target_label"] == "Start narrow"
     assert thought["stop_stage_id"] == "deduped"
     assert "cortexdb_receipt" not in thought or thought["cortexdb_receipt"] in ({}, None)
-    later = [stage for stage in thought["stages"] if stage["id"] in {"policy", "ready_for_cortexdb", "cortexdb"}]
+    assert next(stage for stage in thought["stages"] if stage["id"] == "policy")["status"] == "complete"
+    later = [stage for stage in thought["stages"] if stage["id"] in {"ready_for_cortexdb", "cortexdb"}]
     assert all(stage["status"] == "not_reached" for stage in later)
 
     db_fields = {field["name"]: field for field in thought["database_fields"]}

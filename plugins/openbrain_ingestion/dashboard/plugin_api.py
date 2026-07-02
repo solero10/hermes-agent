@@ -31,8 +31,8 @@ SNAPSHOT_FILENAME = "snapshot.json"
 StageId = Literal[
     "extracted",
     "shaped",
-    "deduped",
     "policy",
+    "deduped",
     "ready_for_cortexdb",
     "cortexdb",
 ]
@@ -49,8 +49,8 @@ StageStatus = Literal[
 CANONICAL_STAGES: tuple[str, ...] = (
     "extracted",
     "shaped",
-    "deduped",
     "policy",
+    "deduped",
     "ready_for_cortexdb",
     "cortexdb",
 )

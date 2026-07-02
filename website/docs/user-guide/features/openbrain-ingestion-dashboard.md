@@ -16,8 +16,8 @@ The board is organized by **source unit**. Each row represents one item from the
 
 1. Extracted
 2. Shaped
-3. Deduped
-4. Policy
+3. Policy
+4. Deduped
 5. Ready for CortexDB
 6. CortexDB
 
@@ -51,11 +51,11 @@ Open a card's detail dialog to see the full lineage timeline, including complete
 
 ## Ready for CortexDB
 
-**Ready for CortexDB** means the candidate has survived the earlier shaping, dedupe, and policy phases and is ready to become a durable OpenBrain/CortexDB memory. In the read-only MVP, the label is informational: the dashboard does not promote, import, reopen, or mutate records.
+**Ready for CortexDB** means the candidate has survived the earlier shaping, policy, and dedupe phases and is ready to become a durable OpenBrain/CortexDB memory. In the read-only MVP, the label is informational: the dashboard does not promote, import, reopen, or mutate records.
 
 ## Stopped and not-imported cards
 
-Stopped cards are candidates or inventory rows that did not become CortexDB records. Duplicate stops remain in **Deduped**. The **Policy** column is reserved only for thoughts blocked by a clearly defined capture policy; useful historical/reference material that merely needs rewriting, merging, or semantic dedupe should remain in **Shaped**.
+Stopped cards are candidates or inventory rows that did not become CortexDB records. Duplicate stops remain in **Deduped**. The **Policy** column is reserved only for thoughts blocked by a clearly defined capture policy; useful historical/reference material that merely needs rewriting should remain in **Shaped** until the policy/redaction pass runs, then dedupe can decide whether it stays, merges, or moves on.
 
 Click a policy tag on a card or detail dialog to show its definition. Policy tags use this vocabulary:
 

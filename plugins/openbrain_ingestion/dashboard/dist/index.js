@@ -15,8 +15,8 @@
   const STAGES = [
     { id: "extracted", label: "Extracted" },
     { id: "shaped", label: "Shaped" },
-    { id: "deduped", label: "Deduped" },
     { id: "policy", label: "Policy" },
+    { id: "deduped", label: "Deduped" },
     { id: "ready_for_cortexdb", label: "Ready for CortexDB" },
     { id: "cortexdb", label: "CortexDB" },
   ];
