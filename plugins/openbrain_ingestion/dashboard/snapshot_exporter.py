@@ -7,6 +7,7 @@ exporter does not drift from the API contract.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -635,6 +636,9 @@ def _thought_from_candidate(
         ),
         "content_fingerprint": fingerprint,
     }
+    formation_trace = _formation_trace_from_record(candidate, current_stage=current_stage)
+    if formation_trace:
+        thought["formation_trace"] = formation_trace
 
     if duplicate:
         related = _related_memories(dedupe)
@@ -668,6 +672,64 @@ def _thought_from_candidate(
 
     thought = {key: value for key, value in thought.items() if value is not None and value != []}
     return _normalize_thought(thought)
+
+
+def _formation_trace_from_record(record: dict[str, Any], *, current_stage: str) -> dict[str, Any] | None:
+    raw_trace = _dig(record, "formation_trace")
+    if isinstance(raw_trace, dict):
+        trace = copy.deepcopy(raw_trace)
+        trace.setdefault("version", 1)
+        trace.setdefault("stage", "shaped")
+        clean = {key: value for key, value in trace.items() if value is not None and value != [] and value != {}}
+        return clean if _formation_trace_has_content(clean) else None
+
+    primary_lineage_ids = _list_of_strings(_dig(record, "primary_lineage_ids"))
+    primary_lineage_cards = _list_of_dicts(_dig(record, "primary_lineage_cards"))
+    additional_context_used = _list_of_dicts(_dig(record, "additional_context_used"))
+    llm_input_text = _string_or_none(
+        _dig(record, "llm_input_text")
+        or _dig(record, "shaping_input_text")
+        or _dig(record, "input_text")
+    )
+    llm_output_text = _string_or_none(
+        _dig(record, "llm_output_text")
+        or _dig(record, "shaping_output_text")
+        or _dig(record, "output_text")
+    )
+    merge_note = _string_or_none(_dig(record, "merge_note") or _dig(record, "shaping_note"))
+    created_by = _dig(record, "created_by") or _dig(record, "llm")
+    if isinstance(created_by, str):
+        created_by = {"tool": created_by}
+    elif not isinstance(created_by, dict):
+        created_by = None
+
+    trace = {
+        "version": 1,
+        "stage": "shaped",
+        "created_at": _coerce_timestamp(_dig(record, "created_at") or _dig(record, "shaped_at")),
+        "created_by": created_by,
+        "primary_lineage_ids": primary_lineage_ids,
+        "primary_lineage_cards": primary_lineage_cards,
+        "additional_context_used": additional_context_used,
+        "llm_input_text": llm_input_text,
+        "llm_output_text": llm_output_text,
+        "output_title": _candidate_title(record),
+        "suggested_type": _string_or_none(_dig(record, "suggested_type") or _dig(record, "memory_type")),
+        "merge_note": merge_note,
+        "gate_events": _list_of_dicts(_dig(record, "gate_events")),
+    }
+
+    clean = {key: value for key, value in trace.items() if value is not None and value != [] and value != {}}
+    return clean if _formation_trace_has_content(clean) else None
+
+
+def _formation_trace_has_content(value: dict[str, Any]) -> bool:
+    for key, item in value.items():
+        if key in {"version", "stage"}:
+            continue
+        if item not in (None, "", [], {}):
+            return True
+    return False
 
 
 def _inventory_is_stopped(record: dict[str, Any]) -> bool:
@@ -902,6 +964,9 @@ def _stopped_thought_from_inventory(
         "matched_memory_id": stop_target_id,
         "content_fingerprint": fingerprint,
     }
+    formation_trace = _formation_trace_from_record(record, current_stage=current_stage)
+    if formation_trace:
+        thought["formation_trace"] = formation_trace
     if stop_code is None:
         for key in ("stop_stage_id", "stop_code", "stop_target_id", "stop_target_label", "stopped_reason", "matched_memory_id"):
             thought.pop(key, None)
@@ -1256,6 +1321,12 @@ def _list_of_strings(value: Any) -> list[str]:
     if isinstance(value, (list, tuple, set)):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [copy.deepcopy(item) for item in value if isinstance(item, dict)]
 
 
 def _slug(value: Any) -> str:

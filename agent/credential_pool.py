@@ -537,10 +537,11 @@ class CredentialPool:
                 self._entries[idx] = new
                 return
 
-    def _persist(self) -> None:
+    def _persist(self, *, replace_all: bool = False) -> None:
         write_credential_pool(
             self.provider,
             [entry.to_dict() for entry in self._entries],
+            preserve_existing=not replace_all,
         )
 
     def _is_terminal_auth_failure(
@@ -1421,7 +1422,7 @@ class CredentialPool:
             pruned_ids = set(entries_to_prune)
             self._entries = [e for e in self._entries if e.id not in pruned_ids]
         if cleared_any:
-            self._persist()
+            self._persist(replace_all=bool(entries_to_prune))
         return available
 
     def _select_unlocked(self) -> Optional[PooledCredential]:
@@ -1449,7 +1450,7 @@ class CredentialPool:
             rotated = [candidate for candidate in self._entries if candidate.id != entry.id]
             rotated.append(replace(entry, priority=len(self._entries) - 1))
             self._entries = [replace(candidate, priority=idx) for idx, candidate in enumerate(rotated)]
-            self._persist()
+            self._persist(replace_all=True)
             self._current_id = entry.id
             return self.current() or entry
 
@@ -1595,7 +1596,7 @@ class CredentialPool:
             replace(entry, priority=new_priority)
             for new_priority, entry in enumerate(self._entries)
         ]
-        self._persist()
+        self._persist(replace_all=True)
         if self._current_id == removed.id:
             self._current_id = None
         return removed

@@ -108,6 +108,7 @@ def hermes_home(tmp_path, monkeypatch):
                         "needs_review": False,
                         "topics": ["configuration"],
                         "source_snippet": "Start with a small configurable path.",
+                        "formation_trace": {},
                         "related_memories": [
                             {"id": "thought_existing_91c", "title": "Start narrow", "score": 0.82}
                         ],
@@ -123,6 +124,58 @@ def hermes_home(tmp_path, monkeypatch):
                         "needs_review": True,
                         "topics": ["review"],
                         "source_snippet": "This should be manually reviewed.",
+                        "formation_trace": {
+                            "version": 1,
+                            "stage": "shaped",
+                            "created_at": "2026-06-21T04:40:00Z",
+                            "created_by": {"kind": "llm", "provider": "openai-codex", "model": "gpt-5.5"},
+                            "primary_lineage_ids": ["pan:test-01", "pan:test-02"],
+                            "primary_lineage_cards": [
+                                {
+                                    "lineage_id": "pan:test-01",
+                                    "stage": "extracted",
+                                    "title": "First extracted input",
+                                    "summary": "The first source-backed input for shaping.",
+                                    "quote": "Q" * 800,
+                                    "topics": ["review"],
+                                }
+                            ],
+                            "additional_context_used": [
+                                {
+                                    "kind": "source_title",
+                                    "label": "Source title",
+                                    "text": "2023-11-30 EY AI Architecture Platform Development",
+                                    "source": "source_unit.label",
+                                },
+                                {
+                                    "kind": "neighboring_card",
+                                    "lineage_id": "pan:test-03",
+                                    "title": "Neighboring extracted input",
+                                    "summary": "Neighboring summary.",
+                                    "quote": "Neighboring source quote.",
+                                },
+                                {
+                                    "kind": "source_metadata",
+                                    "label": "Source metadata",
+                                    "values": {
+                                        "section": "Formation trace fixture",
+                                        "api_key": "super-secret-source-metadata-value",
+                                        "debug_path": "/mnt/d/private/source metadata.txt",
+                                    },
+                                }
+                            ],
+                            "llm_input_text": "Exact input package api_key=super-secret-value see /mnt/d/private/Input Folder/file.md "
+                            + ("safe words " * 2200),
+                            "llm_output_text": "Shaped output text for review.",
+                            "output_title": "Review source-backed wording",
+                            "suggested_type": "observation",
+                            "merge_note": "Merged extracted inputs into one shaped candidate.",
+                            "hidden_reasoning": "Do not expose hidden reasoning.",
+                            "raw_prompt": "Do not expose raw debug prompts.",
+                            "gate_events": [
+                                {"stage": "policy", "status": "pending", "decision": "not_run"}
+                            ],
+                        },
                     },
                     {
                         "id": "lineage_stopped_cortexdb",
@@ -317,6 +370,19 @@ def test_board_sort_options(client):
     assert [row["id"] for row in most_stopped["rows"]][0] == "transcript-a"
 
 
+def test_board_sort_uses_explicit_source_date_before_runtime_dates(api_module):
+    rows = [
+        {"id": "runtime-newer", "source_date": None, "occurred_at": "2024-06-01T00:00:00Z"},
+        {"id": "source-date-newest", "source_date": "2024-07-01T00:00:00Z", "occurred_at": "2020-01-01T00:00:00Z"},
+    ]
+
+    newest = api_module._sort_rows([dict(row) for row in rows], "newest")
+    assert [row["id"] for row in newest] == ["source-date-newest", "runtime-newer"]
+
+    oldest = api_module._sort_rows([dict(row) for row in rows], "oldest")
+    assert [row["id"] for row in oldest] == ["runtime-newer", "source-date-newest"]
+
+
 def test_board_source_date_filters_are_inclusive_and_source_scoped(client):
     response = client.get(
         "/api/plugins/openbrain_ingestion/board?source_type=transcripts&date_from=2023-12-01&date_to=2023-12-01"
@@ -390,11 +456,59 @@ def test_thought_detail_imported_has_normalized_timeline_and_receipt(client):
     assert db_fields["derivation_layer"]["value"] == "primary"
 
 
+def test_thought_detail_includes_formation_trace_with_sanitized_inputs(client):
+    response = client.get(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_ready_1"
+    )
+    assert response.status_code == 200
+    thought = response.json()["thought"]
+    trace = thought["formation_trace"]
+
+    assert trace["version"] == 1
+    assert trace["stage"] == "shaped"
+    assert trace["created_by"]["model"] == "gpt-5.5"
+    assert trace["primary_lineage_ids"] == ["pan:test-01", "pan:test-02"]
+    assert trace["primary_lineage_cards"][0]["title"] == "First extracted input"
+    assert len(trace["primary_lineage_cards"][0]["quote"]) == 800
+    assert trace["additional_context_used"][0]["kind"] == "source_title"
+    assert trace["additional_context_used"][1]["kind"] == "neighboring_card"
+    assert trace["additional_context_used"][1]["quote"] == "Neighboring source quote."
+    assert trace["additional_context_used"][2]["kind"] == "source_metadata"
+    assert trace["additional_context_used"][2]["values"]["section"] == "Formation trace fixture"
+    assert trace["additional_context_used"][2]["values"]["api_key"] == "[REDACTED]"
+    assert "[REDACTED_PATH]" in trace["additional_context_used"][2]["values"]["debug_path"]
+    assert "Exact input package" in trace["llm_input_text"]
+    assert "Shaped output text" in trace["llm_output_text"]
+    assert trace["gate_events"][0]["stage"] == "policy"
+    assert len(trace["llm_input_text"]) <= 20_000
+    assert trace["llm_input_text"].endswith("...")
+
+    rendered = json.dumps(trace)
+    assert "super-secret-value" not in rendered
+    assert "super-secret-source-metadata-value" not in rendered
+    assert "Do not expose hidden reasoning" not in rendered
+    assert "Do not expose raw debug prompts" not in rendered
+    assert "/mnt/d/private" not in rendered
+    assert "Input Folder" not in rendered
+
+
+def test_board_search_matches_formation_trace_without_source_row_broadening(client):
+    response = client.get(
+        "/api/plugins/openbrain_ingestion/board?source_type=transcripts&search=Shaped%20output%20text"
+    )
+    assert response.status_code == 200
+    payload = response.json()
+
+    cards = _all_cards(payload)
+    assert [card["lineage_id"] for card in cards] == ["lineage_ready_1"]
+
+
 def test_thought_detail_stopped_duplicate_strips_receipt(client):
     response = client.get("/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_dup_1")
     assert response.status_code == 200
     thought = response.json()["thought"]
     assert thought["disposition"] == "stopped"
+    assert "formation_trace" not in thought
     assert thought["current_stage"] == "deduped"
     assert thought["stopped_reason"] == "duplicate / merged"
     assert thought["matched_memory_id"] == "thought_existing_91c"

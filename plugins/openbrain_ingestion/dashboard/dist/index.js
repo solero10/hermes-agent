@@ -290,7 +290,7 @@
     return date;
   }
 
-  function sourceDateInputNextDay(value) {
+  function sourceDateInputSameDay(value) {
     const raw = String(value || "").trim();
     let match = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
     if (match) {
@@ -299,7 +299,6 @@
       const year = Number(match[3]);
       const date = utcDateFromParts(year, month, day);
       if (!date) return "";
-      date.setUTCDate(date.getUTCDate() + 1);
       return padDatePart(date.getUTCMonth() + 1) + "/" + padDatePart(date.getUTCDate()) + "/" + date.getUTCFullYear();
     }
     match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
@@ -309,7 +308,6 @@
       const day = Number(match[3]);
       const date = utcDateFromParts(year, month, day);
       if (!date) return "";
-      date.setUTCDate(date.getUTCDate() + 1);
       return date.getUTCFullYear() + "-" + padDatePart(date.getUTCMonth() + 1) + "-" + padDatePart(date.getUTCDate());
     }
     return "";
@@ -682,6 +680,187 @@
     );
   }
 
+  function traceActorText(actor) {
+    if (!actor || typeof actor !== "object") return "";
+    return [actor.provider, actor.model, actor.tool || actor.kind].filter(Boolean).join(" / ");
+  }
+
+  function traceContextLabel(item) {
+    if (!item) return "Other context";
+    if (item.label) return item.label;
+    const kind = String(item.kind || "other").replace(/_/g, " ");
+    return kind.replace(/\b\w/g, function (char) { return char.toUpperCase(); });
+  }
+
+  function traceContextValues(item) {
+    if (!item || typeof item !== "object") return null;
+    const values = item.values || item.metadata || item.fields || item.key_values;
+    return values && typeof values === "object" && !Array.isArray(values) ? values : null;
+  }
+
+  function TraceKeyValueList(props) {
+    const values = props.values || {};
+    const entries = Object.keys(values).filter(function (key) { return values[key] !== null && values[key] !== undefined && values[key] !== ""; });
+    if (!entries.length) return null;
+    return h("dl", { className: "ob-trace-kv-list" }, entries.map(function (key) {
+      const value = values[key];
+      return h("div", { key: key },
+        h("dt", null, key.replace(/_/g, " ")),
+        h("dd", null, typeof value === "object" ? JSON.stringify(value) : safeText(value))
+      );
+    }));
+  }
+
+  function traceOutputTitleDistinct(trace, thought) {
+    const outputTitle = String((trace && trace.output_title) || "").trim();
+    const currentTitle = String((thought && thought.title) || "").trim();
+    return outputTitle && outputTitle !== currentTitle;
+  }
+
+  function formationTraceHasContent(trace) {
+    if (!trace || typeof trace !== "object") return false;
+    return Object.keys(trace).some(function (key) {
+      const value = trace[key];
+      if (key === "version" || key === "stage") return false;
+      if (Array.isArray(value)) return value.length > 0;
+      if (value && typeof value === "object") return Object.keys(value).length > 0;
+      return value !== null && value !== undefined && value !== "";
+    });
+  }
+
+  function TraceTextBlock(props) {
+    const text = props.text ? String(props.text) : "";
+    if (!text) return h("p", { className: "ob-muted" }, props.emptyText || "No text recorded.");
+    return h("details", { className: "ob-trace-details", open: text.length <= 1500 },
+      h("summary", null, props.label),
+      props.note ? h("p", { className: "ob-trace-note" }, props.note) : null,
+      h("pre", { className: "ob-trace-pre" }, text)
+    );
+  }
+
+  function FormationLineageCards(props) {
+    const cards = asArray(props.trace && props.trace.primary_lineage_cards);
+    return h("section", { className: "ob-trace-block ob-trace-lineage" },
+      h("h4", null, "Primary lineage cards used"),
+      h("p", { className: "ob-muted" }, "These are the extracted cards directly used to create the shaped thought."),
+      cards.length ? h("ol", { className: "ob-trace-card-list" }, cards.map(function (card, index) {
+        const cardId = card.lineage_id || card.id || String(index);
+        return h("li", { key: cardId, className: "ob-trace-card" },
+          h("div", { className: "ob-trace-card-header" },
+            h("code", null, safeText(card.lineage_id || card.id, "Lineage ID unavailable")),
+            card.stage ? h("span", { className: cx("ob-badge", stageClass(card.stage)) }, stageLabel(card.stage)) : null
+          ),
+          card.title ? h("strong", null, safeText(card.title)) : null,
+          card.summary ? h("p", null, safeText(card.summary)) : null,
+          card.quote || card.source_snippet ? h("blockquote", { className: "ob-source-snippet" }, safeText(card.quote || card.source_snippet)) : null,
+          asArray(card.topics).length ? h("div", { className: "ob-topic-list" }, asArray(card.topics).map(function (topic) {
+            return h("span", { key: topic, className: "ob-topic" }, topic);
+          })) : null
+        );
+      })) : h("p", { className: "ob-muted" }, "No primary lineage cards recorded.")
+    );
+  }
+
+  function FormationAdditionalContext(props) {
+    const items = asArray(props.trace && props.trace.additional_context_used);
+    return h("section", { className: "ob-trace-block ob-trace-context" },
+      h("h4", null, "Additional context consulted"),
+      h("p", { className: "ob-muted" }, "This is source context used to understand the lineage cards, not separate evidence by itself."),
+      items.length ? h("ul", { className: "ob-trace-context-list" }, items.map(function (item, index) {
+        const values = traceContextValues(item);
+        return h("li", { key: (item.kind || "context") + "-" + index, className: "ob-trace-context-item" },
+          h("div", { className: "ob-trace-card-header" },
+            h("strong", null, traceContextLabel(item)),
+            item.kind ? h("span", { className: "ob-trace-kind" }, item.kind) : null
+          ),
+          item.lineage_id ? h("code", null, safeText(item.lineage_id)) : null,
+          item.title ? h("p", null, h("strong", null, safeText(item.title))) : null,
+          item.text ? h("p", null, safeText(item.text)) : null,
+          item.summary ? h("p", null, safeText(item.summary)) : null,
+          item.quote || item.source_snippet ? h("blockquote", { className: "ob-source-snippet" }, safeText(item.quote || item.source_snippet)) : null,
+          h(TraceKeyValueList, { values: values }),
+          item.source ? h("small", null, "Source: ", safeText(item.source)) : null,
+          item.why_used ? h("small", null, "Why used: ", safeText(item.why_used)) : null
+        );
+      })) : h("p", { className: "ob-muted" }, "No additional source context recorded.")
+    );
+  }
+
+  function FormationGateEvents(props) {
+    const events = asArray(props.trace && props.trace.gate_events);
+    if (!events.length) return null;
+    return h("section", { className: "ob-trace-block ob-trace-gates" },
+      h("h4", null, "Gate decisions"),
+      h("ul", { className: "ob-trace-gate-list" }, events.map(function (event, index) {
+        return h("li", { key: (event.stage || "gate") + "-" + index, className: "ob-trace-gate" },
+          h("strong", null, stageLabel(event.stage)),
+          h("span", null, safeText(event.decision || event.status, "Pending")),
+          event.reason ? h("p", null, safeText(event.reason)) : null,
+          event.target_label || event.target_id ? h("small", null, safeText(event.target_label || event.target_id)) : null,
+          event.created_at ? h("small", null, formatDate(event.created_at)) : null
+        );
+      }))
+    );
+  }
+
+  function FormationTrace(props) {
+    const thought = props.thought || {};
+    const trace = thought.formation_trace || null;
+    const hasTrace = formationTraceHasContent(trace);
+    const primaryIds = hasTrace ? asArray(trace.primary_lineage_ids) : [];
+    const contextItems = hasTrace ? asArray(trace.additional_context_used) : [];
+    const contextLabels = contextItems.map(traceContextLabel).filter(Boolean).join(", ");
+    const actor = hasTrace ? traceActorText(trace.created_by) : "";
+    const headingId = "ob-formation-trace-title";
+    return h("section", { className: "ob-formation-trace", "aria-labelledby": headingId },
+      h("div", { className: "ob-section-heading" },
+        h("h3", { id: headingId }, "Formation trace"),
+        hasTrace ? h("span", { className: "ob-trace-version" }, trace.version ? "Trace v" + trace.version : "Trace") : null
+      ),
+      h("p", { className: "ob-trace-note" }, "Shows how this thought was formed from source material. This shows submitted input and output, not hidden model reasoning."),
+      !hasTrace ? h("div", { className: "ob-trace-empty" },
+        h("p", null, "No formation trace in this snapshot."),
+        h("p", { className: "ob-muted" }, "This thought was created before Formation Trace capture was added, or the producer did not provide trace data.")
+      ) : h(React.Fragment, null,
+        h("dl", { className: "ob-trace-summary ob-detail-list" },
+          h("div", null, h("dt", null, "Trace stage"), h("dd", null, stageLabel(trace.stage || thought.current_stage))),
+          h("div", null, h("dt", null, "Primary lineage cards"), h("dd", null, primaryIds.length ? primaryIds.length + " — " + primaryIds.join(", ") : "None recorded")),
+          h("div", null, h("dt", null, "Extra context"), h("dd", null, contextItems.length ? contextItems.length + " — " + contextLabels : "None recorded")),
+          actor ? h("div", null, h("dt", null, "Created by"), h("dd", null, actor)) : null,
+          trace.created_at ? h("div", null, h("dt", null, "Created at"), h("dd", null, formatDate(trace.created_at))) : null
+        ),
+        h(FormationLineageCards, { trace: trace }),
+        h(FormationAdditionalContext, { trace: trace }),
+        h("section", { className: "ob-trace-block ob-trace-llm-input" },
+          h("h4", null, "Exact LLM input sent to shaping step"),
+          h(TraceTextBlock, {
+            label: "Show submitted input package",
+            text: trace.llm_input_text,
+            emptyText: "No exact LLM input recorded.",
+            note: "This is the submitted input package, not hidden reasoning.",
+          })
+        ),
+        h("section", { className: "ob-trace-block ob-trace-llm-output" },
+          h("h4", null, "Output produced by shaping step"),
+          traceOutputTitleDistinct(trace, thought) ? h("p", null, h("strong", null, "Shaped title"), ": ", safeText(trace.output_title)) : null,
+          h(TraceTextBlock, {
+            label: "Show shaped output",
+            text: trace.llm_output_text,
+            emptyText: "No shaped output recorded.",
+          }),
+          trace.suggested_type ? h("p", null, h("strong", null, "Suggested type"), ": ", safeText(trace.suggested_type)) : null,
+          trace.merge_note ? h("p", null, h("strong", null, "Merge note"), ": ", safeText(trace.merge_note)) : null
+        ),
+        h(FormationGateEvents, { trace: trace }),
+        h("div", { className: "ob-readonly-actions" },
+          h(ReadOnlyButton, null, "Copy trace summary"),
+          h(ReadOnlyButton, null, "Copy LLM input"),
+          h(ReadOnlyButton, null, "Copy shaped output")
+        )
+      )
+    );
+  }
+
   function ImportedReceipt(props) {
     const thought = props.thought || {};
     const receipt = thought.cortexdb_receipt || {};
@@ -839,6 +1018,7 @@
           thought.source_snippet || thought.quote || thought.raw_text ? h("blockquote", { className: "ob-source-snippet" }, thought.source_snippet || thought.quote || thought.raw_text) : null,
           h(SourceContext, { thought: thought }),
           h(LineageTimeline, { thought: thought }),
+          h(FormationTrace, { thought: thought }),
           h("section", { className: "ob-final-memory" },
             h("div", { className: "ob-section-heading" },
               h("h3", null, "Final memory"),
@@ -995,7 +1175,7 @@
       setDateFrom(value);
       setDateTo(function (current) {
         if (String(current || "").trim()) return current;
-        return sourceDateInputNextDay(value) || current;
+        return sourceDateInputSameDay(value) || current;
       });
     }
 

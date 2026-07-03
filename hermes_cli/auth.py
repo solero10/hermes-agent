@@ -1325,7 +1325,137 @@ def _entry_matches_removed_credential(auth_store: Dict[str, Any], provider_id: s
     return False
 
 
-def write_credential_pool(provider_id: str, entries: List[Dict[str, Any]]) -> Path:
+def _is_manual_credential_source(entry: Dict[str, Any]) -> bool:
+    source = str(entry.get("source") or "").strip().lower()
+    return source == "manual" or source.startswith("manual:")
+
+
+def _merge_credential_pool_entries_preserving_disk(
+    current_entries: List[Any],
+    incoming_entries: List[Any],
+) -> List[Any]:
+    """Merge a runtime pool snapshot into the current on-disk pool.
+
+    Long-running Hermes sessions keep a ``CredentialPool`` object in memory.
+    A later status/refresh write from that old object must not replace the
+    entire on-disk pool, because another process may have restored or added
+    manual credentials after this process started.  Disk identity/order is the
+    source of truth; matching incoming entries update existing rows, missing
+    manual disk rows are preserved, and stale duplicate singleton rows are not
+    appended.  Explicit removal commands still bypass this merge by calling
+    ``write_credential_pool(..., preserve_existing=False)``.
+    """
+    incoming_dicts: List[Dict[str, Any]] = [
+        dict(entry) for entry in incoming_entries if isinstance(entry, dict)
+    ]
+    if not incoming_dicts:
+        return list(current_entries)
+
+    by_id: Dict[str, int] = {}
+    by_singleton_source: Dict[str, int] = {}
+    for idx, entry in enumerate(incoming_dicts):
+        entry_id = _normalize_credential_identity(entry.get("id"))
+        if entry_id:
+            by_id.setdefault(entry_id, idx)
+        source = _normalize_credential_identity(entry.get("source"))
+        if source and not _is_manual_credential_source(entry):
+            by_singleton_source.setdefault(source, idx)
+
+    used: Set[int] = set()
+    merged: List[Any] = []
+    disk_singleton_sources: Set[str] = set()
+
+    protected_identity_fields = {"id", "label", "priority", "source"}
+
+    for disk_entry in current_entries:
+        if not isinstance(disk_entry, dict):
+            merged.append(disk_entry)
+            continue
+
+        disk = dict(disk_entry)
+        disk_id = _normalize_credential_identity(disk.get("id"))
+        disk_source = _normalize_credential_identity(disk.get("source"))
+        if disk_source and not _is_manual_credential_source(disk):
+            disk_singleton_sources.add(disk_source)
+
+        incoming_idx = by_id.get(disk_id) if disk_id else None
+        if incoming_idx is None and disk_source and not _is_manual_credential_source(disk):
+            incoming_idx = by_singleton_source.get(disk_source)
+
+        if incoming_idx is None:
+            if not _is_manual_credential_source(disk):
+                # Non-manual/singleton sources are allowed to disappear during
+                # quarantine or source-suppression writes.  The stale-snapshot
+                # protection is for user-managed manual pool entries.
+                continue
+            merged.append(disk)
+            continue
+
+        incoming = incoming_dicts[incoming_idx]
+        used.add(incoming_idx)
+        incoming_source = _normalize_credential_identity(incoming.get("source"))
+
+        # If an old in-memory snapshot has the same id but a different source,
+        # do not let it rewrite the current row.  Source changes are explicit
+        # account-management actions, not runtime status updates.
+        if disk_source and incoming_source and disk_source != incoming_source:
+            merged.append(disk)
+            continue
+
+        updated = dict(disk)
+        for key, value in incoming.items():
+            if key in protected_identity_fields:
+                continue
+            updated[key] = value
+        merged.append(updated)
+
+    existing_ids = {
+        _normalize_credential_identity(entry.get("id"))
+        for entry in merged
+        if isinstance(entry, dict) and entry.get("id")
+    }
+    existing_manual_keys = {
+        (
+            _normalize_credential_identity(entry.get("source")),
+            _normalize_credential_identity(entry.get("label")),
+        )
+        for entry in merged
+        if isinstance(entry, dict) and _is_manual_credential_source(entry)
+    }
+
+    for idx, incoming in enumerate(incoming_dicts):
+        if idx in used:
+            continue
+        incoming_id = _normalize_credential_identity(incoming.get("id"))
+        if incoming_id and incoming_id in existing_ids:
+            continue
+        incoming_source = _normalize_credential_identity(incoming.get("source"))
+        if incoming_source and not _is_manual_credential_source(incoming):
+            # A singleton source already exists on disk; do not append a second
+            # stale singleton row from an old process snapshot.
+            if incoming_source in disk_singleton_sources:
+                continue
+        else:
+            manual_key = (
+                incoming_source,
+                _normalize_credential_identity(incoming.get("label")),
+            )
+            if manual_key in existing_manual_keys:
+                continue
+            existing_manual_keys.add(manual_key)
+        if incoming_id:
+            existing_ids.add(incoming_id)
+        merged.append(dict(incoming))
+
+    return merged
+
+
+def write_credential_pool(
+    provider_id: str,
+    entries: List[Dict[str, Any]],
+    *,
+    preserve_existing: bool = False,
+) -> Path:
     """Persist one provider's credential pool under auth.json.
 
     This is the final disk-boundary guard for borrowed/reference-only
@@ -1338,9 +1468,24 @@ def write_credential_pool(provider_id: str, entries: List[Dict[str, Any]]) -> Pa
         if not isinstance(pool, dict):
             pool = {}
             auth_store["credential_pool"] = pool
-        filtered_entries = [
+        incoming_entries = [
             entry
             for entry in entries
+            if not (
+                isinstance(entry, dict)
+                and _entry_matches_removed_credential(auth_store, provider_id, entry)
+            )
+        ]
+        if preserve_existing:
+            current_entries = pool.get(provider_id)
+            if isinstance(current_entries, list) and current_entries:
+                incoming_entries = _merge_credential_pool_entries_preserving_disk(
+                    current_entries,
+                    incoming_entries,
+                )
+        filtered_entries = [
+            entry
+            for entry in incoming_entries
             if not (
                 isinstance(entry, dict)
                 and _entry_matches_removed_credential(auth_store, provider_id, entry)

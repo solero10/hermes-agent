@@ -3014,6 +3014,120 @@ def test_codex_oauth_terminal_refresh_clears_auth_json_and_removes_pool_entries(
     assert refresh_calls["count"] == 1
 
 
+def test_codex_pool_persist_preserves_manual_accounts_from_newer_disk_state(
+    tmp_path, monkeypatch
+):
+    """A stale long-running pool snapshot must not delete restored accounts.
+
+    Regression for the live ``husage`` failure where a Hermes process loaded an
+    old Codex pool, the user restored Kev1 in auth.json, and a later runtime
+    status write from the old process replaced the whole on-disk pool with its
+    stale in-memory list.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEX_OAUTH_ACCESS_TOKEN", raising=False)
+
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "providers": {
+                "openai-codex": {
+                    "label": "Dads ChatGPT",
+                    "credential_id": "dad-current",
+                    "tokens": {
+                        "access_token": "dad-current-token",
+                        "refresh_token": "dad-current-refresh",
+                    },
+                }
+            },
+            "credential_pool": {
+                "openai-codex": [
+                    {
+                        "id": "dad-current",
+                        "label": "Dads ChatGPT",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "device_code",
+                        "access_token": "dad-current-token",
+                        "refresh_token": "dad-current-refresh",
+                    },
+                    {
+                        "id": "kev1",
+                        "label": "Kev1",
+                        "auth_type": "oauth",
+                        "priority": 1,
+                        "source": "manual:device_code",
+                        "access_token": "kev1-token",
+                        "refresh_token": "kev1-refresh",
+                    },
+                    {
+                        "id": "ken",
+                        "label": "Ken ChatGPT",
+                        "auth_type": "oauth",
+                        "priority": 2,
+                        "source": "manual:device_code",
+                        "access_token": "ken-token",
+                        "refresh_token": "ken-refresh",
+                    },
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import AUTH_TYPE_OAUTH, CredentialPool, PooledCredential
+
+    stale_pool = CredentialPool(
+        "openai-codex",
+        [
+            PooledCredential(
+                provider="openai-codex",
+                id="dad-current",
+                label="Dads ChatGPT",
+                auth_type=AUTH_TYPE_OAUTH,
+                priority=0,
+                source="manual:device_code",
+                access_token="stale-dad-token",
+                refresh_token="stale-dad-refresh",
+            ),
+            PooledCredential(
+                provider="openai-codex",
+                id="ken",
+                label="Ken ChatGPT",
+                auth_type=AUTH_TYPE_OAUTH,
+                priority=1,
+                source="manual:device_code",
+                access_token="ken-token",
+                refresh_token="ken-refresh",
+            ),
+            PooledCredential(
+                provider="openai-codex",
+                id="stale-singleton",
+                label="Dads ChatGPT",
+                auth_type=AUTH_TYPE_OAUTH,
+                priority=2,
+                source="device_code",
+                access_token="dad-current-token",
+                refresh_token="dad-current-refresh",
+            ),
+        ],
+    )
+
+    stale_pool._persist()
+
+    auth_payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    rows = auth_payload["credential_pool"]["openai-codex"]
+    by_id = {row["id"]: row for row in rows}
+
+    assert list(by_id) == ["dad-current", "kev1", "ken"]
+    assert by_id["dad-current"]["source"] == "device_code"
+    assert by_id["dad-current"]["access_token"] == "dad-current-token"
+    assert by_id["kev1"]["source"] == "manual:device_code"
+    assert by_id["kev1"]["access_token"] == "kev1-token"
+    assert "stale-singleton" not in by_id
+
+
 def test_codex_oauth_nonterminal_refresh_does_not_quarantine(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

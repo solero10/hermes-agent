@@ -220,6 +220,18 @@ _BOUND_SOURCE_TEXT_KEYS = {
     "excerpt",
 }
 
+_FORMATION_TEXT_LIMITS = {
+    "llm_input_text": 20_000,
+    "llm_output_text": 8_000,
+    "merge_note": 2_000,
+    "text": 4_000,
+    "summary": 1_000,
+    "quote": 1_000,
+    "source_snippet": 1_000,
+}
+_FORMATION_DEFAULT_TEXT_LIMIT = 4_000
+_FORMATION_TRACE_META_ONLY_KEYS = {"version", "stage"}
+
 _RAW_REFERENCE_KEYS = {
     "path",
     "source_path",
@@ -465,6 +477,32 @@ def _bound_source_text(value: str, limit: int = 500) -> str:
     return value[: limit - 3] + "..."
 
 
+def _bound_formation_text(value: str, key: Any) -> str:
+    limit = _FORMATION_TEXT_LIMITS.get(str(key or "").strip().lower(), _FORMATION_DEFAULT_TEXT_LIMIT)
+    return _bound_source_text(value, limit)
+
+
+def _sanitize_formation_node(value: Any, key: Any = None) -> Any:
+    if _is_sensitive_key(key):
+        return "[REDACTED]"
+    if _is_raw_reference_key(key):
+        return _OMIT
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            sanitized = _sanitize_formation_node(raw_value, raw_key)
+            if sanitized is not _OMIT:
+                clean[raw_key] = sanitized
+        return clean
+    if isinstance(value, list):
+        return [_sanitize_formation_node(item, key) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_formation_node(item, key) for item in value]
+    if isinstance(value, str):
+        return _bound_formation_text(_redact_sensitive_text(value), key)
+    return value
+
+
 def _is_raw_reference_key(key: Any) -> bool:
     lowered = str(key or "").strip().lower()
     if lowered in _RAW_REFERENCE_KEYS:
@@ -500,6 +538,9 @@ def _sanitize_node(value: Any, key: Any = None) -> Any:
 
     if key == "source_ref":
         return _sanitize_source_ref(value)
+
+    if key == "formation_trace":
+        return _sanitize_formation_node(value)
 
     if isinstance(value, dict):
         clean: dict[str, Any] = {}
@@ -614,6 +655,123 @@ class DatabaseFieldRecord(BaseModel):
     note: str | None = None
 
 
+class FormationActor(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    kind: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    tool: str | None = None
+
+
+class FormationLineageCard(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    lineage_id: str | None = None
+    id: str | None = None
+    stage: StageId | None = None
+    title: str | None = None
+    summary: str | None = None
+    quote: str | None = None
+    source_snippet: str | None = None
+    topics: list[str] = Field(default_factory=list)
+
+    @field_validator("stage", mode="before")
+    @classmethod
+    def _canonical_stage(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return _normalize_stage(text) if text else None
+
+
+class FormationContextItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    kind: str = "other"
+    label: str | None = None
+    text: str | None = None
+    values: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    source: str | None = None
+    lineage_id: str | None = None
+    title: str | None = None
+    summary: str | None = None
+    quote: str | None = None
+    source_snippet: str | None = None
+    why_used: str | None = None
+
+
+class FormationGateEvent(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    stage: StageId | None = None
+    status: str | None = None
+    decision: str | None = None
+    reason: str | None = None
+    target_id: str | None = None
+    target_label: str | None = None
+    created_at: str | None = None
+
+    @field_validator("stage", mode="before")
+    @classmethod
+    def _canonical_stage(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return _normalize_stage(value)
+
+
+class FormationTrace(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    version: int = 1
+    stage: StageId | None = None
+    created_at: str | None = None
+    created_by: FormationActor | None = None
+    primary_lineage_ids: list[str] = Field(default_factory=list)
+    primary_lineage_cards: list[FormationLineageCard] = Field(default_factory=list)
+    additional_context_used: list[FormationContextItem] = Field(default_factory=list)
+    llm_input_text: str | None = None
+    llm_output_text: str | None = None
+    output_title: str | None = None
+    suggested_type: str | None = None
+    merge_note: str | None = None
+    gate_events: list[FormationGateEvent] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sanitize_trace_payload(cls, value: Any) -> Any:
+        return _sanitize_formation_node(value)
+
+    @field_validator("stage", mode="before")
+    @classmethod
+    def _canonical_stage(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return _normalize_stage(text) if text else None
+
+
+def _formation_trace_has_content(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, BaseModel):
+        data = value.model_dump(mode="json", exclude_none=True)
+    elif isinstance(value, dict):
+        data = value
+    else:
+        return False
+    for key, item in data.items():
+        if key in _FORMATION_TRACE_META_ONLY_KEYS:
+            continue
+        if item not in (None, "", [], {}):
+            return True
+    return False
+
+
 class ProducerInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -685,6 +843,7 @@ class ThoughtRecord(BaseModel):
     final_memory_text: str | None = None
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
+    formation_trace: FormationTrace | None = None
     stages: list[StageRecord] | None = None
     related_memories: list[RelatedMemory] = Field(default_factory=list)
     cortexdb_receipt: CortexDBReceipt | None = None
@@ -704,6 +863,8 @@ class ThoughtRecord(BaseModel):
             data["current_stage"] = _normalize_stage(data["current_stage"])
         if data.get("stop_stage_id") is not None:
             data["stop_stage_id"] = _normalize_stage(data["stop_stage_id"])
+        if "formation_trace" in data and not _formation_trace_has_content(data.get("formation_trace")):
+            data.pop("formation_trace", None)
         if str(data.get("disposition") or "").strip() == "stopped":
             stopped_reason = str(data.get("stopped_reason") or "").lower()
             stop_code = str(data.get("stop_code") or "").strip() or None
@@ -751,6 +912,8 @@ class ThoughtRecord(BaseModel):
     def _enforce_receipt_rule(self) -> "ThoughtRecord":
         if not self.id:
             self.id = self.lineage_id
+        if not _formation_trace_has_content(self.formation_trace):
+            self.formation_trace = None
         if self.disposition != "imported":
             self.cortexdb_receipt = None
             self.cortexdb_id = None
@@ -864,6 +1027,7 @@ class ThoughtDetail(BaseModel):
     final_memory_text: str | None = None
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
+    formation_trace: FormationTrace | None = None
     source_unit: dict[str, Any]
     stages: list[StageRecord]
     related_memories: list[RelatedMemory] = Field(default_factory=list)
@@ -886,6 +1050,8 @@ class ThoughtDetail(BaseModel):
 
     @model_validator(mode="after")
     def _enforce_detail_receipt_rule(self) -> "ThoughtDetail":
+        if not _formation_trace_has_content(self.formation_trace):
+            self.formation_trace = None
         if self.disposition != "imported":
             self.cortexdb_receipt = None
             self.cortexdb_id = None
@@ -1299,6 +1465,15 @@ def _flatten_search_values(value: Any) -> list[str]:
     return []
 
 
+def _search_field_value(value: dict[str, Any], field: str) -> Any:
+    current: Any = value
+    for part in field.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
 _BOARD_CARD_SEARCH_FIELDS: tuple[str, ...] = (
     "id",
     "lineage_id",
@@ -1316,6 +1491,10 @@ _BOARD_CARD_SEARCH_FIELDS: tuple[str, ...] = (
     "matched_memory_id",
     "cortexdb_id",
     "final_memory_text",
+    "formation_trace.primary_lineage_ids",
+    "formation_trace.output_title",
+    "formation_trace.llm_output_text",
+    "formation_trace.merge_note",
 )
 
 
@@ -1327,7 +1506,7 @@ def _matches_search(thought: dict[str, Any], query: str | None) -> bool:
     # row visible for a non-empty query.
     haystack_parts: list[str] = []
     for field in _BOARD_CARD_SEARCH_FIELDS:
-        haystack_parts.extend(_flatten_search_values(thought.get(field)))
+        haystack_parts.extend(_flatten_search_values(_search_field_value(thought, field)))
     haystack = "\n".join(haystack_parts).lower()
     return query.strip().lower() in haystack
 
@@ -1435,7 +1614,7 @@ def _sort_rows(rows: list[dict[str, Any]], sort_value: str) -> list[dict[str, An
         return rows
 
     def timestamp(row: dict[str, Any]) -> float | None:
-        dt = _parse_datetime(row.get("occurred_at") or row.get("processed_at"))
+        dt = _parse_datetime(row.get("source_date") or row.get("occurred_at") or row.get("processed_at"))
         return dt.timestamp() if dt else None
 
     def timestamp_or(row: dict[str, Any], fallback: float) -> float:

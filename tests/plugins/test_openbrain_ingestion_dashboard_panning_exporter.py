@@ -181,6 +181,57 @@ def test_degraded_exact_only_dedupe_keeps_candidate_in_shaped(tmp_path):
     assert exact_only["disposition"] == "in_progress"
 
 
+def test_candidate_formation_trace_flat_fields_export_to_dashboard_snapshot(tmp_path):
+    exporter = _load_exporter()
+    run_root = tmp_path / "formation-trace-run"
+    shutil.copytree(FIXTURE_RUN_ROOT, run_root)
+
+    candidate = {
+        "source_id": "otter-package:transcript-003",
+        "candidate_id": "cand_009_formation_trace",
+        "content_fingerprint": "sha256:fp_formation_trace_009",
+        "title": "Formation trace candidate",
+        "summary": "Candidate carries shaping provenance.",
+        "final_memory_text": "Formation trace should survive exporter normalization.",
+        "stage": "deduped",
+        "primary_lineage_ids": ["pan:trace-01", "pan:trace-02"],
+        "primary_lineage_cards": [
+            {"lineage_id": "pan:trace-01", "stage": "extracted", "title": "Input card"}
+        ],
+        "additional_context_used": [
+            {"kind": "source_title", "label": "Source title", "text": "Formation trace source"}
+        ],
+        "llm_input_text": "Exact input package token=secret123 see /mnt/d/private/source.md",
+        "llm_output_text": "Exact shaped output.",
+        "merge_note": "Merged two extracted cards.",
+        "created_by": {"kind": "llm", "model": "gpt-5.5"},
+        "created_at": "2026-06-21T04:41:00Z",
+        "gate_events": [{"stage": "policy", "status": "pending", "decision": "not_run"}],
+    }
+    with (run_root / "capture-candidates.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(candidate, sort_keys=True) + "\n")
+
+    thoughts = {
+        thought["candidate_id"]: thought
+        for unit in _snapshot(exporter, run_root=run_root)["source_units"]
+        for thought in unit.get("thoughts", [])
+    }
+
+    trace = thoughts["cand_009_formation_trace"]["formation_trace"]
+    assert thoughts["cand_009_formation_trace"]["current_stage"] == "deduped"
+    assert trace["stage"] == "shaped"
+    assert trace["primary_lineage_ids"] == ["pan:trace-01", "pan:trace-02"]
+    assert trace["primary_lineage_cards"][0]["title"] == "Input card"
+    assert trace["additional_context_used"][0]["kind"] == "source_title"
+    assert trace["llm_output_text"] == "Exact shaped output."
+    assert trace["created_by"]["model"] == "gpt-5.5"
+    assert trace["gate_events"][0]["stage"] == "policy"
+
+    rendered = json.dumps(trace)
+    assert "secret123" not in rendered
+    assert "/mnt/d/private" not in rendered
+
+
 def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, monkeypatch):
     exporter = _load_exporter()
     api = _load_plugin_api()

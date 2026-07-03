@@ -78,6 +78,12 @@ def test_frontend_declares_all_required_components_before_registration():
         "ThoughtDetail",
         "SourceContext",
         "LineageTimeline",
+        "FormationTrace",
+        "FormationLineageCards",
+        "FormationAdditionalContext",
+        "FormationGateEvents",
+        "TraceTextBlock",
+        "TraceKeyValueList",
         "ImportedReceipt",
         "StoppedReceipt",
         "RelatedMemories",
@@ -105,7 +111,7 @@ def test_frontend_calls_expected_plugin_api_routes_with_query_params():
     assert '"&date_from="' in frontend
     assert '"&date_to="' in frontend
     assert "sourceDateQueryValue(dateFrom)" in frontend
-    assert "sourceDateInputNextDay(value)" in frontend
+    assert "sourceDateInputSameDay(value)" in frontend
     assert "onDateFromChange: handleDateFromChange" in frontend
     assert 'API_BASE + "/source-units/"' in frontend
     assert '"/thoughts/"' in frontend
@@ -141,6 +147,9 @@ def test_toolbar_accessibility_board_labels_and_read_only_placeholders_present()
         "Open source",
         "Open CortexDB record",
         "Copy final memory",
+        "Copy trace summary",
+        "Copy LLM input",
+        "Copy shaped output",
         "Open matched memory",
         "Copy merge note",
         "Reopen later",
@@ -155,14 +164,14 @@ def test_toolbar_accessibility_board_labels_and_read_only_placeholders_present()
     assert "No mutation" not in frontend  # action buttons are placeholders, not hidden mutation controls.
 
 
-def test_frontend_source_date_from_auto_fills_empty_to_date_only():
+def test_frontend_source_date_from_auto_fills_empty_to_same_date_only():
     frontend = _read(FRONTEND_JS_PATH)
 
     assert "function handleDateFromChange(value)" in frontend
     assert "setDateFrom(value);" in frontend
     assert "setDateTo(function (current)" in frontend
     assert "if (String(current || \"\").trim()) return current;" in frontend
-    assert "return sourceDateInputNextDay(value) || current;" in frontend
+    assert "return sourceDateInputSameDay(value) || current;" in frontend
     assert 'return padDatePart(date.getUTCMonth() + 1) + "/" + padDatePart(date.getUTCDate()) + "/" + date.getUTCFullYear();' in frontend
 
 
@@ -175,6 +184,19 @@ def test_board_detail_and_state_strings_are_present():
         "Details →",
         "Lineage ID",
         "Candidate ID",
+        "Formation trace",
+        "Primary lineage cards used",
+        "Additional context consulted",
+        "Exact LLM input sent to shaping step",
+        "Output produced by shaping step",
+        "Gate decisions",
+        "traceOutputTitleDistinct(trace, thought)",
+        "formationTraceHasContent(trace)",
+        "item.summary ? h(\"p\"",
+        "item.quote || item.source_snippet",
+        "TraceKeyValueList",
+        "not hidden model reasoning",
+        "No formation trace in this snapshot.",
         "Ready for CortexDB",
         "CortexDB receipt",
         "Related memories",
@@ -233,6 +255,10 @@ def test_database_fields_are_wired_into_detail_bottom_and_render_field_payloads(
 
     assert "h(RelatedMemories, { thought: thought })" in detail
     assert "h(DatabaseFields, { thought: thought })" in detail
+    assert "h(FormationTrace, { thought: thought })" in detail
+    assert detail.index("h(LineageTimeline, { thought: thought })") < detail.index(
+        "h(FormationTrace, { thought: thought })"
+    ) < detail.index('h("section", { className: "ob-final-memory" }')
     assert detail.index("h(RelatedMemories, { thought: thought })") < detail.index(
         "h(DatabaseFields, { thought: thought })"
     )
@@ -257,7 +283,7 @@ def test_database_fields_are_wired_into_detail_bottom_and_render_field_payloads(
 def test_css_uses_ob_namespace_and_required_selectors():
     css = _read(FRONTEND_CSS_PATH)
 
-    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges", ".ob-policy-tag", ".ob-policy-definition-dialog", ".ob-database-fields", ".ob-db-field-row"):
+    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges", ".ob-policy-tag", ".ob-policy-definition-dialog", ".ob-formation-trace", ".ob-trace-card", ".ob-trace-pre", ".ob-trace-kv-list", ".ob-database-fields", ".ob-db-field-row"):
         assert selector in css
     assert "ready-for-cortexdb" in css
     assert ":disabled" in css or "[disabled]" in css
@@ -281,5 +307,7 @@ def test_docs_cover_snapshot_boundary_and_read_only_mvp():
         "Panning-for-Gold artifacts -> SnapshotV1",
         "Policy tags use this vocabulary",
         "Needs source validation",
+        "Formation Trace",
+        "exact LLM input package",
     ):
         assert text in docs

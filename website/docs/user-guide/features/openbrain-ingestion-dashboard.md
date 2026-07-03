@@ -49,6 +49,14 @@ The board is a current-state view, not a full per-stage history board. **Each th
 
 Open a card's detail dialog to see the full lineage timeline, including completed, current, pending, review-needed, and not-reached stages.
 
+## Formation Trace
+
+The Thought Detail panel can show a **Formation Trace** when the snapshot includes it. This trace explains how a thought was formed from source material as it moves across the board. It may include the primary lineage cards, additional source context, the exact LLM input package, the shaped output, and later Policy/Dedupe/CortexDB gate decisions.
+
+The trace does not show hidden model reasoning. It shows auditable inputs, outputs, and decisions so the dashboard can distinguish direct evidence from extra context that helped interpret the evidence.
+
+Older thoughts or snapshots without trace data show a clear “No formation trace in this snapshot” message instead of pretending the trace was empty.
+
 ## Ready for CortexDB
 
 **Ready for CortexDB** means the candidate has survived the earlier shaping, policy, and dedupe phases and is ready to become a durable OpenBrain/CortexDB memory. In the read-only MVP, the label is informational: the dashboard does not promote, import, reopen, or mutate records.

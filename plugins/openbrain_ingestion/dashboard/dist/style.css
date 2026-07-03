@@ -631,6 +631,7 @@
 
 .ob-source-context,
 .ob-lineage,
+.ob-formation-trace,
 .ob-final-memory,
 .ob-imported-receipt,
 .ob-stopped-receipt,
@@ -697,6 +698,124 @@
 .ob-lineage-status {
   color: var(--ob-muted);
   font-size: 0.72rem;
+}
+
+.ob-trace-note,
+.ob-trace-block p,
+.ob-trace-empty p {
+  color: var(--ob-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.ob-trace-version,
+.ob-trace-kind {
+  border: 1px solid var(--ob-border);
+  border-radius: 999px;
+  color: var(--ob-muted);
+  font-family: var(--ob-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+  font-size: 0.72rem;
+  padding: 0.18rem 0.48rem;
+}
+
+.ob-trace-summary {
+  margin-top: 0.7rem;
+}
+
+.ob-trace-block {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.85rem;
+}
+
+.ob-trace-block h4 {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.ob-trace-card-list,
+.ob-trace-context-list,
+.ob-trace-gate-list {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ob-trace-card,
+.ob-trace-context-item,
+.ob-trace-gate,
+.ob-trace-empty {
+  display: grid;
+  gap: 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--ob-border) 74%, transparent);
+  border-radius: calc(var(--ob-radius) * 0.65);
+  background: color-mix(in srgb, var(--ob-bg-strong) 42%, transparent);
+  padding: 0.65rem;
+}
+
+.ob-trace-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ob-trace-context-item small,
+.ob-trace-gate small {
+  color: var(--ob-muted);
+  font-size: 0.74rem;
+}
+
+.ob-trace-kv-list {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+}
+
+.ob-trace-kv-list div {
+  display: grid;
+  grid-template-columns: minmax(7rem, 0.32fr) minmax(0, 1fr);
+  gap: 0.55rem;
+}
+
+.ob-trace-kv-list dt {
+  color: var(--ob-muted);
+  font-size: 0.74rem;
+  margin: 0;
+  text-transform: capitalize;
+}
+
+.ob-trace-kv-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ob-trace-details {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.ob-trace-details summary {
+  cursor: pointer;
+  color: var(--ob-text);
+  font-weight: 700;
+}
+
+.ob-trace-pre {
+  max-height: 18rem;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--ob-border);
+  border-radius: calc(var(--ob-radius) * 0.6);
+  background: color-mix(in srgb, var(--ob-bg-strong) 84%, #000);
+  color: var(--ob-text);
+  font-size: 0.78rem;
+  padding: 0.7rem;
 }
 
 .ob-detail-list {
