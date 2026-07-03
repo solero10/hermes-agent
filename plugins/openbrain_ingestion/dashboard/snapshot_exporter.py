@@ -596,6 +596,7 @@ def _thought_from_candidate(
     duplicate = _is_duplicate_dedupe(dedupe)
     base_stage = _candidate_stage(candidate)
     semantic_complete = _semantic_dedupe_complete(dedupe)
+    receipt: dict[str, Any] | None = None
 
     if imported:
         current_stage = "cortexdb"
@@ -670,8 +671,229 @@ def _thought_from_candidate(
         if related:
             thought["related_memories"] = related
 
+    stage_detail = _stage_detail_from_candidate(
+        candidate=candidate,
+        inventory=inventory,
+        dedupe=dedupe,
+        audit=audit,
+        source_id=source_id,
+        source_unit_id=source_unit_id,
+        current_stage=current_stage,
+        disposition=disposition,
+        formation_trace=formation_trace,
+        receipt=receipt,
+        fingerprint=fingerprint,
+    )
+    if stage_detail:
+        thought["stage_detail"] = stage_detail
+
     thought = {key: value for key, value in thought.items() if value is not None and value != []}
     return _normalize_thought(thought)
+
+
+def _stage_detail_from_candidate(
+    *,
+    candidate: dict[str, Any],
+    inventory: dict[str, Any],
+    dedupe: dict[str, Any],
+    audit: dict[str, Any],
+    source_id: str,
+    source_unit_id: str,
+    current_stage: str,
+    disposition: str,
+    formation_trace: dict[str, Any] | None,
+    receipt: dict[str, Any] | None,
+    fingerprint: str | None,
+) -> dict[str, Any] | None:
+    detail: dict[str, Any] = {}
+    if current_stage == "extracted":
+        extracted = _extracted_detail_from_record(candidate, inventory=inventory)
+        if extracted:
+            detail["extracted"] = extracted
+    if formation_trace:
+        detail["shaped"] = formation_trace
+    policy = _policy_detail_from_record(
+        candidate,
+        inventory=inventory,
+        current_stage=current_stage,
+        disposition=disposition,
+    )
+    if policy:
+        detail["policy"] = policy
+    dedupe_detail = _dedupe_detail_from_record(
+        dedupe,
+        current_stage=current_stage,
+        fingerprint=fingerprint,
+    )
+    if dedupe_detail:
+        detail["deduped"] = dedupe_detail
+    ready = _ready_detail_from_candidate(
+        candidate=candidate,
+        source_id=source_id,
+        source_unit_id=source_unit_id,
+        current_stage=current_stage,
+        semantic_complete=_semantic_dedupe_complete(dedupe),
+    )
+    if ready:
+        detail["ready_for_cortexdb"] = ready
+    if receipt:
+        detail["cortexdb"] = receipt
+    return {key: value for key, value in detail.items() if value not in (None, {}, [])} or None
+
+
+def _extracted_detail_from_record(record: dict[str, Any], *, inventory: dict[str, Any]) -> dict[str, Any] | None:
+    source_section = _string_or_none(
+        _dig(record, "source_section")
+        or _dig(record, "section")
+        or _dig(inventory, "source_section")
+        or _dig(inventory, "section")
+    )
+    detail = {
+        "status": _string_or_none(_dig(record, "evidence_status") or _dig(inventory, "evidence_status"))
+        or "unreviewed",
+        "source_section": source_section,
+        "extraction_method": _string_or_none(
+            _dig(record, "extraction_method") or _dig(inventory, "extraction_method")
+        ),
+        "used_by_shape_ids": _list_of_strings(
+            _dig(record, "used_by_shape_ids") or _dig(inventory, "used_by_shape_ids")
+        ),
+        "promotion_note": _string_or_none(_dig(record, "promotion_note") or _dig(inventory, "promotion_note")),
+        "not_promoted_reason": _string_or_none(
+            _dig(record, "not_promoted_reason") or _dig(inventory, "not_promoted_reason")
+        ),
+    }
+    return {key: value for key, value in detail.items() if value not in (None, [], {})} or None
+
+
+def _policy_detail_from_record(
+    record: dict[str, Any],
+    *,
+    inventory: dict[str, Any],
+    current_stage: str,
+    disposition: str,
+) -> dict[str, Any] | None:
+    explicit = _dig(record, "policy_detail") if isinstance(_dig(record, "policy_detail"), dict) else {}
+    result = _string_or_none(
+        _dig(explicit, "result") or _dig(record, "policy_result") or _dig(record, "policy_status")
+    )
+    if not result:
+        if current_stage == "policy" and disposition == "stopped":
+            result = "stopped"
+        elif current_stage in {"deduped", "ready_for_cortexdb", "cortexdb"}:
+            result = "passed"
+        else:
+            result = "not_run"
+    detail = {
+        "result": result,
+        "stop_code": _string_or_none(_dig(record, "stop_code") or _inventory_policy_stop_code(inventory)),
+        "reason": _string_or_none(
+            _dig(explicit, "reason") or _dig(record, "policy_reason") or _dig(inventory, "reason")
+        ),
+        "redaction_note": _string_or_none(
+            _dig(explicit, "redaction_note") or _dig(record, "redaction_note")
+        ),
+        "candidate_text_reviewed": _string_or_none(
+            _dig(explicit, "candidate_text_reviewed") or _dig(record, "final_memory_text") or _dig(record, "content")
+        ),
+        "redacted_text": _string_or_none(_dig(explicit, "redacted_text") or _dig(record, "redacted_text")),
+        "fix_note": _string_or_none(_dig(explicit, "fix_note") or _dig(record, "fix_note")),
+        "decided_at": _coerce_timestamp(_dig(explicit, "decided_at") or _dig(record, "policy_decided_at")),
+        "decided_by": _string_or_none(_dig(explicit, "decided_by") or _dig(record, "policy_decided_by")),
+    }
+    if result == "not_run" and all(detail.get(key) in (None, "", [], {}) for key in detail if key != "result"):
+        return None
+    return {key: value for key, value in detail.items() if value not in (None, [], {})} or None
+
+
+def _dedupe_detail_from_record(
+    dedupe: dict[str, Any],
+    *,
+    current_stage: str,
+    fingerprint: str | None,
+) -> dict[str, Any] | None:
+    if not dedupe and current_stage != "deduped":
+        return None
+    semantic_complete = _semantic_dedupe_complete(dedupe)
+    duplicate = _is_duplicate_dedupe(dedupe)
+    normalized_parts = {
+        _normalize_status_token(_dig(dedupe, key))
+        for key in ("decision", "outcome", "status", "action", "capture_action", "reason", "degraded_reason")
+        if _dig(dedupe, key)
+    }
+    method = "semantic" if semantic_complete else "not_run"
+    if normalized_parts & _DEGRADED_DEDUPE_MARKERS:
+        method = "exact_only_degraded"
+    elif any("exact" in part for part in normalized_parts):
+        method = "exact"
+    decision = "duplicate" if duplicate else "unique" if semantic_complete else "not_run"
+    related = _related_memories(dedupe)
+    first_related = related[0] if related else {}
+    detail = {
+        "method": method,
+        "decision": decision,
+        "matched_memory_id": _string_or_none(first_related.get("id") or _dig(dedupe, "matched_memory_id")),
+        "matched_memory_title": _string_or_none(first_related.get("title") or _dig(dedupe, "matched_memory_title")),
+        "similarity_score": _number_or_none(
+            _dig(dedupe, "matched_similarity")
+            or _dig(dedupe, "embedding_similarity")
+            or _dig(dedupe, "semantic_similarity")
+        ),
+        "content_fingerprint": fingerprint,
+        "exact_match": True if any("exact" in part for part in normalized_parts) else None,
+        "merge_note": _string_or_none(_dig(dedupe, "merge_note") or _dig(dedupe, "reason")),
+        "evidence_note": _string_or_none(_dig(dedupe, "evidence_note") or _dig(dedupe, "degraded_reason")),
+        "decided_at": _coerce_timestamp(_dig(dedupe, "decided_at") or _dig(dedupe, "created_at")),
+    }
+    return {key: value for key, value in detail.items() if value not in (None, [], {})} or None
+
+
+def _ready_detail_from_candidate(
+    *,
+    candidate: dict[str, Any],
+    source_id: str,
+    source_unit_id: str,
+    current_stage: str,
+    semantic_complete: bool,
+) -> dict[str, Any] | None:
+    if current_stage != "ready_for_cortexdb":
+        return None
+    final_memory_text = _string_or_none(
+        _dig(candidate, "final_memory_text")
+        or _dig(candidate, "memory_text")
+        or _dig(candidate, "thought_text")
+        or _dig(candidate, "content")
+        or _dig(candidate, "text")
+    )
+    memory_type = _string_or_none(
+        _dig(candidate, "memory_type") or _dig(candidate, "thought_type") or _dig(candidate, "type")
+    ) or "observation"
+    topics = _list_of_strings(_dig(candidate, "topics") or _dig(candidate, "tags"))
+    people = _list_of_strings(_dig(candidate, "people") or _dig(candidate, "persons"))
+    checklist = [
+        {"label": "Policy check", "status": "passed"},
+        {"label": "Dedupe check", "status": "passed" if semantic_complete else "needs semantic dedupe"},
+    ]
+    preview = {
+        "content": final_memory_text,
+        "type": memory_type,
+        "topics": topics,
+        "people": people,
+        "source_unit_id": source_unit_id,
+        "source_id": source_id,
+    }
+    detail = {
+        "final_memory_text": final_memory_text,
+        "memory_type": memory_type,
+        "topics": topics,
+        "people": people,
+        "source_receipt": source_id,
+        "policy_check": "passed",
+        "dedupe_check": "semantic dedupe complete" if semantic_complete else "semantic dedupe not complete",
+        "checklist": checklist,
+        "import_payload_preview": {key: value for key, value in preview.items() if value not in (None, [], {})},
+    }
+    return {key: value for key, value in detail.items() if value not in (None, [], {})} or None
 
 
 def _formation_trace_from_record(record: dict[str, Any], *, current_stage: str) -> dict[str, Any] | None:
@@ -967,6 +1189,17 @@ def _stopped_thought_from_inventory(
     formation_trace = _formation_trace_from_record(record, current_stage=current_stage)
     if formation_trace:
         thought["formation_trace"] = formation_trace
+    stage_detail = _stage_detail_from_inventory(
+        record=record,
+        current_stage=current_stage,
+        stop_code=stop_code,
+        stop_target_id=stop_target_id,
+        stop_target_label=stop_target_label,
+        formation_trace=formation_trace,
+        fingerprint=fingerprint,
+    )
+    if stage_detail:
+        thought["stage_detail"] = stage_detail
     if stop_code is None:
         for key in ("stop_stage_id", "stop_code", "stop_target_id", "stop_target_label", "stopped_reason", "matched_memory_id"):
             thought.pop(key, None)
@@ -974,6 +1207,43 @@ def _stopped_thought_from_inventory(
         return None
     thought = {key: value for key, value in thought.items() if value is not None and value != []}
     return _normalize_thought(thought)
+
+
+def _stage_detail_from_inventory(
+    *,
+    record: dict[str, Any],
+    current_stage: str,
+    stop_code: str | None,
+    stop_target_id: str | None,
+    stop_target_label: str | None,
+    formation_trace: dict[str, Any] | None,
+    fingerprint: str | None,
+) -> dict[str, Any] | None:
+    detail: dict[str, Any] = {}
+    if formation_trace:
+        detail["shaped"] = formation_trace
+    if current_stage == "policy" and stop_code:
+        detail["policy"] = {
+            "result": "stopped",
+            "stop_code": stop_code,
+            "reason": _string_or_none(_dig(record, "reason") or _dig(record, "capture_content")),
+            "candidate_text_reviewed": _string_or_none(
+                _dig(record, "final_memory_text") or _dig(record, "idea") or _dig(record, "capture_content")
+            ),
+            "fix_note": _string_or_none(_dig(record, "fix_note")),
+        }
+    if current_stage == "deduped":
+        detail["deduped"] = {
+            "method": "semantic" if _inventory_is_duplicate_stop(record) else "not_run",
+            "decision": "duplicate" if stop_code == "duplicate" else "not_run",
+            "matched_memory_id": stop_target_id,
+            "matched_memory_title": stop_target_label,
+            "content_fingerprint": fingerprint,
+            "merge_note": _string_or_none(_dig(record, "reason") or _dig(record, "capture_content")),
+        }
+    if current_stage == "shaped" and not stop_code:
+        detail["ready_for_cortexdb"] = None
+    return {key: value for key, value in detail.items() if value not in (None, {}, [])} or None
 
 
 def _normalize_thought(thought: dict[str, Any]) -> dict[str, Any]:
@@ -1101,6 +1371,15 @@ def _receipt_from_audit(
         "ingestion_run_id": ingestion_run_id,
         "source_unit_id": source_unit_id,
         "candidate_id": candidate_id,
+        "stored_text": _string_or_none(
+            _dig(audit, "stored_text")
+            or _dig(audit, "content")
+            or _dig(audit, "thought", "content")
+            or _dig(candidate, "final_memory_text")
+            or _dig(candidate, "content")
+        ),
+        "metadata": _dig(audit, "metadata") if isinstance(_dig(audit, "metadata"), dict) else {},
+        "update_note": _string_or_none(_dig(audit, "update_note") or _dig(audit, "merge_note")),
     }
 
 

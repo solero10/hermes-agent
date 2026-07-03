@@ -89,6 +89,15 @@ def test_frontend_declares_all_required_components_before_registration():
         "RelatedMemories",
         "DatabaseFields",
         "DatabaseFieldValue",
+        "StageSpecificDetailPanel",
+        "ExtractedEvidencePanel",
+        "ShapedFormationPanel",
+        "PolicyDecisionPanel",
+        "DedupeEvidencePanel",
+        "ReadyPackagePanel",
+        "CortexDBReceiptPanel",
+        "StageKeyValueList",
+        "StageChecklist",
         "stopCodeLabel",
         "stopTargetText",
     ]
@@ -195,6 +204,17 @@ def test_board_detail_and_state_strings_are_present():
         "item.summary ? h(\"p\"",
         "item.quote || item.source_snippet",
         "TraceKeyValueList",
+        "stageDetailFor(thought, \"shaped\")",
+        "Extracted evidence",
+        "Evidence status",
+        "Used by Shaped cards",
+        "Policy decision",
+        "Candidate text reviewed",
+        "Dedupe evidence",
+        "Semantic dedupe evidence",
+        "Ready package",
+        "Import payload preview",
+        "What actually got stored?",
         "not hidden model reasoning",
         "No formation trace in this snapshot.",
         "Ready for CortexDB",
@@ -255,10 +275,11 @@ def test_database_fields_are_wired_into_detail_bottom_and_render_field_payloads(
 
     assert "h(RelatedMemories, { thought: thought })" in detail
     assert "h(DatabaseFields, { thought: thought })" in detail
-    assert "h(FormationTrace, { thought: thought })" in detail
-    assert detail.index("h(LineageTimeline, { thought: thought })") < detail.index(
-        "h(FormationTrace, { thought: thought })"
-    ) < detail.index('h("section", { className: "ob-final-memory" }')
+    assert "h(StageSpecificDetailPanel" in detail
+    assert detail.index("h(StageSpecificDetailPanel") < detail.index("h(SourceContext, { thought: thought })")
+    assert detail.index("h(SourceContext, { thought: thought })") < detail.index(
+        "h(LineageTimeline, { thought: thought })"
+    )
     assert detail.index("h(RelatedMemories, { thought: thought })") < detail.index(
         "h(DatabaseFields, { thought: thought })"
     )
@@ -283,7 +304,7 @@ def test_database_fields_are_wired_into_detail_bottom_and_render_field_payloads(
 def test_css_uses_ob_namespace_and_required_selectors():
     css = _read(FRONTEND_CSS_PATH)
 
-    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges", ".ob-policy-tag", ".ob-policy-definition-dialog", ".ob-formation-trace", ".ob-trace-card", ".ob-trace-pre", ".ob-trace-kv-list", ".ob-database-fields", ".ob-db-field-row"):
+    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges", ".ob-policy-tag", ".ob-policy-definition-dialog", ".ob-formation-trace", ".ob-trace-card", ".ob-trace-pre", ".ob-trace-kv-list", ".ob-stage-detail-panel", ".ob-stage-checklist", ".ob-database-fields", ".ob-db-field-row"):
         assert selector in css
     assert "ready-for-cortexdb" in css
     assert ":disabled" in css or "[disabled]" in css
@@ -309,5 +330,12 @@ def test_docs_cover_snapshot_boundary_and_read_only_mvp():
         "Needs source validation",
         "Formation Trace",
         "exact LLM input package",
+        "Column-specific detail",
+        "Extracted detail",
+        "Shaped detail",
+        "Policy detail",
+        "Dedupe detail",
+        "Ready detail",
+        "CortexDB detail",
     ):
         assert text in docs

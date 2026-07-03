@@ -187,6 +187,12 @@ def hermes_home(tmp_path, monkeypatch):
                         "disposition": "stopped",
                         "stopped_reason": "policy stop after attempted import",
                         "cortexdb_receipt": {"id": "must-not-leak", "type": "observation"},
+                        "stage_detail": {
+                            "cortexdb": {
+                                "id": "must-not-leak-stage",
+                                "stored_text": "must not leak stage receipt",
+                            }
+                        },
                     },
                 ],
             },
@@ -310,6 +316,14 @@ def test_board_filter_stopped_prunes_cards_and_does_not_expose_accidental_receip
     cards = _all_cards(payload)
     assert [card["id"] for card in cards] == ["lineage_dup_1", "lineage_stopped_cortexdb"]
     assert all(card.get("cortexdb_id") is None for card in cards)
+    detail = client.get(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_stopped_cortexdb"
+    ).json()["thought"]
+    rendered = json.dumps(detail)
+    assert "cortexdb_receipt" not in detail
+    assert "must-not-leak" not in rendered
+    assert "must-not-leak-stage" not in rendered
+    assert "must not leak stage receipt" not in rendered
     assert payload["visible_counts"]["stopped"] == 2
     assert payload["visible_counts"]["zero_thoughts"] == 0
 
@@ -454,6 +468,46 @@ def test_thought_detail_imported_has_normalized_timeline_and_receipt(client):
     assert db_fields["sensitivity_tier"]["value"] == "standard"
     assert db_fields["enriched"]["value"] is True
     assert db_fields["derivation_layer"]["value"] == "primary"
+    assert thought["stage_detail"]["cortexdb"]["id"] == "thought_demo_7f3a"
+    assert thought["stage_detail"]["cortexdb"]["source_unit_id"] == "transcript-a"
+
+
+def test_thought_detail_accepts_column_specific_stage_detail_payloads(client, hermes_home):
+    path = hermes_home / "openbrain-ingestion-dashboard" / "snapshot.json"
+    data = json.loads(path.read_text())
+    extracted = data["source_units"][2]["thoughts"][0]
+    extracted["stage_detail"] = {
+        "extracted": {
+            "status": "covered_by_shaped",
+            "source_section": "Therapy transcript",
+            "extraction_method": "panning_for_gold",
+            "used_by_shape_ids": ["shape:test-01"],
+            "promotion_note": "Covered by a shaped card.",
+        }
+    }
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    response = client.get(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-b/thoughts/lineage_same_candidate_other_source"
+    )
+    assert response.status_code == 200
+    stage_detail = response.json()["thought"]["stage_detail"]
+    assert stage_detail["extracted"]["status"] == "covered_by_shaped"
+    assert stage_detail["extracted"]["used_by_shape_ids"] == ["shape:test-01"]
+
+    data = json.loads(path.read_text())
+    shaped = data["source_units"][0]["thoughts"][2]
+    trace = shaped.pop("formation_trace")
+    shaped["stage_detail"] = {"shaped": trace}
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    response = client.get(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_ready_1"
+    )
+    assert response.status_code == 200
+    thought = response.json()["thought"]
+    assert thought["formation_trace"]["llm_output_text"] == "Shaped output text for review."
+    assert thought["stage_detail"]["shaped"]["llm_output_text"] == "Shaped output text for review."
 
 
 def test_thought_detail_includes_formation_trace_with_sanitized_inputs(client):
@@ -482,6 +536,7 @@ def test_thought_detail_includes_formation_trace_with_sanitized_inputs(client):
     assert trace["gate_events"][0]["stage"] == "policy"
     assert len(trace["llm_input_text"]) <= 20_000
     assert trace["llm_input_text"].endswith("...")
+    assert thought["stage_detail"]["shaped"]["llm_output_text"] == trace["llm_output_text"]
 
     rendered = json.dumps(trace)
     assert "super-secret-value" not in rendered
@@ -629,6 +684,27 @@ def test_snapshot_redacts_sensitive_fields_and_paths_in_api(client, hermes_home)
     )
     data["source_units"][0]["thoughts"][0]["source_snippet"] = "safe words " * 120
     data["source_units"][0]["thoughts"][0]["file_url"] = "file:///mnt/d/private/raw.txt"
+    data["source_units"][0]["thoughts"][0]["stage_detail"] = {
+        "policy": {
+            "result": "passed",
+            "candidate_text_reviewed": "password: hunter2 api_key=SECRET123",
+            "redacted_text": "token=tok123",
+        },
+        "ready_for_cortexdb": {
+            "final_memory_text": "Candidate ready for import.",
+            "import_payload_preview": {
+                "content": "safe content",
+                "hidden_reasoning": "do not expose this reasoning",
+                "raw_prompt": "do not expose this prompt",
+            },
+        },
+        "cortexdb": {
+            "id": "thought_demo_7f3a",
+            "stored_text": "api_key=SECRET123",
+            "hidden_reasoning": "do not expose receipt reasoning",
+            "raw_prompt": "do not expose receipt prompt",
+        },
+    }
     path.write_text(json.dumps(data), encoding="utf-8")
 
     thought = client.get(
@@ -640,6 +716,12 @@ def test_snapshot_redacts_sensitive_fields_and_paths_in_api(client, hermes_home)
         "https://example.test/callback?access_token=[REDACTED]&ok=1"
     )
     assert thought["final_memory_text"] == "durable ordinary ID cand_42_18_a with token=[REDACTED]"
+    assert thought["stage_detail"]["policy"]["candidate_text_reviewed"] == "password: [REDACTED] api_key=[REDACTED]"
+    assert thought["stage_detail"]["policy"]["redacted_text"] == "token=[REDACTED]"
+    assert thought["stage_detail"]["ready_for_cortexdb"]["import_payload_preview"] == {"content": "safe content"}
+    assert thought["stage_detail"]["cortexdb"]["stored_text"] == "api_key=[REDACTED]"
+    assert "hidden_reasoning" not in json.dumps(thought["stage_detail"])
+    assert "raw_prompt" not in json.dumps(thought["stage_detail"])
     assert len(thought["source_snippet"]) <= 500
     assert "file_url" not in thought
 

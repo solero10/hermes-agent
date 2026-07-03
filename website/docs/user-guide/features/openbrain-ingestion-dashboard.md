@@ -49,6 +49,19 @@ The board is a current-state view, not a full per-stage history board. **Each th
 
 Open a card's detail dialog to see the full lineage timeline, including completed, current, pending, review-needed, and not-reached stages.
 
+## Column-specific detail panels
+
+The detail dialog keeps one shared shell, but the main panel changes by the card's current column. This makes the board clearer because each column represents a different kind of artifact:
+
+- **Extracted detail** shows source evidence: quote/snippet, source section, extraction method, coverage status, and which Shaped cards used it.
+- **Shaped detail** shows Formation Trace: primary lineage cards, extra context, exact shaping input, shaped output, merge note, and gate events.
+- **Policy detail** shows the policy decision: pass/stop/review result, policy tag, reason, candidate text reviewed, redacted text, and fix note when available.
+- **Dedupe detail** shows dedupe evidence: semantic/exact method, duplicate/unique/merge decision, matched memory, similarity score, fingerprint, and merge note.
+- **Ready detail** shows the final import package: final memory text, type/topics/people, source receipt, policy check, dedupe check, checklist, and import payload preview.
+- **CortexDB detail** shows the storage receipt: thought ID, stored text, metadata, capture time, source unit ID, candidate ID, and update/merge note.
+
+Older snapshots may not have every field. Missing fields are shown as empty states instead of errors.
+
 ## Formation Trace
 
 The Thought Detail panel can show a **Formation Trace** when the snapshot includes it. This trace explains how a thought was formed from source material as it moves across the board. It may include the primary lineage cards, additional source context, the exact LLM input package, the shaped output, and later Policy/Dedupe/CortexDB gate decisions.

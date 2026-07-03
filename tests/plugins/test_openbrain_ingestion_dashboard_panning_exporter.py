@@ -115,6 +115,8 @@ def test_imported_duplicate_and_derived_lineage_rows_map_correctly_without_sqlit
     assert imported["disposition"] == "imported"
     assert imported["cortexdb_receipt"]["id"] == "thought_demo_7f3a"
     assert imported["cortexdb_receipt"]["source_unit_id"]
+    assert imported["stage_detail"]["cortexdb"]["id"] == "thought_demo_7f3a"
+    assert imported["stage_detail"]["cortexdb"]["stored_text"] == "Stakeholder acceptance is delivery risk, not only a communications concern."
     assert imported["cortexdb_id"] == "thought_demo_7f3a"
     assert imported["related_memories"][0]["id"] == "thought_existing_a"
 
@@ -127,6 +129,8 @@ def test_imported_duplicate_and_derived_lineage_rows_map_correctly_without_sqlit
     assert duplicate["related_memories"] == [
         {"id": "thought_existing_91c", "title": "Start narrow before widening configurability", "score": 0.82}
     ]
+    assert duplicate["stage_detail"]["deduped"]["decision"] == "duplicate"
+    assert duplicate["stage_detail"]["deduped"]["matched_memory_id"] == "thought_existing_91c"
     assert "cortexdb_receipt" not in duplicate
     assert "cortexdb_id" not in duplicate
 
@@ -179,6 +183,8 @@ def test_degraded_exact_only_dedupe_keeps_candidate_in_shaped(tmp_path):
     exact_only = thoughts["cand_008_exact_only"]
     assert exact_only["current_stage"] == "shaped"
     assert exact_only["disposition"] == "in_progress"
+    assert exact_only["stage_detail"]["deduped"]["method"] == "exact_only_degraded"
+    assert exact_only["stage_detail"]["deduped"]["evidence_note"] == "semantic matcher not configured; exact-only batch check"
 
 
 def test_candidate_formation_trace_flat_fields_export_to_dashboard_snapshot(tmp_path):
@@ -218,6 +224,7 @@ def test_candidate_formation_trace_flat_fields_export_to_dashboard_snapshot(tmp_
     }
 
     trace = thoughts["cand_009_formation_trace"]["formation_trace"]
+    stage_trace = thoughts["cand_009_formation_trace"]["stage_detail"]["shaped"]
     assert thoughts["cand_009_formation_trace"]["current_stage"] == "deduped"
     assert trace["stage"] == "shaped"
     assert trace["primary_lineage_ids"] == ["pan:trace-01", "pan:trace-02"]
@@ -226,6 +233,7 @@ def test_candidate_formation_trace_flat_fields_export_to_dashboard_snapshot(tmp_
     assert trace["llm_output_text"] == "Exact shaped output."
     assert trace["created_by"]["model"] == "gpt-5.5"
     assert trace["gate_events"][0]["stage"] == "policy"
+    assert stage_trace["llm_output_text"] == trace["llm_output_text"]
 
     rendered = json.dumps(trace)
     assert "secret123" not in rendered

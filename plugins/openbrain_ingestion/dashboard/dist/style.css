@@ -635,6 +635,7 @@
 .ob-final-memory,
 .ob-imported-receipt,
 .ob-stopped-receipt,
+.ob-stage-detail-panel,
 .ob-related,
 .ob-database-fields {
   border: 1px solid var(--ob-border);
@@ -701,11 +702,103 @@
 }
 
 .ob-trace-note,
+.ob-stage-detail-note,
+.ob-stage-detail-empty,
 .ob-trace-block p,
 .ob-trace-empty p {
   color: var(--ob-muted);
   font-size: 0.82rem;
   line-height: 1.45;
+}
+
+.ob-stage-detail-panel {
+  display: grid;
+  gap: 0.7rem;
+  border-left-width: 3px;
+}
+
+.ob-stage-detail-panel--extracted {
+  border-left-color: color-mix(in srgb, var(--ob-muted) 80%, var(--ob-border));
+}
+
+.ob-stage-detail-panel--shaped {
+  border-left-color: color-mix(in srgb, var(--ob-accent) 80%, var(--ob-border));
+}
+
+.ob-stage-detail-panel--shaped .ob-formation-trace {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.ob-stage-detail-panel--policy {
+  border-left-color: color-mix(in srgb, var(--ob-warning) 82%, var(--ob-border));
+}
+
+.ob-stage-detail-panel--deduped {
+  border-left-color: color-mix(in srgb, var(--ob-danger) 72%, var(--ob-border));
+}
+
+.ob-stage-detail-panel--ready {
+  border-left-color: color-mix(in srgb, var(--ob-success) 76%, var(--ob-border));
+}
+
+.ob-stage-detail-panel--cortexdb {
+  border-left-color: color-mix(in srgb, var(--ob-success) 88%, var(--ob-accent));
+}
+
+.ob-stage-detail-summary {
+  margin-top: 0;
+}
+
+.ob-stage-policy-tag {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.ob-stage-policy-tag > span {
+  color: var(--ob-muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.ob-stage-checklist,
+.ob-stage-evidence-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ob-stage-checklist-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--ob-border) 74%, transparent);
+  border-radius: calc(var(--ob-radius) * 0.65);
+  background: color-mix(in srgb, var(--ob-bg-strong) 40%, transparent);
+  padding: 0.55rem;
+}
+
+.ob-stage-checklist-item span {
+  color: var(--ob-muted);
+  font-size: 0.8rem;
+}
+
+.ob-stage-json h4,
+.ob-stage-evidence-list h4,
+.ob-final-memory h4 {
+  margin: 0 0 0.45rem;
+  font-size: 0.9rem;
+}
+
+.ob-stage-json {
+  display: grid;
+  gap: 0.45rem;
 }
 
 .ob-trace-version,

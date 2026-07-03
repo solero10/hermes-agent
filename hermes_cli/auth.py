@@ -1075,6 +1075,114 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
     return {"version": AUTH_STORE_VERSION, "providers": {}}
 
 
+_DEFAULT_EXPECTED_CODEX_LABELS = ("Dads ChatGPT", "Kev1", "Ken ChatGPT")
+
+
+def _codex_write_guard_enabled() -> bool:
+    raw = os.environ.get("HERMES_CODEX_WRITE_GUARD", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _expected_codex_labels_for_guard() -> List[str]:
+    raw = os.environ.get("CODEX_USAGE_EXPECTED_LABELS", "").strip()
+    if not raw:
+        return list(_DEFAULT_EXPECTED_CODEX_LABELS)
+    labels = [part.strip() for part in raw.split(",") if part.strip()]
+    return labels or list(_DEFAULT_EXPECTED_CODEX_LABELS)
+
+
+def _codex_pool_rows_from_store(store: Dict[str, Any]) -> List[Dict[str, Any]]:
+    pool = store.get("credential_pool")
+    rows = pool.get("openai-codex") if isinstance(pool, dict) else None
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _codex_row_label(row: Dict[str, Any]) -> str:
+    return str(row.get("label") or row.get("display_label") or row.get("stored_label") or "").strip()
+
+
+def _codex_row_removed_by_tombstone(store: Dict[str, Any], row: Dict[str, Any]) -> bool:
+    tombstones = store.get("credential_pool_removed")
+    records = tombstones.get("openai-codex") if isinstance(tombstones, dict) else None
+    if not isinstance(records, list):
+        return False
+    row_values = {
+        str(row.get(key) or "").strip().lower()
+        for key in ("id", "label", "display_label", "stored_label", "account_id")
+        if row.get(key)
+    }
+    tokens = row.get("tokens")
+    if isinstance(tokens, dict):
+        for key in ("account_id", "chatgpt_account_id", "ChatGPT-Account-Id"):
+            if tokens.get(key):
+                row_values.add(str(tokens.get(key)).strip().lower())
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        record_values = {
+            str(record.get(key) or "").strip().lower()
+            for key in ("id", "label", "display_label", "stored_label", "account_id")
+            if record.get(key)
+        }
+        if row_values & record_values:
+            return True
+    return False
+
+
+def _preserve_expected_codex_rows_for_auth_save(auth_store: Dict[str, Any], auth_file: Path) -> Dict[str, Any]:
+    """Preserve expected manual Codex accounts across stale runtime writes."""
+    if not _codex_write_guard_enabled() or not auth_file.exists():
+        return auth_store
+    outgoing_rows = _codex_pool_rows_from_store(auth_store)
+    if not outgoing_rows:
+        return auth_store
+    try:
+        current = json.loads(auth_file.read_text(encoding="utf-8"))
+    except Exception:
+        return auth_store
+    if not isinstance(current, dict):
+        return auth_store
+    expected = _expected_codex_labels_for_guard()
+    outgoing_labels = {_codex_row_label(row) for row in outgoing_rows if _codex_row_label(row)}
+    disk_by_label = {
+        _codex_row_label(row): dict(row)
+        for row in _codex_pool_rows_from_store(current)
+        if _codex_row_label(row)
+    }
+    restored = []
+    for label in expected:
+        disk_row = disk_by_label.get(label)
+        if label in outgoing_labels or not disk_row:
+            continue
+        if _codex_row_removed_by_tombstone(auth_store, disk_row):
+            continue
+        restored.append(disk_row)
+    if not restored:
+        return auth_store
+    merged = [dict(row) for row in outgoing_rows] + restored
+    rank = {label: idx for idx, label in enumerate(expected)}
+
+    def sort_key(row: Dict[str, Any]) -> tuple:
+        try:
+            priority = int(row.get("priority") or 999)
+        except (TypeError, ValueError):
+            priority = 999
+        label = _codex_row_label(row)
+        return (rank.get(label, len(expected) + 1), priority, label)
+
+    merged.sort(key=sort_key)
+    for priority, row in enumerate(merged):
+        row["priority"] = priority
+    pool = auth_store.setdefault("credential_pool", {})
+    if not isinstance(pool, dict):
+        pool = {}
+        auth_store["credential_pool"] = pool
+    pool["openai-codex"] = merged
+    return auth_store
+
+
 def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = None) -> Path:
     # target_path=None preserves the existing contract (write the active
     # store at _auth_file_path()). An explicit path lets callers persist a
@@ -1087,6 +1195,7 @@ def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = N
     # No-op on Windows (POSIX mode bits not enforced); ignore failures.
     # secure_parent_dir refuses to chmod / or top-level dirs (#25821).
     secure_parent_dir(auth_file)
+    auth_store = _preserve_expected_codex_rows_for_auth_save(auth_store, auth_file)
     auth_store["version"] = AUTH_STORE_VERSION
     auth_store["updated_at"] = datetime.now(timezone.utc).isoformat()
     payload = json.dumps(auth_store, indent=2) + "\n"

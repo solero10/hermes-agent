@@ -41,7 +41,7 @@ from history_contract import attach_long_history_to_snapshot
 
 router = APIRouter()
 
-POLL_INTERVAL_SECONDS = 30
+POLL_INTERVAL_SECONDS = cache_helpers.DASHBOARD_POLL_INTERVAL_SECONDS
 CACHE_TTL_SECONDS = POLL_INTERVAL_SECONDS
 COMMAND_TIMEOUT_SECONDS = 25
 HISTORY_RETENTION = timedelta(days=8)

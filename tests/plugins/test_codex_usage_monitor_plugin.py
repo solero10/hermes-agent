@@ -137,8 +137,8 @@ def test_manifest_registers_expected_dashboard_plugin():
         "icon": "Activity",
         "version": "0.1.0",
         "tab": {"path": "/codex-usage", "position": "after:analytics"},
-        "entry": "dist/index.js?v=20260701-detail-back-range-history-v1",
-        "css": "dist/style.css?v=20260701-detail-back-range-history-v1",
+        "entry": "dist/index.js?v=20260703-strong-active-last-v1",
+        "css": "dist/style.css?v=20260703-strong-active-last-v1",
         "api": "plugin_api.py",
     }
 
@@ -158,7 +158,7 @@ def test_systemd_runner_assets_are_profile_safe_and_secret_free():
     assert "collector.py once" in service
     assert "venv/bin/python" in service
     assert "Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin" in service
-    assert "OnUnitActiveSec=60s" in timer
+    assert "OnUnitActiveSec=15s" in timer
     assert "PYTHONPATH=%h/.hermes/hermes-agent" in service
     assert "WorkingDirectory=%h/.hermes/hermes-agent" in service
     assert "%h" in service
@@ -167,6 +167,32 @@ def test_systemd_runner_assets_are_profile_safe_and_secret_free():
     assert "access_token" not in combined
     assert "refresh_token" not in combined
     assert "systemctl --user enable --now" in readme
+
+
+def test_dashboard_poll_interval_is_ten_seconds_and_collector_timer_is_fifteen_seconds(plugin_api):
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+    cache_source = PLUGIN_MODULE_PATH.with_name("cache.py").read_text(encoding="utf-8")
+    collector_source = PLUGIN_MODULE_PATH.with_name("collector.py").read_text(encoding="utf-8")
+    timer = (SYSTEMD_DIR / "hermes-codex-usage-monitor.timer").read_text(encoding="utf-8")
+    readme = (SYSTEMD_DIR / "README.md").read_text(encoding="utf-8")
+
+    assert plugin_api.POLL_INTERVAL_SECONDS == 10
+    assert plugin_api.CACHE_TTL_SECONDS == 10
+    assert plugin_api.cache_helpers.DASHBOARD_POLL_INTERVAL_SECONDS == 10
+    assert plugin_api.cache_helpers.COLLECTOR_INTERVAL_SECONDS == 15
+    assert plugin_api.cache_helpers.STALE_AFTER_SECONDS == 60
+    assert "const POLL_MS = 10000" in frontend
+    assert "Polls every 10 seconds" in frontend
+    assert "Collector checks quota every 15 seconds" in frontend
+    assert "DASHBOARD_POLL_INTERVAL_SECONDS = 10" in cache_source
+    assert "COLLECTOR_INTERVAL_SECONDS = 15" in cache_source
+    assert "STALE_AFTER_SECONDS = 60" in cache_source
+    assert '"dashboard_poll_interval_seconds": cache_helpers.DASHBOARD_POLL_INTERVAL_SECONDS' in collector_source
+    assert '"poll_interval_seconds": cache_helpers.DASHBOARD_POLL_INTERVAL_SECONDS' in collector_source
+    assert "OnUnitActiveSec=15s" in timer
+    assert "OnUnitActiveSec=60s" not in timer
+    assert "collector every 15 seconds" in timer
+    assert "collector every 15 seconds" in readme
 
 
 def test_cache_helpers_are_profile_safe_and_atomic(plugin_api, tmp_path):
@@ -183,6 +209,16 @@ def test_cache_helpers_are_profile_safe_and_atomic(plugin_api, tmp_path):
     with pytest.raises(ValueError):
         plugin_api.cache_helpers.write_json_atomic(cache_path, {"ok": False}, validator=reject)
     assert plugin_api.cache_helpers.read_json_file(cache_path) == {"ok": True, "schema_version": 1}
+
+
+def test_collector_main_skips_overlapping_runs_without_failing(plugin_api, monkeypatch, capsys):
+    def locked_collect_once(*_args, **_kwargs):
+        raise plugin_api.cache_helpers.CacheLockTimeout("already running")
+
+    monkeypatch.setattr(plugin_api.collector_core, "collect_once", locked_collect_once)
+
+    assert plugin_api.collector_core.main(["once"]) == 0
+    assert capsys.readouterr().out.strip() == "skipped_locked"
 
 
 def test_parse_dt_returns_timezone_aware_utc(plugin_api):
@@ -340,6 +376,149 @@ def test_active_inference_marks_largest_drop_and_ignores_reset_increase(plugin_a
     assert result[2]["windows"]["five_hour"]["delta_remaining_percent"] == 89
 
 
+def test_collector_marks_active_account_from_previous_history_sample(plugin_api):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    previous_raw = _raw_snapshot(start)
+    current_raw = json.loads(json.dumps(previous_raw))
+    current_raw["generated_at"] = (start + timedelta(seconds=15)).isoformat()
+    current_raw["accounts"][0]["windows"][0]["used_percent"] = 34
+
+    previous_snapshot = plugin_api.normalize_snapshot(previous_raw, now=start)
+    plugin_api.append_history_snapshot(previous_snapshot, now=start)
+
+    def fake_run_usage_command():
+        return current_raw, {"command": "fake usage", "available": True}
+
+    def fake_run_reset_credits_command():
+        return None, {"command": None, "available": False}
+
+    deps = {
+        "normalize_snapshot": plugin_api.normalize_snapshot,
+        "merge_reset_credits": plugin_api.merge_reset_credits,
+        "sanitize": plugin_api.sanitize,
+        "run_usage_command": fake_run_usage_command,
+        "run_reset_credits_command": fake_run_reset_credits_command,
+        "append_history_snapshot": plugin_api.append_history_snapshot,
+        "load_history_rows": plugin_api.load_history_rows,
+        "attach_history_to_accounts": plugin_api._attach_history_to_accounts,
+    }
+
+    result = plugin_api.collector_core.collect_once(
+        deps=deps,
+        now=start + timedelta(seconds=15),
+    )
+    account = result["accounts"][0]
+
+    assert account["active_now"] is True
+    assert account["active_drop_percent"] == 4
+    assert "5-hour remaining dropped 4% within the last 60 seconds" in account["active_reason"]
+    assert result["last_active_account"]["label"] == "Primary Codex"
+    assert result["last_active_account"]["window_label"] == "5-hour"
+    assert result["last_active_account"]["drop_percent"] == 4
+    assert result["last_active_account"]["active_now"] is True
+
+
+def test_collector_keeps_recent_drop_active_across_stable_samples(plugin_api):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    before_drop = _raw_snapshot(start)
+    dropped = json.loads(json.dumps(before_drop))
+    dropped["generated_at"] = (start + timedelta(seconds=15)).isoformat()
+    dropped["accounts"][0]["windows"][0]["used_percent"] = 35
+    stable = json.loads(json.dumps(dropped))
+    stable["generated_at"] = (start + timedelta(seconds=30)).isoformat()
+
+    plugin_api.append_history_snapshot(
+        plugin_api.normalize_snapshot(before_drop, now=start),
+        now=start,
+    )
+    plugin_api.append_history_snapshot(
+        plugin_api.normalize_snapshot(
+            dropped,
+            now=start + timedelta(seconds=15),
+            previous=plugin_api.normalize_snapshot(before_drop, now=start),
+        ),
+        now=start + timedelta(seconds=15),
+    )
+
+    def fake_run_usage_command():
+        return stable, {"command": "fake usage", "available": True}
+
+    def fake_run_reset_credits_command():
+        return None, {"command": None, "available": False}
+
+    deps = {
+        "normalize_snapshot": plugin_api.normalize_snapshot,
+        "merge_reset_credits": plugin_api.merge_reset_credits,
+        "sanitize": plugin_api.sanitize,
+        "run_usage_command": fake_run_usage_command,
+        "run_reset_credits_command": fake_run_reset_credits_command,
+        "append_history_snapshot": plugin_api.append_history_snapshot,
+        "load_history_rows": plugin_api.load_history_rows,
+        "attach_history_to_accounts": plugin_api._attach_history_to_accounts,
+    }
+
+    result = plugin_api.collector_core.collect_once(
+        deps=deps,
+        now=start + timedelta(seconds=30),
+    )
+    account = result["accounts"][0]
+
+    assert account["active_now"] is True
+    assert account["active_drop_percent"] == 5
+    assert account["active_last_seen_at"] == "2026-01-01T00:00:15Z"
+    assert result["last_active_account"]["seen_at"] == "2026-01-01T00:00:15Z"
+    assert result["last_active_account"]["active_now"] is True
+
+
+def test_collector_keeps_last_active_summary_after_pulse_expires(plugin_api):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    before_drop = _raw_snapshot(start)
+    dropped = json.loads(json.dumps(before_drop))
+    dropped["generated_at"] = (start + timedelta(seconds=15)).isoformat()
+    dropped["accounts"][0]["windows"][0]["used_percent"] = 35
+    stable = json.loads(json.dumps(dropped))
+    stable["generated_at"] = (start + timedelta(seconds=120)).isoformat()
+
+    previous_snapshot = plugin_api.normalize_snapshot(before_drop, now=start)
+    plugin_api.append_history_snapshot(previous_snapshot, now=start)
+    plugin_api.append_history_snapshot(
+        plugin_api.normalize_snapshot(
+            dropped,
+            now=start + timedelta(seconds=15),
+            previous=previous_snapshot,
+        ),
+        now=start + timedelta(seconds=15),
+    )
+
+    def fake_run_usage_command():
+        return stable, {"command": "fake usage", "available": True}
+
+    def fake_run_reset_credits_command():
+        return None, {"command": None, "available": False}
+
+    deps = {
+        "normalize_snapshot": plugin_api.normalize_snapshot,
+        "merge_reset_credits": plugin_api.merge_reset_credits,
+        "sanitize": plugin_api.sanitize,
+        "run_usage_command": fake_run_usage_command,
+        "run_reset_credits_command": fake_run_reset_credits_command,
+        "append_history_snapshot": plugin_api.append_history_snapshot,
+        "load_history_rows": plugin_api.load_history_rows,
+        "attach_history_to_accounts": plugin_api._attach_history_to_accounts,
+    }
+
+    result = plugin_api.collector_core.collect_once(
+        deps=deps,
+        now=start + timedelta(seconds=120),
+    )
+
+    assert result["accounts"][0]["active_now"] is False
+    assert result["last_active_account"]["label"] == "Primary Codex"
+    assert result["last_active_account"]["drop_percent"] == 5
+    assert result["last_active_account"]["active_now"] is False
+    assert result["last_active_account"]["age_seconds"] == 105
+
+
 def test_run_usage_command_available_semantics_and_sanitized_errors(plugin_api, monkeypatch):
     monkeypatch.setattr(plugin_api.shutil, "which", lambda binary: None)
 
@@ -402,7 +581,7 @@ def test_route_mounts_in_bare_fastapi_testclient_and_returns_json(plugin_api, mo
         return {
             "ok": False,
             "generated_at": "2026-01-01T00:00:00Z",
-            "poll_interval_seconds": 30,
+            "poll_interval_seconds": plugin_api.POLL_INTERVAL_SECONDS,
             "cached": False,
             "age_seconds": 0,
             "source": {"command": None, "available": False, "last_error": "mocked"},
@@ -417,7 +596,7 @@ def test_route_mounts_in_bare_fastapi_testclient_and_returns_json(plugin_api, mo
     assert response.status_code == 200
     data = response.json()
     assert data["ok"] is False
-    assert data["poll_interval_seconds"] == 30
+    assert data["poll_interval_seconds"] == plugin_api.POLL_INTERVAL_SECONDS
     assert seen == {"history_points": 20, "force": True}
 
 
@@ -903,6 +1082,49 @@ def test_frontend_greys_exhausted_account_cards():
     assert ".codex-usage-card-exhausted" in css
     assert ".codex-usage-cooldown" in css
     assert ".codex-usage-exhausted-badge" in css
+    assert "filter: saturate" not in css
+    assert "grayscale(1)" not in css
+
+
+def test_frontend_styles_active_account_with_subtle_usage_pulse():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+    css = FRONTEND_CSS_PATH.read_text(encoding="utf-8")
+
+    assert "function activeUsageLevel" in frontend
+    assert "function activeInfoLevel" in frontend
+    assert "function activeUsageLabel" in frontend
+    assert "function activeUsageText" in frontend
+    assert "function LastActiveNotice" in frontend
+    assert "lastActiveFromSnapshot" in frontend
+    assert "last_active_account" in frontend
+    assert "active_drop_percent" in frontend
+    assert "drop >= 3" in frontend
+    assert "drop >= 1" in frontend
+    assert "codex-usage-card-active" in frontend
+    assert "codex-usage-card-active--" in frontend
+    assert '"data-active": active ? "true" : "false"' in frontend
+    assert '"data-active-level": activeLevel || undefined' in frontend
+    assert "active · " in frontend
+    assert "Active now" in frontend
+    assert "Last active" in frontend
+    assert " use" in frontend
+    assert " drop" in frontend
+    assert "account.active_now && !exhausted" in frontend
+
+    assert ".codex-usage-card-active" in css
+    assert ".codex-usage-card-active::before" in css
+    assert ".codex-usage-last-active" in css
+    assert ".codex-usage-last-active--live" in css
+    assert ".codex-usage-card-active--light" in css
+    assert ".codex-usage-card-active--moderate" in css
+    assert ".codex-usage-card-active--heavy" in css
+    assert "1.15rem rgba(var(--codex-active-rgb), 0.18)" in css
+    assert "@keyframes codex-usage-active-breathe" in css
+    assert "6.8s ease-in-out infinite" in css
+    assert "opacity: 0.9;" in css
+    assert "prefers-reduced-motion: reduce" in css
+    assert "pointer-events: none" in css
+    assert "z-index: 0" in css
     assert "filter: saturate" not in css
     assert "grayscale(1)" not in css
 

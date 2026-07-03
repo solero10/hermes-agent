@@ -15,7 +15,7 @@
   const CardContent = C.CardContent || "div";
 
   const API_URL = "/api/plugins/codex_usage_monitor/snapshot?history_points=240";
-  const POLL_MS = 30000;
+  const POLL_MS = 10000;
   const ACCOUNT_COLORS = ["#67e8f9", "#a78bfa", "#f59e0b", "#34d399", "#fb7185", "#60a5fa", "#c084fc", "#f472b6"];
   const PACE_COLOR = {
     under: "#22c55e",
@@ -52,6 +52,32 @@
     if (percent === null) return "—";
     const rounded = Math.round(percent * 10) / 10;
     return (Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)) + "%";
+  }
+
+  function activeUsageLevel(account) {
+    const drop = toPercent(account && account.active_drop_percent);
+    if (drop === null) return "light";
+    if (drop >= 3) return "heavy";
+    if (drop >= 1) return "moderate";
+    return "light";
+  }
+
+  function activeUsageLabel(level) {
+    if (level === "heavy") return "heavy";
+    if (level === "moderate") return "moderate";
+    return "light";
+  }
+
+  function activeUsageText(account) {
+    const level = activeUsageLevel(account);
+    const drop = toPercent(account && account.active_drop_percent);
+    const dropText = drop === null ? "" : " · " + formatPercent(drop) + " drop";
+    return "active · " + activeUsageLabel(level) + " use" + dropText;
+  }
+
+  function activeInfoLevel(info) {
+    const dropRaw = info && (info.drop_percent !== undefined ? info.drop_percent : info.active_drop_percent);
+    return activeUsageLevel({ active_drop_percent: dropRaw });
   }
 
   function parseDate(value) {
@@ -137,6 +163,11 @@
     if (value < 60) return Math.max(0, Math.round(value)) + "s old";
     if (value < 3600) return Math.round(value / 60) + "m old";
     return Math.round(value / 3600) + "h old";
+  }
+
+  function formatAgo(seconds) {
+    const age = formatAge(seconds);
+    return age ? age.replace(/ old$/, " ago") : null;
   }
 
   function errorMessage(error) {
@@ -430,6 +461,43 @@
       snapshot.cached ? h(StatusBadge, { tone: "cached" }, "cached") : null,
       collectorStatus ? h(StatusBadge, { tone: collectorStatus === "fresh" ? "cached" : "stale" }, "collector " + collectorStatus) : null,
       isStale ? h(StatusBadge, { tone: "stale" }, "stale") : null
+    );
+  }
+
+  function lastActiveFromSnapshot(snapshot, accounts) {
+    const explicit = snapshot && snapshot.last_active_account;
+    if (explicit && typeof explicit === "object" && explicit.label) return explicit;
+    const activeAccount = (accounts || []).find(function (account) { return account && account.active_now; });
+    if (!activeAccount) return null;
+    return {
+      label: activeAccount.label || activeAccount.stored_label || activeAccount.id || "Codex account",
+      drop_percent: activeAccount.active_drop_percent,
+      window_label: "Quota",
+      active_now: true,
+      age_seconds: 0,
+    };
+  }
+
+  function LastActiveNotice(props) {
+    const info = props.info || {};
+    const label = info.label || "Codex account";
+    const live = Boolean(info.active_now);
+    const level = activeInfoLevel(info);
+    const dropRaw = info.drop_percent !== undefined ? info.drop_percent : info.active_drop_percent;
+    const drop = toPercent(dropRaw);
+    const age = toNumber(info.age_seconds);
+    const ageText = formatAgo(age) || formatDateTime(info.seen_at);
+    const detail = [];
+    if (info.window_label) detail.push(info.window_label);
+    if (drop !== null) detail.push(formatPercent(drop) + " drop");
+    if (!live && ageText) detail.push(ageText);
+    return h("div", {
+      className: "codex-usage-last-active codex-usage-last-active--" + level + (live ? " codex-usage-last-active--live" : ""),
+      "data-active": live ? "true" : "false",
+    },
+      h("span", { className: "codex-usage-last-active-label" }, live ? "Active now" : "Last active"),
+      h("span", { className: "codex-usage-last-active-account" }, label),
+      detail.length ? h("span", { className: "codex-usage-last-active-detail" }, detail.join(" · ")) : null
     );
   }
 
@@ -754,11 +822,13 @@
     const accent = exhausted ? "#94a3b8" : colorForAccount(account, props.index || 0);
     const label = account.label || account.stored_label || account.id || "Codex account";
     const planLabel = planLabelForAccount(account);
-    const drop = toPercent(account.active_drop_percent);
-    const activeText = drop === null ? "recent quota drop" : "recent quota drop · " + formatPercent(drop);
+    const active = Boolean(account.active_now && !exhausted);
+    const activeLevel = active ? activeUsageLevel(account) : "";
+    const activeText = active ? activeUsageText(account) : "";
     const clickable = typeof props.onOpen === "function";
     const cardClass = "codex-usage-card" +
       (exhausted ? " codex-usage-card-exhausted" : "") +
+      (active ? " codex-usage-card-active codex-usage-card-active--" + activeLevel : "") +
       (clickable ? " codex-usage-card-clickable" : "");
     const helperText = exhausted ? exhaustedReasonForAccount(account) : "Remaining usage since first sample";
 
@@ -777,6 +847,8 @@
     return h(Card, {
       className: cardClass,
       "data-exhausted": exhausted ? "true" : "false",
+      "data-active": active ? "true" : "false",
+      "data-active-level": activeLevel || undefined,
       "data-account-id": accountRouteId(account, props.index || 0),
       role: clickable ? "button" : undefined,
       "aria-label": clickable ? "Open details for " + label : undefined,
@@ -793,7 +865,7 @@
             h("span", { className: "codex-usage-plan-badge" }, planLabel),
             exhausted ? h("span", { className: "codex-usage-exhausted-badge" }, "Exhausted") : null
           ),
-          account.active_now && !exhausted ? h("div", { className: "codex-usage-active" }, activeText) : null
+          active ? h("div", { className: "codex-usage-active" }, activeText) : null
         ),
         h("div", { className: "codex-usage-helper" }, helperText),
         exhausted ? h(CooldownNotice, { account: account }) : null,
@@ -811,8 +883,7 @@
     const accent = colorForAccount(account, props.index || 0);
     const label = account.label || account.stored_label || account.id || "Codex account";
     const planLabel = planLabelForAccount(account);
-    const drop = toPercent(account.active_drop_percent);
-    const activeText = drop === null ? "recent quota drop" : "recent quota drop · " + formatPercent(drop);
+    const activeText = activeUsageText(account);
 
     return h("section", { className: "codex-usage-detail", style: { "--codex-account-accent": accent } },
       h("div", { className: "codex-usage-detail-head" },
@@ -917,6 +988,10 @@
       return null;
     }, [accounts, selectedAccountId]);
 
+    const lastActive = useMemo(function () {
+      return lastActiveFromSnapshot(snapshot, accounts);
+    }, [snapshot, accounts]);
+
     const source = snapshot && snapshot.source ? snapshot.source : {};
     const noCommand = snapshot && source.available === false;
     const dataError = snapshot && snapshot.ok === false ? (source.last_error || snapshot.error || "Codex usage data is not available yet.") : null;
@@ -961,9 +1036,11 @@
           h("div", { className: "codex-usage-kicker" }, "Codex OAuth usage"),
           h("h1", null, "Codex Usage Monitor")
         ),
-        h("p", { className: "codex-usage-poll-note" }, "Polls every 30 seconds. Active account is inferred from quota drops, not session mapping."),
+        h("p", { className: "codex-usage-poll-note" }, "Polls every 10 seconds. Collector checks quota every 15 seconds. Active account is inferred from quota drops, not session mapping."),
         snapshot ? h(SnapshotMeta, { snapshot: snapshot }) : h("div", { className: "codex-usage-meta", "aria-hidden": "true" })
       ),
+
+      snapshot && lastActive ? h(LastActiveNotice, { info: lastActive }) : null,
 
       loading && !snapshot ? h(StatePanel, { tone: "loading", title: "Loading usage data", message: "Reading the latest Codex quota snapshot…" }) : null,
       showBlockingError ? h(StatePanel, { tone: "error", title: "Unable to load usage", message: "The dashboard could not reach the Codex usage plugin API.", detail: error }) : null,

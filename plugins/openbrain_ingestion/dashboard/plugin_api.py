@@ -245,6 +245,16 @@ _RAW_REFERENCE_KEYS = {
     "link",
     "source_link",
     "raw_link",
+    "hidden_reasoning",
+    "chain_of_thought",
+    "cot",
+    "reasoning_trace",
+    "raw_prompt",
+    "system_prompt",
+    "developer_prompt",
+    "internal_prompt",
+    "raw_transcript",
+    "transcript_dump",
 }
 
 _OMIT = object()
@@ -539,7 +549,7 @@ def _sanitize_node(value: Any, key: Any = None) -> Any:
     if key == "source_ref":
         return _sanitize_source_ref(value)
 
-    if key == "formation_trace":
+    if key in {"formation_trace", "stage_detail"}:
         return _sanitize_formation_node(value)
 
     if isinstance(value, dict):
@@ -643,6 +653,88 @@ class CortexDBReceipt(BaseModel):
     ingestion_run_id: str | None = None
     source_unit_id: str | None = None
     candidate_id: str | None = None
+    stored_text: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    update_note: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sanitize_receipt_payload(cls, value: Any) -> Any:
+        return _sanitize_formation_node(value)
+
+
+class ExtractedEvidenceDetail(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    status: str | None = None
+    source_section: str | None = None
+    extraction_method: str | None = None
+    used_by_shape_ids: list[str] = Field(default_factory=list)
+    promotion_note: str | None = None
+    not_promoted_reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sanitize_extracted_payload(cls, value: Any) -> Any:
+        return _sanitize_formation_node(value)
+
+
+class PolicyDecisionDetail(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    result: str = "not_run"
+    stop_code: str | None = None
+    reason: str | None = None
+    redaction_note: str | None = None
+    candidate_text_reviewed: str | None = None
+    redacted_text: str | None = None
+    fix_note: str | None = None
+    decided_at: str | None = None
+    decided_by: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sanitize_policy_payload(cls, value: Any) -> Any:
+        return _sanitize_formation_node(value)
+
+
+class DedupeEvidenceDetail(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    method: str = "not_run"
+    decision: str = "not_run"
+    matched_memory_id: str | None = None
+    matched_memory_title: str | None = None
+    similarity_score: float | None = None
+    content_fingerprint: str | None = None
+    exact_match: bool | None = None
+    merge_note: str | None = None
+    evidence_note: str | None = None
+    decided_at: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sanitize_dedupe_payload(cls, value: Any) -> Any:
+        return _sanitize_formation_node(value)
+
+
+class ReadyPackageDetail(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    final_memory_text: str | None = None
+    memory_type: str | None = None
+    topics: list[str] = Field(default_factory=list)
+    people: list[str] = Field(default_factory=list)
+    source_receipt: str | None = None
+    policy_check: str | None = None
+    dedupe_check: str | None = None
+    checklist: list[dict[str, Any]] = Field(default_factory=list)
+    import_payload_preview: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sanitize_ready_payload(cls, value: Any) -> Any:
+        return _sanitize_formation_node(value)
 
 
 class DatabaseFieldRecord(BaseModel):
@@ -772,6 +864,60 @@ def _formation_trace_has_content(value: Any) -> bool:
     return False
 
 
+def _detail_has_content(value: Any, *, meta_only_keys: set[str] | None = None) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, BaseModel):
+        data = value.model_dump(mode="json", exclude_none=True)
+    elif isinstance(value, dict):
+        data = value
+    else:
+        return False
+    ignored = meta_only_keys or set()
+    for key, item in data.items():
+        if key in ignored:
+            continue
+        if item not in (None, "", [], {}):
+            return True
+    return False
+
+
+class StageDetail(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    extracted: ExtractedEvidenceDetail | None = None
+    shaped: FormationTrace | None = None
+    policy: PolicyDecisionDetail | None = None
+    deduped: DedupeEvidenceDetail | None = None
+    ready_for_cortexdb: ReadyPackageDetail | None = None
+    cortexdb: CortexDBReceipt | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sanitize_stage_detail_payload(cls, value: Any) -> Any:
+        return _sanitize_formation_node(value)
+
+    @model_validator(mode="after")
+    def _drop_empty_stage_sections(self) -> "StageDetail":
+        if not _formation_trace_has_content(self.shaped):
+            self.shaped = None
+        if not _detail_has_content(self.extracted):
+            self.extracted = None
+        if not _detail_has_content(self.policy, meta_only_keys={"result"}):
+            self.policy = None
+        if not _detail_has_content(self.deduped, meta_only_keys={"method", "decision"}):
+            self.deduped = None
+        if not _detail_has_content(self.ready_for_cortexdb):
+            self.ready_for_cortexdb = None
+        if not _detail_has_content(self.cortexdb):
+            self.cortexdb = None
+        return self
+
+
+def _stage_detail_has_content(value: Any) -> bool:
+    return _detail_has_content(value)
+
+
 class ProducerInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -844,6 +990,7 @@ class ThoughtRecord(BaseModel):
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
     formation_trace: FormationTrace | None = None
+    stage_detail: StageDetail | None = None
     stages: list[StageRecord] | None = None
     related_memories: list[RelatedMemory] = Field(default_factory=list)
     cortexdb_receipt: CortexDBReceipt | None = None
@@ -865,6 +1012,16 @@ class ThoughtRecord(BaseModel):
             data["stop_stage_id"] = _normalize_stage(data["stop_stage_id"])
         if "formation_trace" in data and not _formation_trace_has_content(data.get("formation_trace")):
             data.pop("formation_trace", None)
+        stage_detail = data.get("stage_detail")
+        stage_detail = dict(stage_detail) if isinstance(stage_detail, dict) else {}
+        if _formation_trace_has_content(data.get("formation_trace")) and not stage_detail.get("shaped"):
+            stage_detail["shaped"] = data.get("formation_trace")
+        if data.get("cortexdb_receipt") and not stage_detail.get("cortexdb"):
+            stage_detail["cortexdb"] = data.get("cortexdb_receipt")
+        if stage_detail:
+            data["stage_detail"] = stage_detail
+        else:
+            data.pop("stage_detail", None)
         if str(data.get("disposition") or "").strip() == "stopped":
             stopped_reason = str(data.get("stopped_reason") or "").lower()
             stop_code = str(data.get("stop_code") or "").strip() or None
@@ -914,6 +1071,15 @@ class ThoughtRecord(BaseModel):
             self.id = self.lineage_id
         if not _formation_trace_has_content(self.formation_trace):
             self.formation_trace = None
+        if self.stage_detail:
+            if not self.formation_trace and _formation_trace_has_content(self.stage_detail.shaped):
+                self.formation_trace = self.stage_detail.shaped
+            if self.disposition != "imported":
+                self.stage_detail.cortexdb = None
+            elif not self.cortexdb_receipt and self.stage_detail.cortexdb:
+                self.cortexdb_receipt = self.stage_detail.cortexdb
+            if not _stage_detail_has_content(self.stage_detail):
+                self.stage_detail = None
         if self.disposition != "imported":
             self.cortexdb_receipt = None
             self.cortexdb_id = None
@@ -921,6 +1087,8 @@ class ThoughtRecord(BaseModel):
             if isinstance(extra, dict):
                 extra.pop("cortexdb_receipt", None)
                 extra.pop("cortexdb_id", None)
+                if self.stage_detail is None:
+                    extra.pop("stage_detail", None)
         elif self.cortexdb_id is None and self.cortexdb_receipt and self.cortexdb_receipt.id:
             self.cortexdb_id = self.cortexdb_receipt.id
         return self
@@ -1028,6 +1196,7 @@ class ThoughtDetail(BaseModel):
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
     formation_trace: FormationTrace | None = None
+    stage_detail: StageDetail | None = None
     source_unit: dict[str, Any]
     stages: list[StageRecord]
     related_memories: list[RelatedMemory] = Field(default_factory=list)
@@ -1052,6 +1221,15 @@ class ThoughtDetail(BaseModel):
     def _enforce_detail_receipt_rule(self) -> "ThoughtDetail":
         if not _formation_trace_has_content(self.formation_trace):
             self.formation_trace = None
+        if self.stage_detail:
+            if not self.formation_trace and _formation_trace_has_content(self.stage_detail.shaped):
+                self.formation_trace = self.stage_detail.shaped
+            if self.disposition != "imported":
+                self.stage_detail.cortexdb = None
+            elif not self.cortexdb_receipt and self.stage_detail.cortexdb:
+                self.cortexdb_receipt = self.stage_detail.cortexdb
+            if not _stage_detail_has_content(self.stage_detail):
+                self.stage_detail = None
         if self.disposition != "imported":
             self.cortexdb_receipt = None
             self.cortexdb_id = None
@@ -1059,6 +1237,8 @@ class ThoughtDetail(BaseModel):
             if isinstance(extra, dict):
                 extra.pop("cortexdb_receipt", None)
                 extra.pop("cortexdb_id", None)
+                if self.stage_detail is None:
+                    extra.pop("stage_detail", None)
         elif self.cortexdb_id is None and self.cortexdb_receipt and self.cortexdb_receipt.id:
             self.cortexdb_id = self.cortexdb_receipt.id
         return self
@@ -1120,6 +1300,18 @@ def _model_dump(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return copy.deepcopy(value)
     return {}
+
+
+def _normalize_thought_for_response(thought: dict[str, Any]) -> dict[str, Any]:
+    """Normalize one thought through the dashboard API contract.
+
+    Snapshot exporters use this helper so stage-specific detail payloads are
+    sanitized and backward-compatible before they are written to disk.  The
+    public API still validates the full snapshot again when serving it.
+    """
+
+    clean = _sanitize_node(copy.deepcopy(thought))
+    return ThoughtRecord.model_validate(clean).model_dump(mode="json", exclude_none=True)
 
 
 def _receipt_id(thought: dict[str, Any]) -> str | None:
@@ -1495,6 +1687,13 @@ _BOARD_CARD_SEARCH_FIELDS: tuple[str, ...] = (
     "formation_trace.output_title",
     "formation_trace.llm_output_text",
     "formation_trace.merge_note",
+    "stage_detail.extracted.promotion_note",
+    "stage_detail.policy.reason",
+    "stage_detail.policy.redacted_text",
+    "stage_detail.deduped.merge_note",
+    "stage_detail.deduped.evidence_note",
+    "stage_detail.ready_for_cortexdb.final_memory_text",
+    "stage_detail.cortexdb.stored_text",
 )
 
 

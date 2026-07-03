@@ -805,7 +805,8 @@
 
   function FormationTrace(props) {
     const thought = props.thought || {};
-    const trace = thought.formation_trace || null;
+    const stageTrace = stageDetailFor(thought, "shaped");
+    const trace = formationTraceHasContent(stageTrace) ? stageTrace : (thought.formation_trace || null);
     const hasTrace = formationTraceHasContent(trace);
     const primaryIds = hasTrace ? asArray(trace.primary_lineage_ids) : [];
     const contextItems = hasTrace ? asArray(trace.additional_context_used) : [];
@@ -978,6 +979,207 @@
     );
   }
 
+  function stageDetailFor(thought, key) {
+    const detail = (thought && thought.stage_detail) || {};
+    return (detail && detail[key]) || {};
+  }
+
+  function stageDetailHasContent(detail, ignoredKeys) {
+    if (!detail || typeof detail !== "object") return false;
+    const ignored = ignoredKeys || [];
+    return Object.keys(detail).some(function (key) {
+      if (ignored.indexOf(key) >= 0) return false;
+      const value = detail[key];
+      if (Array.isArray(value)) return value.length > 0;
+      if (value && typeof value === "object") return Object.keys(value).length > 0;
+      return value !== null && value !== undefined && value !== "";
+    });
+  }
+
+  function StageEmpty(props) {
+    return h("p", { className: "ob-stage-detail-empty ob-muted" }, props.children);
+  }
+
+  function StageKeyValueList(props) {
+    const rows = asArray(props.rows).filter(function (row) {
+      const value = row && row.value;
+      return value !== null && value !== undefined && value !== "" && !(Array.isArray(value) && !value.length);
+    });
+    if (!rows.length) return null;
+    return h("dl", { className: "ob-detail-list ob-stage-detail-summary" }, rows.map(function (row) {
+      const value = row.value;
+      return h("div", { key: row.label },
+        h("dt", null, row.label),
+        h("dd", null, Array.isArray(value) ? value.join(", ") : typeof value === "object" ? JSON.stringify(value) : safeText(value))
+      );
+    }));
+  }
+
+  function StageChecklist(props) {
+    const items = asArray(props.items);
+    if (!items.length) return null;
+    return h("ul", { className: "ob-stage-checklist" }, items.map(function (item, index) {
+      return h("li", { key: (item.label || "check") + "-" + index, className: "ob-stage-checklist-item" },
+        h("strong", null, safeText(item.label || item.name, "Checklist item")),
+        h("span", null, safeText(item.status || item.result, "Pending")),
+        item.note ? h("p", null, safeText(item.note)) : null
+      );
+    }));
+  }
+
+  function ExtractedEvidencePanel(props) {
+    const thought = props.thought || {};
+    const detail = stageDetailFor(thought, "extracted");
+    const hasDetail = stageDetailHasContent(detail);
+    return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--extracted" },
+      h("div", { className: "ob-section-heading" }, h("h3", null, "Extracted evidence")),
+      h("p", { className: "ob-stage-detail-note" }, "What did we pull from the original source, and has it been covered by a Shaped card?"),
+      hasDetail ? h(StageKeyValueList, { rows: [
+        { label: "Evidence status", value: detail.status && detail.status.replace(/_/g, " ") },
+        { label: "Source section", value: detail.source_section },
+        { label: "Extraction method", value: detail.extraction_method },
+        { label: "Used by Shaped cards", value: asArray(detail.used_by_shape_ids) },
+        { label: "Promotion note", value: detail.promotion_note },
+        { label: "Not promoted reason", value: detail.not_promoted_reason },
+      ] }) : h(StageEmpty, null, "No extraction coverage data in this snapshot."),
+      thought.source_snippet || thought.quote || thought.raw_text ? h("section", { className: "ob-stage-evidence-list" },
+        h("h4", null, "Source quote"),
+        h("blockquote", { className: "ob-source-snippet" }, thought.source_snippet || thought.quote || thought.raw_text)
+      ) : null
+    );
+  }
+
+  function ShapedFormationPanel(props) {
+    return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--shaped" },
+      h(FormationTrace, { thought: props.thought })
+    );
+  }
+
+  function PolicyDecisionPanel(props) {
+    const thought = props.thought || {};
+    const detail = stageDetailFor(thought, "policy");
+    const code = detail.stop_code || effectiveStopCode(thought);
+    const reason = detail.reason || thought.stopped_reason;
+    const hasDetail = stageDetailHasContent(detail, ["result"]) || reason || code;
+    return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--policy" },
+      h("div", { className: "ob-section-heading" }, h("h3", null, "Policy decision")),
+      h("p", { className: "ob-stage-detail-note" }, "Is this safe and useful enough to continue?"),
+      hasDetail ? h(React.Fragment, null,
+        h(StageKeyValueList, { rows: [
+          { label: "Policy result", value: detail.result || (thought.disposition === "stopped" ? "stopped" : "not run") },
+          { label: "Why it stopped", value: reason },
+          { label: "Redaction note", value: detail.redaction_note },
+          { label: "How to fix", value: detail.fix_note },
+          { label: "Decided at", value: detail.decided_at && formatDate(detail.decided_at) },
+          { label: "Decided by", value: detail.decided_by },
+        ] }),
+        code ? h("div", { className: "ob-stage-policy-tag" },
+          h("span", null, "Policy tag"),
+          h(PolicyTag, { code: code, definitions: props.policyDefinitions, onShow: props.onPolicyDefinition })
+        ) : null,
+        detail.candidate_text_reviewed ? h(TraceTextBlock, { label: "Candidate text reviewed", text: detail.candidate_text_reviewed }) : null,
+        detail.redacted_text ? h(TraceTextBlock, { label: "Redacted version", text: detail.redacted_text }) : null
+      ) : h(StageEmpty, null, "No policy decision recorded for this card.")
+    );
+  }
+
+  function DedupeEvidencePanel(props) {
+    const thought = props.thought || {};
+    const detail = stageDetailFor(thought, "deduped");
+    const related = asArray(thought.related_memories)[0] || {};
+    const hasDetail = stageDetailHasContent(detail, ["method", "decision"]) || thought.matched_memory_id || related.id;
+    return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--deduped" },
+      h("div", { className: "ob-section-heading" }, h("h3", null, "Dedupe evidence")),
+      h("p", { className: "ob-stage-detail-note" }, "Is this new, duplicate, or merged into something else?"),
+      hasDetail ? h(React.Fragment, null,
+        h(StageKeyValueList, { rows: [
+          { label: "Dedupe decision", value: detail.decision },
+          { label: "Dedupe method", value: detail.method },
+          { label: "Matched memory", value: detail.matched_memory_title || detail.matched_memory_id || thought.matched_memory_id || related.title || related.id },
+          { label: "Similarity score", value: detail.similarity_score !== undefined ? detail.similarity_score : related.score },
+          { label: "Exact fingerprint", value: detail.content_fingerprint },
+          { label: "Merge note", value: detail.merge_note || thought.stopped_reason },
+          { label: "Semantic dedupe evidence", value: detail.evidence_note },
+        ] })
+      ) : h(StageEmpty, null, "No semantic dedupe evidence recorded for this card.")
+    );
+  }
+
+  function ReadyPackagePanel(props) {
+    const thought = props.thought || {};
+    const detail = stageDetailFor(thought, "ready_for_cortexdb");
+    const finalText = detail.final_memory_text || thought.final_memory_text;
+    const topics = asArray(detail.topics && detail.topics.length ? detail.topics : thought.topics);
+    const hasDetail = stageDetailHasContent(detail) || finalText;
+    return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--ready" },
+      h("div", { className: "ob-section-heading" },
+        h("h3", null, "Ready package"),
+        h(ReadOnlyButton, null, "Copy final memory")
+      ),
+      h("p", { className: "ob-stage-detail-note" }, "Is this final memory package complete enough to import?"),
+      hasDetail ? h(React.Fragment, null,
+        finalText ? h("section", { className: "ob-final-memory" }, h("h4", null, "Final memory text"), h("p", null, safeText(finalText))) : null,
+        h(StageKeyValueList, { rows: [
+          { label: "Memory type", value: detail.memory_type },
+          { label: "Topics", value: topics },
+          { label: "People", value: asArray(detail.people) },
+          { label: "Source receipt", value: detail.source_receipt },
+          { label: "Policy check", value: detail.policy_check },
+          { label: "Dedupe check", value: detail.dedupe_check },
+        ] }),
+        asArray(detail.checklist).length ? h(React.Fragment, null, h("h4", null, "Import checklist"), h(StageChecklist, { items: detail.checklist })) : null,
+        detail.import_payload_preview && Object.keys(detail.import_payload_preview).length ? h("section", { className: "ob-stage-json" },
+          h("h4", null, "Import payload preview"),
+          h("pre", { className: "ob-db-json" }, JSON.stringify(detail.import_payload_preview, null, 2))
+        ) : null
+      ) : h(StageEmpty, null, "No ready-to-import package recorded for this card.")
+    );
+  }
+
+  function CortexDBReceiptPanel(props) {
+    const thought = props.thought || {};
+    const detail = stageDetailFor(thought, "cortexdb");
+    const receipt = Object.keys(detail).length ? detail : (thought.cortexdb_receipt || {});
+    const hasReceipt = receipt && Object.keys(receipt).length > 0;
+    return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--cortexdb" },
+      h("div", { className: "ob-section-heading" },
+        h("h3", null, "CortexDB receipt"),
+        h(ReadOnlyButton, null, "Open CortexDB record")
+      ),
+      h("p", { className: "ob-stage-detail-note" }, "What actually got stored?"),
+      hasReceipt ? h(React.Fragment, null,
+        h(StageKeyValueList, { rows: [
+          { label: "Thought ID", value: receipt.id || thought.cortexdb_id },
+          { label: "Stored text", value: receipt.stored_text || receipt.content || thought.final_memory_text },
+          { label: "Type", value: receipt.type },
+          { label: "Captured at", value: receipt.captured_at && formatDate(receipt.captured_at) },
+          { label: "Ingestion run ID", value: receipt.ingestion_run_id },
+          { label: "Source unit ID", value: receipt.source_unit_id },
+          { label: "Candidate ID", value: receipt.candidate_id || thought.candidate_id },
+          { label: "Update / merge note", value: receipt.update_note },
+        ] }),
+        receipt.metadata && Object.keys(receipt.metadata).length ? h("section", { className: "ob-stage-json" },
+          h("h4", null, "Captured metadata"),
+          h("pre", { className: "ob-db-json" }, JSON.stringify(receipt.metadata, null, 2))
+        ) : null
+      ) : h(StageEmpty, null, "No CortexDB receipt recorded for this card.")
+    );
+  }
+
+  function StageSpecificDetailPanel(props) {
+    const thought = props.thought || {};
+    if (thought.current_stage === "extracted") return h(ExtractedEvidencePanel, props);
+    if (thought.current_stage === "shaped") return h(ShapedFormationPanel, props);
+    if (thought.current_stage === "policy") return h(PolicyDecisionPanel, props);
+    if (thought.current_stage === "deduped") return h(DedupeEvidencePanel, props);
+    if (thought.current_stage === "ready_for_cortexdb") return h(ReadyPackagePanel, props);
+    if (thought.current_stage === "cortexdb") return h(CortexDBReceiptPanel, props);
+    return h("section", { className: "ob-stage-detail-panel" },
+      h("h3", null, "Stage detail"),
+      h("p", { className: "ob-muted" }, "No stage-specific detail is available for this card.")
+    );
+  }
+
   function ThoughtDetail(props) {
     const thought = props.thought;
     const dialogTitleId = "ob-detail-title";
@@ -1016,27 +1218,18 @@
           h(DetailIDs, { thought: thought }),
           detailSummary ? h("p", { className: "ob-detail-copy" }, detailSummary) : null,
           thought.source_snippet || thought.quote || thought.raw_text ? h("blockquote", { className: "ob-source-snippet" }, thought.source_snippet || thought.quote || thought.raw_text) : null,
-          h(SourceContext, { thought: thought }),
-          h(LineageTimeline, { thought: thought }),
-          h(FormationTrace, { thought: thought }),
-          h("section", { className: "ob-final-memory" },
-            h("div", { className: "ob-section-heading" },
-              h("h3", null, "Final memory"),
-              h(ReadOnlyButton, null, "Copy final memory")
-            ),
-            thought.final_memory_text ? h("p", null, thought.final_memory_text) : h("p", { className: "ob-muted" }, "No final memory text in this snapshot.")
-          ),
-          thought.disposition === "imported" ? h(ImportedReceipt, { thought: thought }) : null,
-          thought.disposition === "stopped" ? h(StoppedReceipt, {
+          h(StageSpecificDetailPanel, {
             thought: thought,
             policyDefinitions: props.policyDefinitions,
             onPolicyDefinition: props.onPolicyDefinition,
-          }) : null,
-          thought.disposition !== "stopped" ? h("div", { className: "ob-readonly-actions" },
+          }),
+          h(SourceContext, { thought: thought }),
+          h(LineageTimeline, { thought: thought }),
+          h("div", { className: "ob-readonly-actions" },
             h(ReadOnlyButton, null, "Reopen later"),
             h(ReadOnlyButton, null, "Promote later"),
             h(ReadOnlyButton, null, "Mark for review later")
-          ) : null,
+          ),
           h(RelatedMemories, { thought: thought }),
           h(DatabaseFields, { thought: thought })
         ) : null

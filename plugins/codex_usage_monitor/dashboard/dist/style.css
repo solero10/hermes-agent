@@ -53,6 +53,52 @@
   line-height: 1.2;
 }
 
+.codex-usage-last-active {
+  --codex-last-active-rgb: 34, 197, 94;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.55rem;
+  border: 1px solid rgba(var(--codex-last-active-rgb), 0.42);
+  border-radius: calc(var(--radius) - 3px);
+  background:
+    linear-gradient(90deg, rgba(var(--codex-last-active-rgb), 0.18), rgba(var(--codex-last-active-rgb), 0.06) 46%, color-mix(in srgb, var(--color-card) 78%, transparent));
+  box-shadow:
+    inset 4px 0 0 rgba(var(--codex-last-active-rgb), 0.78),
+    0 0 0 1px rgba(var(--codex-last-active-rgb), 0.08);
+  padding: 0.45rem 0.7rem;
+  color: color-mix(in srgb, rgb(var(--codex-last-active-rgb)) 72%, var(--color-foreground));
+  font-size: 0.78rem;
+}
+
+.codex-usage-last-active--live {
+  background:
+    linear-gradient(90deg, rgba(var(--codex-last-active-rgb), 0.24), rgba(var(--codex-last-active-rgb), 0.08) 52%, color-mix(in srgb, var(--color-card) 72%, transparent));
+}
+
+.codex-usage-last-active--light { --codex-last-active-rgb: 34, 197, 94; }
+.codex-usage-last-active--moderate { --codex-last-active-rgb: 245, 158, 11; }
+.codex-usage-last-active--heavy { --codex-last-active-rgb: 239, 68, 68; }
+
+.codex-usage-last-active-label {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.66rem;
+  font-weight: 820;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.codex-usage-last-active-account {
+  color: var(--color-foreground);
+  font-weight: 780;
+}
+
+.codex-usage-last-active-detail {
+  color: color-mix(in srgb, rgb(var(--codex-last-active-rgb)) 82%, var(--color-muted-foreground));
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.72rem;
+}
+
 .codex-usage-meta {
   display: flex;
   align-items: center;
@@ -105,6 +151,7 @@
 .codex-usage-card {
   --codex-account-accent: var(--color-ring);
   position: relative;
+  isolation: isolate;
   overflow: hidden;
   min-width: 0;
   border: 1px solid color-mix(in srgb, var(--codex-account-accent) 38%, var(--color-border));
@@ -127,6 +174,68 @@
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--codex-account-accent) 24%, transparent), 0 1rem 2.4rem rgba(0,0,0,.22);
   outline: none;
   transform: translateY(-1px);
+}
+
+.codex-usage-card-active {
+  --codex-active-rgb: 34, 197, 94;
+  border-color: color-mix(in srgb, rgb(var(--codex-active-rgb)) 68%, var(--color-border));
+  box-shadow:
+    0 0 0 1px rgba(var(--codex-active-rgb), 0.2),
+    0 0 1.15rem rgba(var(--codex-active-rgb), 0.18),
+    inset 4px 0 0 rgba(var(--codex-active-rgb), 0.78);
+}
+
+.codex-usage-card-active::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: 0.22;
+  background:
+    radial-gradient(circle at 50% 0, rgba(var(--codex-active-rgb), 0.22), transparent 48%),
+    linear-gradient(180deg, rgba(var(--codex-active-rgb), 0.16), transparent 66%);
+  animation: codex-usage-active-breathe 6.8s ease-in-out infinite;
+}
+
+.codex-usage-card-active--light {
+  --codex-active-rgb: 34, 197, 94;
+}
+
+.codex-usage-card-active--moderate {
+  --codex-active-rgb: 245, 158, 11;
+}
+
+.codex-usage-card-active--heavy {
+  --codex-active-rgb: 239, 68, 68;
+}
+
+.codex-usage-card-active .codex-usage-active {
+  color: rgb(var(--codex-active-rgb));
+}
+
+.codex-usage-card-active .codex-usage-dot {
+  background: rgb(var(--codex-active-rgb));
+  box-shadow:
+    0 0 0 0.24rem rgba(var(--codex-active-rgb), 0.22),
+    0 0 1.05rem rgba(var(--codex-active-rgb), 0.36);
+}
+
+@keyframes codex-usage-active-breathe {
+  0%, 100% {
+    opacity: 0.22;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .codex-usage-card-active::before {
+    animation: none;
+    opacity: 0.48;
+  }
 }
 
 .codex-usage-card-exhausted {
@@ -220,6 +329,7 @@
   color: #86efac;
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
   font-size: 0.66rem;
+  font-weight: 760;
   line-height: 1.2;
   text-align: right;
 }

@@ -1,6 +1,6 @@
 # Codex Usage Monitor systemd runner
 
-These user-systemd units run the collector once per minute. They intentionally use `%h` instead of hardcoding a home directory and do not contain credentials.
+These user-systemd units run the collector every 15 seconds. They intentionally use `%h` instead of hardcoding a home directory and do not contain credentials.
 
 Install from the repository root:
 
