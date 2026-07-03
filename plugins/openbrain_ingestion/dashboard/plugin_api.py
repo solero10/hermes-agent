@@ -65,8 +65,8 @@ _STAGE_ALIASES: dict[str, str] = {
 }
 
 _STAGE_LABELS: dict[str, str] = {
-    "extracted": "Extracted",
-    "shaped": "Shaped",
+    "extracted": "Evidence cards",
+    "shaped": "Thought candidates",
     "deduped": "Deduped",
     "policy": "Policy",
     "ready_for_cortexdb": "Ready for CortexDB",

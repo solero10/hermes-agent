@@ -13,8 +13,8 @@
 
   const API_BASE = "/api/plugins/openbrain_ingestion";
   const STAGES = [
-    { id: "extracted", label: "Extracted" },
-    { id: "shaped", label: "Shaped" },
+    { id: "extracted", label: "Evidence cards" },
+    { id: "shaped", label: "Thought candidates" },
     { id: "policy", label: "Policy" },
     { id: "deduped", label: "Deduped" },
     { id: "ready_for_cortexdb", label: "Ready for CortexDB" },
@@ -92,6 +92,11 @@
 
   function stageClass(stageId) {
     return "ob-stage--" + stageSlug(stageId);
+  }
+
+  function columnDisplayLabel(column) {
+    const canonical = stageLabel(column && column.id);
+    return canonical && canonical !== "Unknown stage" ? canonical : (column && column.label) || canonical;
   }
 
   function dispositionLabel(value) {
@@ -583,9 +588,10 @@
   function StageColumn(props) {
     const column = props.column || {};
     const cards = asArray(props.cards);
-    return h("section", { className: cx("ob-stage", stageClass(column.id)), "aria-label": stageLabel(column.id) },
+    const label = columnDisplayLabel(column);
+    return h("section", { className: cx("ob-stage", stageClass(column.id)), "aria-label": label },
       h("header", { className: "ob-stage-header" },
-        h("span", null, column.label || stageLabel(column.id)),
+        h("span", null, label),
         h("span", { className: "ob-stage-count" }, cards.length)
       ),
       cards.length ? cards.map(function (card) {
@@ -673,7 +679,7 @@
           className: cx("ob-lineage-step", "ob-lineage-step--" + stageSlug(stage.status), "ob-timeline-step--" + stageSlug(stage.id)),
         },
           h("span", { className: "ob-lineage-dot", "aria-hidden": "true" }),
-          h("span", { className: "ob-lineage-label" }, stage.label || stageLabel(stage.id)),
+          h("span", { className: "ob-lineage-label" }, stageLabel(stage.id)),
           h("span", { className: "ob-lineage-status" }, statusLabel(stage.status))
         );
       }))
@@ -742,7 +748,7 @@
     const cards = asArray(props.trace && props.trace.primary_lineage_cards);
     return h("section", { className: "ob-trace-block ob-trace-lineage" },
       h("h4", null, "Primary lineage cards used"),
-      h("p", { className: "ob-muted" }, "These are the extracted cards directly used to create the shaped thought."),
+      h("p", { className: "ob-muted" }, "These are the Evidence cards directly used to create the Thought candidate."),
       cards.length ? h("ol", { className: "ob-trace-card-list" }, cards.map(function (card, index) {
         const cardId = card.lineage_id || card.id || String(index);
         return h("li", { key: cardId, className: "ob-trace-card" },
@@ -818,7 +824,7 @@
         h("h3", { id: headingId }, "Formation trace"),
         hasTrace ? h("span", { className: "ob-trace-version" }, trace.version ? "Trace v" + trace.version : "Trace") : null
       ),
-      h("p", { className: "ob-trace-note" }, "Shows how this thought was formed from source material. This shows submitted input and output, not hidden model reasoning."),
+      h("p", { className: "ob-trace-note" }, "Shows how this thought candidate was formed from source material. This shows submitted input and output, not hidden model reasoning."),
       !hasTrace ? h("div", { className: "ob-trace-empty" },
         h("p", null, "No formation trace in this snapshot."),
         h("p", { className: "ob-muted" }, "This thought was created before Formation Trace capture was added, or the producer did not provide trace data.")
@@ -1033,12 +1039,12 @@
     const hasDetail = stageDetailHasContent(detail);
     return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--extracted" },
       h("div", { className: "ob-section-heading" }, h("h3", null, "Extracted evidence")),
-      h("p", { className: "ob-stage-detail-note" }, "What did we pull from the original source, and has it been covered by a Shaped card?"),
+      h("p", { className: "ob-stage-detail-note" }, "What did we pull from the original source, and has it been covered by a Thought candidate?"),
       hasDetail ? h(StageKeyValueList, { rows: [
         { label: "Evidence status", value: detail.status && detail.status.replace(/_/g, " ") },
         { label: "Source section", value: detail.source_section },
         { label: "Extraction method", value: detail.extraction_method },
-        { label: "Used by Shaped cards", value: asArray(detail.used_by_shape_ids) },
+        { label: "Used by Thought candidates", value: asArray(detail.used_by_shape_ids) },
         { label: "Promotion note", value: detail.promotion_note },
         { label: "Not promoted reason", value: detail.not_promoted_reason },
       ] }) : h(StageEmpty, null, "No extraction coverage data in this snapshot."),
@@ -1058,7 +1064,8 @@
   function PolicyDecisionPanel(props) {
     const thought = props.thought || {};
     const detail = stageDetailFor(thought, "policy");
-    const code = detail.stop_code || effectiveStopCode(thought);
+    const stopped = thought.disposition === "stopped" || detail.result === "stopped";
+    const code = detail.stop_code || (stopped ? effectiveStopCode(thought) : "");
     const reason = detail.reason || thought.stopped_reason;
     const hasDetail = stageDetailHasContent(detail, ["result"]) || reason || code;
     return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--policy" },
@@ -1067,7 +1074,7 @@
       hasDetail ? h(React.Fragment, null,
         h(StageKeyValueList, { rows: [
           { label: "Policy result", value: detail.result || (thought.disposition === "stopped" ? "stopped" : "not run") },
-          { label: "Why it stopped", value: reason },
+          { label: stopped ? "Why it stopped" : "Policy reason", value: reason },
           { label: "Redaction note", value: detail.redaction_note },
           { label: "How to fix", value: detail.fix_note },
           { label: "Decided at", value: detail.decided_at && formatDate(detail.decided_at) },

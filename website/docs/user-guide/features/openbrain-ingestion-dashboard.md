@@ -14,8 +14,8 @@ The dashboard is registered as a dashboard plugin named `openbrain_ingestion` an
 
 The board is organized by **source unit**. Each row represents one item from the snapshot, such as a transcript, document, or other source-specific unit. Inside each row, thought cards are grouped by canonical ingestion stage:
 
-1. Extracted
-2. Shaped
+1. Evidence cards
+2. Thought candidates
 3. Policy
 4. Deduped
 5. Ready for CortexDB
@@ -39,9 +39,9 @@ The board itself is loaded from:
 
 Use the **Source date from** and **Source date to** controls to filter source units by source date. The UI accepts `MM/DD/YYYY`; the API also accepts `YYYY-MM-DD`. When **Source date to** is empty, entering a complete **Source date from** automatically fills **Source date to** with the following day. For transcript sources, source date is the source occurrence/recording date when available and falls back to processed time only when no source occurrence date exists.
 
-## Current-state rule: each thought card appears exactly once
+## Current-state rule: each card appears exactly once
 
-The board is a current-state view, not a full per-stage history board. **Each thought card appears exactly once**, in the column matching its current or final stage. For example:
+The board is a current-state view, not a full per-stage history board. **Each card appears exactly once**, in the column matching its current or final stage. The first two columns use clearer Panning names: **Evidence cards** are source-grounded extracted snippets, and **Thought candidates** are shaped memory candidates that are not CortexDB memories yet. For example:
 
 - an imported thought appears in **CortexDB**;
 - a duplicate stopped during dedupe appears in **Deduped**;
@@ -53,8 +53,8 @@ Open a card's detail dialog to see the full lineage timeline, including complete
 
 The detail dialog keeps one shared shell, but the main panel changes by the card's current column. This makes the board clearer because each column represents a different kind of artifact:
 
-- **Extracted detail** shows source evidence: quote/snippet, source section, extraction method, coverage status, and which Shaped cards used it.
-- **Shaped detail** shows Formation Trace: primary lineage cards, extra context, exact shaping input, shaped output, merge note, and gate events.
+- **Evidence card detail** shows source evidence: quote/snippet, source section, extraction method, coverage status, and which Thought candidate cards used it.
+- **Thought candidate detail** shows Formation Trace: primary lineage cards, extra context, exact shaping input, shaped output, merge note, and gate events.
 - **Policy detail** shows the policy decision: pass/stop/review result, policy tag, reason, candidate text reviewed, redacted text, and fix note when available.
 - **Dedupe detail** shows dedupe evidence: semantic/exact method, duplicate/unique/merge decision, matched memory, similarity score, fingerprint, and merge note.
 - **Ready detail** shows the final import package: final memory text, type/topics/people, source receipt, policy check, dedupe check, checklist, and import payload preview.

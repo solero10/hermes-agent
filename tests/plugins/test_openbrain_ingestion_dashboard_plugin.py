@@ -268,6 +268,8 @@ def test_board_groups_thoughts_by_current_stage_once_and_splits_counts(client):
         "ready_for_cortexdb",
         "cortexdb",
     ]
+    assert next(c for c in payload["columns"] if c["id"] == "extracted")["label"] == "Evidence cards"
+    assert next(c for c in payload["columns"] if c["id"] == "shaped")["label"] == "Thought candidates"
     assert next(c for c in payload["columns"] if c["id"] == "ready_for_cortexdb")["label"] == "Ready for CortexDB"
     assert any(item["id"] == "sensitive_detail" for item in payload["policy_stop_definitions"])
     assert payload["total_counts"] == payload["visible_counts"] == payload["metrics"]
@@ -449,6 +451,8 @@ def test_thought_detail_imported_has_normalized_timeline_and_receipt(client):
         "ready_for_cortexdb",
         "cortexdb",
     ]
+    assert next(stage for stage in thought["stages"] if stage["id"] == "extracted")["label"] == "Evidence cards"
+    assert next(stage for stage in thought["stages"] if stage["id"] == "shaped")["label"] == "Thought candidates"
     assert next(stage for stage in thought["stages"] if stage["id"] == "ready_for_cortexdb")["label"] == "Ready for CortexDB"
 
     db_fields = {field["name"]: field for field in thought["database_fields"]}
