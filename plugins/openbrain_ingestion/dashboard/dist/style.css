@@ -20,7 +20,7 @@
 
 .ob-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-columns: minmax(0, 1fr) minmax(12rem, 24rem);
   gap: 1rem;
   align-items: stretch;
   border: 1px solid var(--ob-border);
@@ -68,7 +68,8 @@
 .ob-snapshot-meta {
   display: grid;
   gap: 0.55rem;
-  min-width: 13rem;
+  min-width: 0;
+  max-width: 24rem;
   margin: 0;
   border: 1px solid color-mix(in srgb, var(--ob-border) 74%, transparent);
   border-radius: calc(var(--ob-radius) * 0.75);
@@ -97,6 +98,13 @@
 .ob-id-strip dd {
   margin: 0.15rem 0 0;
   overflow-wrap: anywhere;
+}
+
+.ob-snapshot-meta dd {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ob-toolbar {
@@ -408,6 +416,21 @@
 .ob-thought-card--needs-review,
 .ob-thought-card--needs_review {
   border-color: color-mix(in srgb, var(--ob-warning) 52%, var(--ob-border));
+}
+
+.ob-thought-card--clickable {
+  cursor: pointer;
+}
+
+.ob-thought-card--clickable:hover,
+.ob-thought-card--clickable:focus-visible {
+  border-color: color-mix(in srgb, var(--ob-accent) 58%, var(--ob-border));
+  background: color-mix(in srgb, var(--ob-bg-strong) 72%, #000);
+}
+
+.ob-thought-card--clickable:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ob-accent) 64%, transparent);
+  outline-offset: 2px;
 }
 
 .ob-card-head {

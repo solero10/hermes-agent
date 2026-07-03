@@ -267,6 +267,29 @@ def test_abbreviated_thought_cards_do_not_render_stage_or_lineage_metadata():
     assert "Lineage ID" in frontend  # detail view keeps the lineage identifier.
 
 
+def test_evidence_cards_keep_badge_tags_and_open_details_from_card_face():
+    frontend = _read(FRONTEND_JS_PATH)
+    css = _read(FRONTEND_CSS_PATH)
+    card_start = frontend.index("function ThoughtCard")
+    card_end = frontend.index("function SourceContext")
+    thought_card = frontend[card_start:card_end]
+
+    assert 'const isEvidenceCard = card.current_stage === "extracted";' in thought_card
+    assert 'isEvidenceCard ? "ob-thought-card--clickable" : null' in thought_card
+    assert 'cardProps.role = "button";' in thought_card
+    assert "cardProps.tabIndex = 0;" in thought_card
+    assert "cardProps.onClick = function () { props.onOpenDetail(card); };" in thought_card
+    assert 'event.key === "Enter" || event.key === " "' in thought_card
+    assert 'h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(disposition)) }, dispositionLabel(disposition))' in thought_card
+    assert 'String(topic || "").trim().toLowerCase() !== "extracted evidence"' in thought_card
+    assert 'cardTopics.length ? h("div", { className: "ob-topic-list" }, cardTopics.map(function (topic)' in thought_card
+    assert 'cardSummary && !isEvidenceCard ? h("p", { className: "ob-card-summary" }, cardSummary) : null' in thought_card
+    assert 'card.stopped_reason && !isEvidenceCard ? h("p", { className: "ob-card-reason" }' in thought_card
+    assert '!isEvidenceCard ? h("button", {' in thought_card
+    assert "ob-thought-card--clickable" in css
+    assert ".ob-thought-card--clickable:focus-visible" in css
+
+
 def test_database_fields_are_wired_into_detail_bottom_and_render_field_payloads():
     frontend = _read(FRONTEND_JS_PATH)
     detail_start = frontend.index("function ThoughtDetail")
@@ -310,6 +333,15 @@ def test_css_uses_ob_namespace_and_required_selectors():
     assert ":disabled" in css or "[disabled]" in css
     assert "@media" in css
     assert "hsl(var(--" in css
+
+    assert "grid-template-columns: minmax(0, 1fr) max-content;" not in css
+    snapshot_meta_css = css[css.index(".ob-snapshot-meta {"):css.index(".ob-toolbar {")]
+    assert "grid-template-columns: minmax(0, 1fr) minmax(12rem, 24rem);" in css
+    assert "min-width: 0;" in snapshot_meta_css
+    assert "max-width: 24rem;" in snapshot_meta_css
+    assert ".ob-snapshot-meta dd {" in snapshot_meta_css
+    assert "text-overflow: ellipsis;" in snapshot_meta_css
+    assert "white-space: nowrap;" in snapshot_meta_css
 
     class_selectors = re.findall(r"(^|[\s,{>])\.([a-zA-Z0-9_-]+)", css)
     offenders = sorted({name for _prefix, name in class_selectors if not name.startswith("ob-")})

@@ -702,7 +702,25 @@ def recover_with_credential_pool(
                 or "usage limit reached" in context_message
                 or "usage limit has been reached" in context_message
             )
-        if not has_retried_429 and not usage_limit_reached:
+        # OpenAI Codex sometimes reports a 429 as ``usage_limit_reached`` even
+        # when the live account still has quota. Treat that first hit as a
+        # confirmation retry unless the backend supplied an explicit reset
+        # time. This keeps upgrade diffs small: one narrow policy branch, no
+        # config migration, and the existing second-429 rotation path remains
+        # the hard stop.
+        codex_usage_limit_needs_confirmation = (
+            usage_limit_reached
+            and (getattr(agent, "provider", "") or "") == "openai-codex"
+            and not (error_context or {}).get("reset_at")
+        )
+        if not has_retried_429 and (
+            not usage_limit_reached or codex_usage_limit_needs_confirmation
+        ):
+            if codex_usage_limit_needs_confirmation:
+                _ra().logger.info(
+                    "OpenAI Codex usage_limit_reached without reset_at — "
+                    "retrying same credential once before pool rotation"
+                )
             return False, True
         rotate_status = status_code if status_code is not None else 429
         next_entry = pool.mark_exhausted_and_rotate(status_code=rotate_status, error_context=error_context)

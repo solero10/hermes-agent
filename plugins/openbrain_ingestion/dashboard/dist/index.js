@@ -609,35 +609,53 @@
   function ThoughtCard(props) {
     const card = props.card || {};
     const disposition = card.disposition || "in_progress";
+    const isEvidenceCard = card.current_stage === "extracted";
     const effectiveCode = effectiveStopCode(card);
     const stopCode = disposition === "stopped" ? stopCodeLabel(effectiveCode) : "";
     const stopTitle = stopCodeTitle(effectiveCode);
     const cardSummary = isDuplicateText(card.summary, card.stopped_reason) ? "" : card.summary;
-    return h("article", { className: cx("ob-thought-card", "ob-thought-card--" + stageSlug(disposition), stageClass(card.current_stage)) },
+    const detailLabel = "Open details for " + safeText(card.title || card.lineage_id, "thought");
+    const cardTopics = asArray(card.topics).filter(function (topic) {
+      return !isEvidenceCard || String(topic || "").trim().toLowerCase() !== "extracted evidence";
+    });
+    const cardProps = { className: cx("ob-thought-card", "ob-thought-card--" + stageSlug(disposition), stageClass(card.current_stage), isEvidenceCard ? "ob-thought-card--clickable" : null) };
+    if (isEvidenceCard) {
+      cardProps.role = "button";
+      cardProps.tabIndex = 0;
+      cardProps["aria-label"] = detailLabel;
+      cardProps.onClick = function () { props.onOpenDetail(card); };
+      cardProps.onKeyDown = function (event) {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          props.onOpenDetail(card);
+        }
+      };
+    }
+    return h("article", cardProps,
       h("div", { className: "ob-card-head" },
         h("h3", null, safeText(card.title || card.summary || card.lineage_id, "Untitled thought")),
         h("div", { className: "ob-card-badges" },
           h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(disposition)) }, dispositionLabel(disposition)),
-          stopCode ? h(PolicyTag, {
+          stopCode && !isEvidenceCard ? h(PolicyTag, {
             code: effectiveCode,
             definitions: props.policyDefinitions,
             onShow: props.onPolicyDefinition,
           }) : null
         )
       ),
-      cardSummary ? h("p", { className: "ob-card-summary" }, cardSummary) : null,
-      asArray(card.topics).length ? h("div", { className: "ob-topic-list" }, asArray(card.topics).map(function (topic) {
+      cardSummary && !isEvidenceCard ? h("p", { className: "ob-card-summary" }, cardSummary) : null,
+      cardTopics.length ? h("div", { className: "ob-topic-list" }, cardTopics.map(function (topic) {
         return h("span", { key: topic, className: "ob-topic" }, topic);
       })) : null,
-      card.stopped_reason ? h("p", { className: "ob-card-reason" }, "Stopped: ", card.stopped_reason) : null,
-      card.stop_target_label ? h("p", { className: "ob-card-reason" }, stopTargetText(card)) : null,
-      card.cortexdb_id ? h("p", { className: "ob-card-receipt" }, "CortexDB receipt: ", card.cortexdb_id) : null,
-      h("button", {
+      card.stopped_reason && !isEvidenceCard ? h("p", { className: "ob-card-reason" }, "Stopped: ", card.stopped_reason) : null,
+      card.stop_target_label && !isEvidenceCard ? h("p", { className: "ob-card-reason" }, stopTargetText(card)) : null,
+      card.cortexdb_id && !isEvidenceCard ? h("p", { className: "ob-card-receipt" }, "CortexDB receipt: ", card.cortexdb_id) : null,
+      !isEvidenceCard ? h("button", {
         type: "button",
         className: "ob-detail-link",
         onClick: function () { props.onOpenDetail(card); },
-        "aria-label": "Open details for " + safeText(card.title || card.lineage_id, "thought"),
-      }, "Details →")
+        "aria-label": detailLabel,
+      }, "Details →") : null
     );
   }
 

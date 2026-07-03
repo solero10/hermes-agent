@@ -183,6 +183,67 @@ class TestPoolRotationCycle:
         assert has_retried is True
         pool.mark_exhausted_and_rotate.assert_not_called()
 
+    def test_codex_usage_limit_without_reset_retries_once_no_rotation(self):
+        """Codex usage_limit_reached without reset_at should confirm once."""
+        agent, pool, _ = self._make_agent_with_pool(3)
+        agent.provider = "openai-codex"
+        pool.provider = "openai-codex"
+
+        recovered, has_retried = agent._recover_with_credential_pool(
+            status_code=429,
+            has_retried_429=False,
+            error_context={"reason": "usage_limit_reached"},
+        )
+
+        assert recovered is False
+        assert has_retried is True
+        pool.mark_exhausted_and_rotate.assert_not_called()
+
+    def test_codex_usage_limit_with_reset_rotates_immediately(self):
+        """Codex usage_limit_reached with reset_at is treated as hard quota."""
+        agent, pool, entries = self._make_agent_with_pool(3)
+        agent.provider = "openai-codex"
+        pool.provider = "openai-codex"
+        error_context = {
+            "reason": "usage_limit_reached",
+            "reset_at": "2026-07-03T17:31:00Z",
+        }
+
+        recovered, has_retried = agent._recover_with_credential_pool(
+            status_code=429,
+            has_retried_429=False,
+            error_context=error_context,
+        )
+
+        assert recovered is True
+        assert has_retried is False
+        pool.mark_exhausted_and_rotate.assert_called_once_with(
+            status_code=429,
+            error_context=error_context,
+        )
+        agent._swap_credential.assert_called_once_with(entries[1])
+
+    def test_non_codex_usage_limit_still_rotates_immediately(self):
+        """Keep existing hard usage-limit behavior for non-Codex providers."""
+        agent, pool, entries = self._make_agent_with_pool(3)
+        agent.provider = "openrouter"
+        pool.provider = "openrouter"
+        error_context = {"reason": "usage_limit_reached"}
+
+        recovered, has_retried = agent._recover_with_credential_pool(
+            status_code=429,
+            has_retried_429=False,
+            error_context=error_context,
+        )
+
+        assert recovered is True
+        assert has_retried is False
+        pool.mark_exhausted_and_rotate.assert_called_once_with(
+            status_code=429,
+            error_context=error_context,
+        )
+        agent._swap_credential.assert_called_once_with(entries[1])
+
     def test_second_429_rotates_to_next(self):
         """Second consecutive 429 should rotate to next credential."""
         agent, pool, entries = self._make_agent_with_pool(3)
