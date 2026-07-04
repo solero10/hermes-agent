@@ -51,6 +51,7 @@ HISTORY_OUTLIER_MIN_DEVIATION_PERCENT = 10.0
 HISTORY_OUTLIER_NEIGHBOR_TOLERANCE_PERCENT = 2.0
 HISTORY_OUTLIER_MAX_GAP_SECONDS = 10 * 60
 HISTORY_REFILL_SPIKE_MIN_DEVIATION_PERCENT = 10.0
+PERCENT_PAIR_TOLERANCE = 1.0
 
 WINDOW_PERIOD_SECONDS: dict[str, int] = {
     "five_hour": 5 * 60 * 60,
@@ -341,7 +342,10 @@ def _coerce_percent(value: Any) -> float | None:
     number = _to_float(value)
     if number is None:
         return None
-    if 0.0 <= number <= 1.0:
+    # Husage / wham fields named *_percent are already percentage units.
+    # Treat fractional values below 1.0 as legacy ratio input, but keep exact
+    # 1.0 as 1% rather than silently turning Dad's weekly 1% into 100%.
+    if 0.0 <= number < 1.0:
         number *= 100.0
     return max(0.0, min(100.0, number))
 
@@ -350,6 +354,27 @@ def _round_percent(value: float | None) -> float | None:
     if value is None:
         return None
     return round(max(0.0, min(100.0, value)), 3)
+
+
+def _reconcile_used_remaining(
+    used: float | None,
+    remaining: float | None,
+) -> tuple[float | None, float | None]:
+    """Keep paired percent fields internally consistent before charting.
+
+    Old cache rows can contain ``used_percent=99`` plus
+    ``remaining_percent=100`` from the previous exact-1.0 coercion bug.  Prefer
+    ``used_percent`` when both fields disagree because remaining is directly
+    derivable from it and the wrapper sources it from wham/usage.
+    """
+    if used is not None and remaining is not None:
+        if abs((used + remaining) - 100.0) > PERCENT_PAIR_TOLERANCE:
+            remaining = 100.0 - used
+    elif remaining is None and used is not None:
+        remaining = 100.0 - used
+    elif used is None and remaining is not None:
+        used = 100.0 - remaining
+    return _round_percent(used), _round_percent(remaining)
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -609,10 +634,7 @@ def _normalize_window(raw_window: dict[str, Any], now_dt: datetime) -> dict[str,
     remaining = _coerce_percent(
         _first_present(clean, "remaining_percent", "remainingPct", "remaining_pct", "remaining")
     )
-    if remaining is None and used is not None:
-        remaining = 100.0 - used
-    if used is None and remaining is not None:
-        used = 100.0 - remaining
+    used, remaining = _reconcile_used_remaining(used, remaining)
 
     reset_dt = parse_dt(_first_present(clean, "reset_at", "resets_at", "resetAt", "reset"))
     reset_at = _iso(reset_dt)
@@ -962,10 +984,14 @@ def _history_row_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             continue
         windows_out: dict[str, Any] = {}
         for key, window in _window_map(account).items():
+            used, remaining = _reconcile_used_remaining(
+                _coerce_percent(window.get("used_percent")),
+                _coerce_percent(window.get("remaining_percent")),
+            )
             windows_out[key] = {
                 "key": key,
-                "used_percent": window.get("used_percent"),
-                "remaining_percent": window.get("remaining_percent"),
+                "used_percent": used,
+                "remaining_percent": remaining,
                 "reset_at": window.get("reset_at"),
                 "period_seconds": window.get("period_seconds"),
                 "pace_state": window.get("pace_state"),
@@ -1096,10 +1122,14 @@ def _history_points_by_account_window(rows: list[dict[str, Any]]) -> dict[tuple[
             if not account_id:
                 continue
             for key, window in _window_map(account).items():
+                used, remaining = _reconcile_used_remaining(
+                    _coerce_percent(window.get("used_percent")),
+                    _coerce_percent(window.get("remaining_percent")),
+                )
                 point = {
                     "generated_at": generated_at,
-                    "used_percent": window.get("used_percent"),
-                    "remaining_percent": window.get("remaining_percent"),
+                    "used_percent": used,
+                    "remaining_percent": remaining,
                     "reset_at": window.get("reset_at"),
                     "period_seconds": window.get("period_seconds"),
                     "pace_state": window.get("pace_state"),

@@ -90,6 +90,7 @@ def test_frontend_declares_all_required_components_before_registration():
         "FormationGateEvents",
         "TraceTextBlock",
         "TraceKeyValueList",
+        "OriginalShapedThoughtPanel",
         "ImportedReceipt",
         "StoppedReceipt",
         "RelatedMemories",
@@ -205,6 +206,8 @@ def test_board_detail_and_state_strings_are_present():
         "Additional context consulted",
         "Exact LLM input sent to shaping step",
         "Output produced by shaping step",
+        "Original shaped thought",
+        "Candidate text produced at the Shaped step.",
         "Gate decisions",
         "traceOutputTitleDistinct(trace, thought)",
         "formationTraceHasContent(trace)",
@@ -217,7 +220,8 @@ def test_board_detail_and_state_strings_are_present():
         "Used by Thought candidates",
         "Policy decision",
         "Candidate text reviewed",
-        "Dedupe evidence",
+        "Dedupe framework",
+        "Dedupe-column clicks open this framework view.",
         "Semantic dedupe evidence",
         "Ready package",
         "Import payload preview",
@@ -334,6 +338,12 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
     assert 'return "used";' in frontend
     assert "ob-evidence-mini-label" not in frontend
     assert "candidateCardsForRow(row)" in frontend
+    assert "function candidateIdentityKey(card)" in frontend
+    assert 'policyPassedForCard(card)' in frontend
+    assert 'topics.includes("policy reviewed")' in frontend
+    assert "function dedupeDecisionForCard(card)" in frontend
+    assert 'dedupeDecision === "unique"' in frontend
+    assert 'dedupeDecision === "duplicate"' in frontend
     assert "Object.keys(columns).forEach(function (stageId)" in frontend
     assert 'stageId !== "extracted"' in frontend
 
@@ -347,6 +357,9 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
     ):
         assert selector in css
     assert "-webkit-line-clamp: 2;" in css
+    assert "line-height: 1.34;" in css
+    assert "min-height: calc(2 * 1.34em);" in css
+    assert "min-height: 4.85rem;" in css
     assert "white-space: nowrap;" not in css[css.index(".ob-evidence-mini-title {"):css.index(".ob-candidate-table-wrap {")]
     assert "white-space: nowrap;" not in css[css.index(".ob-candidate-title-button {"):css.index(".ob-candidate-title-button:hover")]
     assert "position: sticky;" in css
@@ -370,6 +383,25 @@ def test_candidate_table_detail_cells_pass_selected_detail_stage_to_modal():
     assert 'props.onOpenDetail(card, "tags");' in frontend
     assert 'props.onOpenDetail(card, "shaped");' in frontend
     assert "props.onOpenDetail(card, stage.id);" in frontend
+    assert 'policyResult === "skipped"' in frontend
+    assert 'return "Skipped";' in frontend
+    assert 'dedupeDecision === "duplicate"' in frontend
+    assert 'return "duplicate";' in frontend
+    assert 'showCandidateStopTag' in frontend
+    assert 'effectiveCode === "duplicate" || card.stop_stage_id === "deduped"' in frontend
+    assert "function OriginalShapedThoughtPanel" in frontend
+    assert "function formationTraceForThought" in frontend
+    assert "function originalShapedThoughtText" in frontend
+    assert "h(OriginalShapedThoughtPanel, { thought: thought, trace: trace })" in frontend
+    shaped_panel = frontend[frontend.index("function ShapedFormationPanel"):frontend.index("function PolicyDecisionPanel")]
+    assert "h(FormationTrace" not in shaped_panel
+    assert "trace && trace.llm_output_text" in frontend
+    assert "thought && thought.summary" not in frontend[frontend.index("function originalShapedThoughtText"):frontend.index("function OriginalShapedThoughtPanel")]
+    assert "const isOriginalShapedView = selectedStage === \"shaped\";" in frontend
+    assert "!isOriginalShapedView ? h(DetailIDs, { thought: thought }) : null" in frontend
+    assert "!isOriginalShapedView ? h(LineageTimeline, { thought: thought }) : null" in frontend
+    assert "!isOriginalShapedView ? h(RelatedMemories, { thought: thought }) : null" in frontend
+    assert "showGateEvents ? h(FormationGateEvents, { trace: trace }) : null" in frontend
 
 
 def test_database_fields_are_wired_into_detail_bottom_and_render_field_payloads():
@@ -424,6 +456,8 @@ def test_css_uses_ob_namespace_and_required_selectors():
         ".ob-stage-detail-panel",
         ".ob-stage-detail-panel--tags",
         ".ob-stage-checklist",
+        ".ob-original-shaped-thought",
+        ".ob-original-shaped-text",
         ".ob-database-fields",
         ".ob-db-field-row",
         ".ob-source-summary-strip",

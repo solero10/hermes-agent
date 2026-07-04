@@ -1513,6 +1513,15 @@ def _card(thought: Any, source_unit_id: str) -> dict[str, Any]:
         "stopped_reason": t.get("stopped_reason"),
         "matched_memory_id": t.get("matched_memory_id"),
     }
+    stage_detail = t.get("stage_detail") if isinstance(t.get("stage_detail"), dict) else {}
+    policy_detail = stage_detail.get("policy") if isinstance(stage_detail.get("policy"), dict) else {}
+    policy_result = policy_detail.get("result")
+    if policy_result:
+        card["policy_result"] = policy_result
+    dedupe_detail = stage_detail.get("deduped") if isinstance(stage_detail.get("deduped"), dict) else {}
+    dedupe_decision = dedupe_detail.get("decision")
+    if dedupe_decision:
+        card["dedupe_decision"] = dedupe_decision
     cortexdb_id = _receipt_id(t)
     if cortexdb_id:
         card["cortexdb_id"] = cortexdb_id

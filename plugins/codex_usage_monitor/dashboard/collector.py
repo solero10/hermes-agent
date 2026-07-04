@@ -24,6 +24,7 @@ _WINDOW_LABELS = {
     "weekly": "Weekly",
     "secondary_window": "Weekly",
 }
+_PERCENT_PAIR_TOLERANCE = 1.0
 
 
 def _iso(dt: datetime) -> str:
@@ -51,12 +52,22 @@ def _parse_dt(value: Any) -> datetime | None:
 def _remaining_percent(window: Any) -> float | None:
     if not isinstance(window, dict):
         return None
+    remaining: float | None = None
     value = window.get("remaining_percent")
     if isinstance(value, (int, float)):
-        return float(value)
+        remaining = float(value)
     used = window.get("used_percent")
+    used_value: float | None = None
     if isinstance(used, (int, float)):
-        return 100.0 - float(used)
+        used_value = float(used)
+    if used_value is not None and remaining is not None:
+        if abs((used_value + remaining) - 100.0) > _PERCENT_PAIR_TOLERANCE:
+            return 100.0 - used_value
+        return remaining
+    if remaining is not None:
+        return remaining
+    if used_value is not None:
+        return 100.0 - used_value
     return None
 
 

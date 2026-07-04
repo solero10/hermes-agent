@@ -307,6 +307,66 @@ def test_normalize_strips_token_fields_and_maps_windows(plugin_api):
     assert weekly_exhausted["windows"]["five_hour"].get("is_exhausted") is None
 
 
+def test_one_percent_remaining_is_not_normalized_to_one_hundred(plugin_api):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    raw = _raw_snapshot(now)
+    raw["accounts"][0]["windows"][1]["remaining_percent"] = 1.0
+    raw["accounts"][0]["windows"][1]["used_percent"] = 99
+
+    weekly = plugin_api.normalize_snapshot(raw, now=now)["accounts"][0]["windows"]["weekly"]
+
+    assert weekly["remaining_percent"] == 1.0
+    assert weekly["used_percent"] == 99.0
+
+
+def test_inconsistent_cached_percent_pair_is_repaired_for_history(plugin_api):
+    period_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    reset_at = period_start + timedelta(days=7)
+    rows = [
+        {
+            "generated_at": (period_start + timedelta(minutes=10)).isoformat(),
+            "accounts": [
+                {
+                    "id": "dads-chatgpt",
+                    "windows": {
+                        "weekly": {
+                            "remaining_percent": 100.0,
+                            "used_percent": 99.0,
+                            "reset_at": reset_at.isoformat(),
+                            "period_seconds": 7 * 24 * 60 * 60,
+                        }
+                    },
+                }
+            ],
+        }
+    ]
+
+    attached = plugin_api._attach_history_to_accounts(
+        [
+            {
+                "id": "dads-chatgpt",
+                "windows": {
+                    "weekly": {
+                        "reset_at": reset_at.isoformat().replace("+00:00", "Z"),
+                        "period_seconds": 7 * 24 * 60 * 60,
+                        "remaining_percent": 1.0,
+                        "history": [],
+                    }
+                },
+            }
+        ],
+        rows,
+        history_points=20,
+    )
+
+    history = attached[0]["windows"]["weekly"]["history"]
+    assert history[-1]["remaining_percent"] == 1.0
+    assert history[-1]["used_percent"] == 99.0
+    assert plugin_api.collector_core._remaining_percent(
+        {"remaining_percent": 100.0, "used_percent": 99.0}
+    ) == 1.0
+
+
 def _hermes_event(
     *,
     account_match_keys: list[str],

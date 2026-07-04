@@ -291,13 +291,29 @@
 
   function candidateCardsForRow(row) {
     const columns = (row && row.columns) || {};
-    const cards = [];
+    const cardsByCandidate = {};
     Object.keys(columns).forEach(function (stageId) {
       if (stageId !== "extracted") {
-        asArray(columns[stageId]).forEach(function (card) { cards.push(card); });
+        asArray(columns[stageId]).forEach(function (card) {
+          const key = candidateIdentityKey(card);
+          const existing = cardsByCandidate[key];
+          if (!existing || stageIndex(card.current_stage) >= stageIndex(existing.current_stage)) {
+            cardsByCandidate[key] = card;
+          }
+        });
       }
     });
-    return cards;
+    return Object.keys(cardsByCandidate).map(function (key) { return cardsByCandidate[key]; });
+  }
+
+  function candidateIdentityKey(card) {
+    const lineage = String((card && (card.lineage_id || card.id)) || "");
+    const lineageMatch = lineage.match(/^(?:shape|policy):(.+)$/);
+    if (lineageMatch) return lineageMatch[1];
+    const candidateId = String((card && card.candidate_id) || "");
+    const candidateMatch = candidateId.match(/^(.*?)-(?:shaped|policy)-(\d+)$/);
+    if (candidateMatch) return candidateMatch[1] + "-" + candidateMatch[2];
+    return candidateId || lineage || safeText(card && card.title, "candidate");
   }
 
   function stageIndex(stageId) {
@@ -310,8 +326,18 @@
     const disposition = card && card.disposition ? card.disposition : "in_progress";
     const targetIndex = stageIndex(stageId);
     const currentIndex = stageIndex(currentStage);
+    const policyResult = policyResultForCard(card);
+    const dedupeDecision = dedupeDecisionForCard(card);
 
     if (stageId === "tags") return "metadata";
+    if (stageId === "policy" && policyResult === "skipped") return "skipped";
+    if (stageId === "policy" && policyPassedForCard(card)) return "complete";
+    if (stageId === "deduped") {
+      if (dedupeDecision === "unique") return "complete";
+      if (dedupeDecision === "duplicate") return "duplicate";
+      if (dedupeDecision === "review_required") return "needs_review";
+      if (dedupeDecision === "not_run") return "not_reached";
+    }
     if (stageId === "cortexdb") {
       return disposition === "imported" && card.cortexdb_id ? "imported" : "not_imported";
     }
@@ -325,6 +351,15 @@
   function candidateStageLabel(card, stageId) {
     const status = candidateStageStatus(card, stageId);
     if (stageId === "tags") return "Tags";
+    if (stageId === "policy" && policyResultForCard(card) === "skipped") return "Skipped";
+    if (stageId === "policy" && policyPassedForCard(card)) return "Passed";
+    if (stageId === "deduped") {
+      const dedupeDecision = dedupeDecisionForCard(card);
+      if (dedupeDecision === "unique") return "Unique";
+      if (dedupeDecision === "duplicate") return "Duplicate";
+      if (dedupeDecision === "review_required") return "Review";
+      if (dedupeDecision === "not_run") return "Not run";
+    }
     if (status === "imported") return "Imported";
     if (status === "not_imported") return "Not imported";
     if (status === "complete") return "Complete";
@@ -332,6 +367,20 @@
     if (status === "stopped") return "Stopped";
     if (status === "needs_review") return "Needs review";
     return "Not reached";
+  }
+
+  function policyResultForCard(card) {
+    return safeText(card && card.policy_result, "").trim().toLowerCase();
+  }
+
+  function policyPassedForCard(card) {
+    if (policyResultForCard(card) === "passed") return true;
+    const topics = asArray(card && card.topics).map(function (topic) { return String(topic || "").trim().toLowerCase(); });
+    return topics.includes("policy reviewed") || topics.includes("ready for semantic dedupe") || /^policy passed\b/i.test(safeText(card && card.summary, ""));
+  }
+
+  function dedupeDecisionForCard(card) {
+    return safeText(card && card.dedupe_decision, "").trim().toLowerCase();
   }
 
   function errorMessage(error) {
@@ -754,6 +803,7 @@
   function CandidateTableRow(props) {
     const card = props.card || {};
     const effectiveCode = effectiveStopCode(card);
+    const showCandidateStopTag = card.disposition === "stopped" && effectiveCode && !(effectiveCode === "duplicate" || card.stop_stage_id === "deduped");
     return h("tr", { className: cx("ob-candidate-row", "ob-candidate-row--" + stageSlug(card.disposition || "in_progress")) },
       h("th", { scope: "row", className: "ob-candidate-title-cell" },
         h("button", {
@@ -762,7 +812,7 @@
           onClick: function () { props.onOpenDetail(card, "shaped"); },
           "aria-label": "Open Thought candidate details for " + safeText(card.title || card.lineage_id, "candidate"),
         }, safeText(card.title || card.summary || card.lineage_id, "Untitled candidate")),
-        card.disposition === "stopped" && effectiveCode ? h("div", { className: "ob-candidate-subline" },
+        showCandidateStopTag ? h("div", { className: "ob-candidate-subline" },
           h(PolicyTag, {
             code: effectiveCode,
             definitions: props.policyDefinitions,
@@ -970,6 +1020,39 @@
     return outputTitle && outputTitle !== currentTitle;
   }
 
+  function formationTraceForThought(thought) {
+    const stageTrace = stageDetailFor(thought, "shaped");
+    return formationTraceHasContent(stageTrace) ? stageTrace : ((thought && thought.formation_trace) || null);
+  }
+
+  function originalShapedThoughtText(thought, trace) {
+    const candidates = [
+      trace && trace.llm_output_text,
+      trace && trace.output_text,
+      trace && trace.shaped_text,
+      thought && thought.original_shaped_text,
+      thought && thought.shaped_text,
+    ];
+    for (let index = 0; index < candidates.length; index += 1) {
+      const value = String(candidates[index] || "").trim();
+      if (value) return value;
+    }
+    return "";
+  }
+
+  function OriginalShapedThoughtPanel(props) {
+    const thought = props.thought || {};
+    const trace = props.trace || formationTraceForThought(thought) || {};
+    const shapedTitle = String((trace && trace.output_title) || thought.title || "").trim();
+    const shapedText = originalShapedThoughtText(thought, trace);
+    return h("section", { className: "ob-original-shaped-thought" },
+      h("div", { className: "ob-section-heading" }, h("h4", null, "Original shaped thought")),
+      h("p", { className: "ob-stage-detail-note" }, "Candidate text produced at the Shaped step."),
+      shapedTitle ? h("p", { className: "ob-original-shaped-title" }, h("strong", null, "Shaped title"), ": ", safeText(shapedTitle)) : null,
+      shapedText ? h("pre", { className: "ob-original-shaped-text" }, shapedText) : h(StageEmpty, null, "No original shaped thought text recorded for this candidate.")
+    );
+  }
+
   function formationTraceHasContent(trace) {
     if (!trace || typeof trace !== "object") return false;
     return Object.keys(trace).some(function (key) {
@@ -1058,9 +1141,9 @@
 
   function FormationTrace(props) {
     const thought = props.thought || {};
-    const stageTrace = stageDetailFor(thought, "shaped");
-    const trace = formationTraceHasContent(stageTrace) ? stageTrace : (thought.formation_trace || null);
+    const trace = formationTraceForThought(thought);
     const hasTrace = formationTraceHasContent(trace);
+    const showGateEvents = props.showGateEvents !== false;
     const primaryIds = hasTrace ? asArray(trace.primary_lineage_ids) : [];
     const contextItems = hasTrace ? asArray(trace.additional_context_used) : [];
     const contextLabels = contextItems.map(traceContextLabel).filter(Boolean).join(", ");
@@ -1105,7 +1188,7 @@
           trace.suggested_type ? h("p", null, h("strong", null, "Suggested type"), ": ", safeText(trace.suggested_type)) : null,
           trace.merge_note ? h("p", null, h("strong", null, "Merge note"), ": ", safeText(trace.merge_note)) : null
         ),
-        h(FormationGateEvents, { trace: trace }),
+        showGateEvents ? h(FormationGateEvents, { trace: trace }) : null,
         h("div", { className: "ob-readonly-actions" },
           h(ReadOnlyButton, null, "Copy trace summary"),
           h(ReadOnlyButton, null, "Copy LLM input"),
@@ -1323,8 +1406,10 @@
   }
 
   function ShapedFormationPanel(props) {
+    const thought = props.thought || {};
+    const trace = formationTraceForThought(thought);
     return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--shaped" },
-      h(FormationTrace, { thought: props.thought })
+      h(OriginalShapedThoughtPanel, { thought: thought, trace: trace })
     );
   }
 
@@ -1361,21 +1446,26 @@
     const thought = props.thought || {};
     const detail = stageDetailFor(thought, "deduped");
     const related = asArray(thought.related_memories)[0] || {};
-    const hasDetail = stageDetailHasContent(detail, ["method", "decision"]) || thought.matched_memory_id || related.id;
+    const hasDetail = stageDetailHasContent(detail) || thought.matched_memory_id || related.id;
+    const exactMatch = detail.exact_match === true ? "Yes" : detail.exact_match === false ? "No" : undefined;
     return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--deduped" },
-      h("div", { className: "ob-section-heading" }, h("h3", null, "Dedupe evidence")),
-      h("p", { className: "ob-stage-detail-note" }, "Is this new, duplicate, or merged into something else?"),
+      h("div", { className: "ob-section-heading" }, h("h3", null, "Dedupe framework")),
+      h("p", { className: "ob-stage-detail-note" }, "Semantic pre-search and exact-fingerprint result for this Candidate. Dedupe-column clicks open this framework view."),
       hasDetail ? h(React.Fragment, null,
         h(StageKeyValueList, { rows: [
+          { label: "Framework", value: detail.framework || "CortexDB/OpenBrain semantic pre-search" },
           { label: "Dedupe decision", value: detail.decision },
           { label: "Dedupe method", value: detail.method },
           { label: "Matched memory", value: detail.matched_memory_title || detail.matched_memory_id || thought.matched_memory_id || related.title || related.id },
           { label: "Similarity score", value: detail.similarity_score !== undefined ? detail.similarity_score : related.score },
-          { label: "Exact fingerprint", value: detail.content_fingerprint },
-          { label: "Merge note", value: detail.merge_note || thought.stopped_reason },
+          { label: "Exact match", value: exactMatch },
+          { label: "Content fingerprint", value: detail.content_fingerprint },
           { label: "Semantic dedupe evidence", value: detail.evidence_note },
+          { label: "Merge / review note", value: detail.merge_note || thought.stopped_reason },
+          { label: "Decided at", value: detail.decided_at && formatDate(detail.decided_at) },
+          { label: "Decided by", value: detail.decided_by },
         ] })
-      ) : h(StageEmpty, null, "No semantic dedupe evidence recorded for this card.")
+      ) : h(StageEmpty, null, "No dedupe framework result recorded for this card.")
     );
   }
 
@@ -1459,8 +1549,10 @@
   function ThoughtDetail(props) {
     const thought = props.thought;
     const dialogTitleId = "ob-detail-title";
+    const selectedStage = props.selectedDetailStage || (thought && thought.current_stage);
+    const isOriginalShapedView = selectedStage === "shaped";
     const disposition = thought && thought.disposition ? thought.disposition : "loading";
-    const detailSummary = thought && isDuplicateText(thought.summary, thought.stopped_reason) ? "" : thought && thought.summary;
+    const detailSummary = !isOriginalShapedView && thought && isDuplicateText(thought.summary, thought.stopped_reason) ? "" : !isOriginalShapedView && thought && thought.summary;
     const detailStopCode = thought ? effectiveStopCode(thought) : "";
     const detailStopLabel = stopCodeLabel(detailStopCode);
     const detailStopTitle = stopCodeTitle(detailStopCode);
@@ -1473,7 +1565,7 @@
       },
         h("header", { className: "ob-detail-header" },
           h("div", null,
-            h("div", { className: "ob-kicker" }, "Thought detail"),
+            h("div", { className: "ob-kicker" }, isOriginalShapedView ? "Original shaped thought" : "Thought detail"),
             h("h2", { id: dialogTitleId }, thought ? safeText(thought.title || thought.summary || thought.lineage_id, "OpenBrain thought") : "Loading")
           ),
           h("button", { type: "button", className: "ob-close", onClick: props.onClose, "aria-label": "Close thought detail" }, "×")
@@ -1481,7 +1573,7 @@
         props.loading ? h(StatePanel, { tone: "loading", title: "Loading", message: "Loading thought detail…" }) : null,
         props.error ? h(StatePanel, { tone: "error", role: "alert", title: "Unable to load thought detail", message: "The detail endpoint returned an error.", detail: props.error }) : null,
         !props.loading && !props.error && thought ? h("div", { className: "ob-detail-body" },
-          h("div", { className: "ob-detail-summary" },
+          !isOriginalShapedView ? h("div", { className: "ob-detail-summary" },
             h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(thought.disposition)) }, dispositionLabel(thought.disposition)),
             h("span", { className: cx("ob-badge", stageClass(thought.current_stage)) }, stageLabel(thought.current_stage)),
             thought.disposition === "stopped" && detailStopLabel ? h(PolicyTag, {
@@ -1490,25 +1582,25 @@
               onShow: props.onPolicyDefinition,
             }) : null,
             thought.current_stage === "ready_for_cortexdb" ? h("span", { className: "ob-ready-label" }, "Ready for CortexDB") : null
-          ),
-          h(DetailIDs, { thought: thought }),
+          ) : null,
+          !isOriginalShapedView ? h(DetailIDs, { thought: thought }) : null,
           detailSummary ? h("p", { className: "ob-detail-copy" }, detailSummary) : null,
-          thought.source_snippet || thought.quote || thought.raw_text ? h("blockquote", { className: "ob-source-snippet" }, thought.source_snippet || thought.quote || thought.raw_text) : null,
+          !isOriginalShapedView && (thought.source_snippet || thought.quote || thought.raw_text) ? h("blockquote", { className: "ob-source-snippet" }, thought.source_snippet || thought.quote || thought.raw_text) : null,
           h(StageSpecificDetailPanel, {
             thought: thought,
             selectedStage: props.selectedDetailStage,
             policyDefinitions: props.policyDefinitions,
             onPolicyDefinition: props.onPolicyDefinition,
           }),
-          h(SourceContext, { thought: thought }),
-          h(LineageTimeline, { thought: thought }),
-          h("div", { className: "ob-readonly-actions" },
+          !isOriginalShapedView ? h(SourceContext, { thought: thought }) : null,
+          !isOriginalShapedView ? h(LineageTimeline, { thought: thought }) : null,
+          !isOriginalShapedView ? h("div", { className: "ob-readonly-actions" },
             h(ReadOnlyButton, null, "Reopen later"),
             h(ReadOnlyButton, null, "Promote later"),
             h(ReadOnlyButton, null, "Mark for review later")
-          ),
-          h(RelatedMemories, { thought: thought }),
-          h(DatabaseFields, { thought: thought })
+          ) : null,
+          !isOriginalShapedView ? h(RelatedMemories, { thought: thought }) : null,
+          !isOriginalShapedView ? h(DatabaseFields, { thought: thought }) : null
         ) : null
       )
     );

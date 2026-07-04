@@ -109,6 +109,13 @@ def hermes_home(tmp_path, monkeypatch):
                         "topics": ["configuration"],
                         "source_snippet": "Start with a small configurable path.",
                         "formation_trace": {},
+                        "stage_detail": {
+                            "deduped": {
+                                "method": "semantic",
+                                "decision": "duplicate",
+                                "matched_memory_id": "thought_existing_91c",
+                            }
+                        },
                         "related_memories": [
                             {"id": "thought_existing_91c", "title": "Start narrow", "score": 0.82}
                         ],
@@ -175,6 +182,12 @@ def hermes_home(tmp_path, monkeypatch):
                             "gate_events": [
                                 {"stage": "policy", "status": "pending", "decision": "not_run"}
                             ],
+                        },
+                        "stage_detail": {
+                            "policy": {
+                                "result": "passed",
+                                "reason": "Fixture policy check passed.",
+                            }
                         },
                     },
                     {
@@ -290,7 +303,9 @@ def test_board_groups_thoughts_by_current_stage_once_and_splits_counts(client):
     assert all_card_ids.count("lineage_ready_1") == 1
     assert first["columns"]["cortexdb"][0]["id"] == "lineage_demo_7f3a"
     assert first["columns"]["deduped"][0]["id"] == "lineage_dup_1"
+    assert first["columns"]["deduped"][0]["dedupe_decision"] == "duplicate"
     assert first["columns"]["ready_for_cortexdb"][0]["id"] == "lineage_ready_1"
+    assert first["columns"]["ready_for_cortexdb"][0]["policy_result"] == "passed"
 
     for card in _all_cards(payload):
         assert card["source_unit_id"]
