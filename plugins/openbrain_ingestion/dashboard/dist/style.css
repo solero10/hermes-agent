@@ -501,6 +501,9 @@
 }
 
 .ob-candidate-subline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
   margin-top: 0.24rem;
 }
 
@@ -737,6 +740,7 @@
 
 .ob-topic,
 .ob-badge,
+.ob-technique-pill,
 .ob-ready-label,
 .ob-score {
   display: inline-flex;
@@ -747,6 +751,18 @@
   font-size: 0.68rem;
   line-height: 1;
   padding: 0.2rem 0.42rem;
+}
+
+.ob-technique-pill {
+  border-color: color-mix(in srgb, var(--ob-accent) 28%, var(--ob-border));
+  background: color-mix(in srgb, var(--ob-accent) 6%, transparent);
+  color: color-mix(in srgb, var(--ob-muted) 84%, var(--ob-accent));
+  font-weight: 620;
+  letter-spacing: 0.01em;
+}
+
+.ob-technique-pill--skill {
+  border-style: dashed;
 }
 
 .ob-badge--imported {

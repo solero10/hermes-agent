@@ -3,10 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import secrets
 import shutil
 import subprocess
-from pathlib import Path
 from typing import Any
 
 from tools.registry import registry
@@ -106,7 +104,6 @@ def _run_helper_json(
     timeout: int = 30,
     input_text: str | None = None,
     secrets: list[str] | None = None,
-    env: dict[str, str] | None = None,
 ) -> str:
     """Run hermes-bitwarden-safe and return sanitized JSON for LLM consumption."""
     secrets = secrets or []
@@ -117,7 +114,6 @@ def _run_helper_json(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=env,
         )
     except Exception as e:
         return _safe_json(
@@ -173,79 +169,6 @@ def _helper_succeeded(result_json: str) -> bool:
     except Exception:
         return False
     return bool(isinstance(result, dict) and result.get("success"))
-
-
-def _create_grant_after_local_approval(alias: str, domain: str, profile: str) -> str:
-    """Use Hermes local secret-capture UI as the trusted approval surface.
-
-    The random code is shown only in the local prompt. The typed response is
-    returned to this trusted tool handler, not to the model. Only after a match
-    do we create the one-use grant for hermes-bitwarden-safe.
-    """
-
-    challenge = secrets.token_hex(3).upper()
-    try:
-        from tools.skills_tool import capture_transient_secret
-
-        capture = capture_transient_secret(
-            "HBS_WEBSITE_LOGIN_APPROVAL_CODE",
-            (
-                f"Approve Bitwarden login-only use for {alias} on {domain}. "
-                f"Type this code exactly to approve: {challenge}"
-            ),
-            {
-                "purpose": "bitwarden_login_approval",
-                "alias": alias,
-                "domain": domain,
-                "profile": profile,
-                "help": "This creates a short-lived one-use login-only grant. It does not approve financial changes.",
-                "transient": True,
-            },
-        )
-    except Exception as e:
-        return _safe_json(
-            {
-                "success": False,
-                "error": f"local approval capture failed: {_redact(e, [])}",
-                "secret_exposed_to_llm": False,
-            }
-        )
-
-    if not isinstance(capture, dict) or not capture.get("success") or capture.get("skipped"):
-        return _safe_json(
-            {
-                "success": False,
-                "error": "local approval was cancelled or is unavailable",
-                "secret_exposed_to_llm": False,
-            }
-        )
-    response = str(capture.get("value") or "").strip().upper().replace(" ", "")
-    if response != challenge:
-        return _safe_json(
-            {
-                "success": False,
-                "error": "local approval code did not match",
-                "secret_exposed_to_llm": False,
-            },
-            [challenge, response],
-        )
-
-    helper_src = Path.home() / ".local" / "share" / "hermes-bitwarden-safe" / "src"
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(helper_src) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    script = r'''
-import json, sys
-from hermes_bitwarden_safe.audit import write_audit
-from hermes_bitwarden_safe.config import get_alias, validate_request
-from hermes_bitwarden_safe.grants import create_grant
-alias, domain, profile = sys.argv[1], sys.argv[2], sys.argv[3]
-policy = get_alias(alias)
-validate_request(policy, domain, "login_only", profile)
-grant = create_grant(alias, domain, "login_only", 300, created_by="hermes_secret_capture")
-write_audit("grant_created", alias=alias, domain=domain, operation="login_only", result="approved", method="hermes_secret_capture")
-print(json.dumps({"success": True, "operation": "approval_grant_created", "alias": alias, "domain": domain, "approved_operation": "login_only", "expires_at": grant.expires_at, "created_by": grant.created_by, "secret_exposed_to_llm": False}, sort_keys=True))
-'''
-    return _run_helper_json([shutil.which("python3") or "python3", "-c", script, alias, domain, profile], timeout=30, env=env)
 
 
 def _extract_aliases(data: dict[str, Any]) -> list[str]:
@@ -355,17 +278,7 @@ def bitwarden_prepare_website_login(
     ]
     if dry_run:
         cmd.append("--dry-run")
-        return _run_helper_json(cmd, timeout=60)
-
-    # Real credential use requires Ken's trusted local approval first. In CLI/TUI
-    # sessions, use Hermes' local transient secret-capture UI for that approval;
-    # then let hermes-bitwarden-safe consume the resulting one-use grant and fill
-    # the login form through local CDP without returning the password.
-    approval = _create_grant_after_local_approval(alias, domain, profile)
-    if not _helper_succeeded(approval):
-        return approval
-    cmd.append("--fill-browser")
-    return _run_helper_json(cmd, timeout=180)
+    return _run_helper_json(cmd, timeout=60)
 
 
 def bitwarden_set_website_password(alias: str, domain: str) -> str:

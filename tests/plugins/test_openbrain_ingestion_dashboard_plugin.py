@@ -138,6 +138,7 @@ def hermes_home(tmp_path, monkeypatch):
                         "formation_trace": {
                             "version": 1,
                             "stage": "shaped",
+                            "generation_technique": "skills/meeting-synthesis",
                             "created_at": "2026-06-21T04:40:00Z",
                             "created_by": {"kind": "llm", "provider": "openai-codex", "model": "gpt-5.5"},
                             "primary_lineage_ids": ["pan:test-01", "pan:test-02"],
@@ -315,6 +316,35 @@ def test_board_groups_thoughts_by_current_stage_once_and_splits_counts(client):
     for card in _all_cards(payload):
         assert card["source_unit_id"]
         assert card["lineage_id"]
+
+
+def test_board_and_detail_expose_generation_technique_without_field_lookup(client):
+    board = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
+    first = next(row for row in board["rows"] if row["id"] == "transcript-a")
+
+    imported_card = first["columns"]["cortexdb"][0]
+    assert imported_card["generation_technique"] == {
+        "id": "panning-for-gold",
+        "label": "Panning for Gold",
+        "kind": "recipe",
+        "short_label": "Panning",
+    }
+
+    ready_card = first["columns"]["ready_for_cortexdb"][0]
+    assert ready_card["generation_technique"] == {
+        "id": "meeting-synthesis",
+        "label": "Meeting Synthesis",
+        "kind": "skill",
+        "short_label": "Meeting",
+    }
+
+    detail = client.get(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_ready_1"
+    ).json()["thought"]
+    assert detail["generation_technique"]["id"] == "meeting-synthesis"
+    assert detail["formation_trace"]["generation_technique"]["short_label"] == "Meeting"
+    db_fields = {field["name"]: field for field in detail["database_fields"]}
+    assert db_fields["metadata"]["value"]["generation_technique"]["kind"] == "skill"
 
 
 def test_board_filter_imported_prunes_cards_and_excludes_zero_rows(client):

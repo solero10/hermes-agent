@@ -137,8 +137,8 @@ def test_manifest_registers_expected_dashboard_plugin():
         "icon": "Activity",
         "version": "0.1.0",
         "tab": {"path": "/codex-usage", "position": "after:analytics"},
-        "entry": "dist/index.js?v=20260703-hermes-sessions-v1",
-        "css": "dist/style.css?v=20260703-hermes-sessions-v1",
+        "entry": "dist/index.js?v=20260704-session-request-grouping-v1",
+        "css": "dist/style.css?v=20260704-session-request-grouping-v1",
         "api": "plugin_api.py",
     }
 
@@ -374,6 +374,9 @@ def _hermes_event(
     session_id: str = "session-123",
     title_snapshot: str = "Fallback title",
     status: str = "in_flight",
+    started_at: str = "2026-01-01T00:00:00Z",
+    updated_at: str = "2026-01-01T00:00:02Z",
+    completed_at: str | None = None,
 ) -> dict[str, Any]:
     return {
         "provider": "openai-codex",
@@ -386,8 +389,9 @@ def _hermes_event(
         "fallback_match_keys": fallback_match_keys or [],
         "match_confidence": "label",
         "status": status,
-        "started_at": "2026-01-01T00:00:00Z",
-        "updated_at": "2026-01-01T00:00:02Z",
+        "started_at": started_at,
+        "updated_at": updated_at,
+        "completed_at": completed_at,
     }
 
 
@@ -408,6 +412,63 @@ def test_hermes_session_attribution_attaches_only_matching_strong_keys(plugin_ap
     assert account["hermes_sessions"][0]["title"] == "Live DB title"
     assert account["hermes_sessions"][0]["match_keys"] == ["primary-codex"]
     assert "event_id" not in account["hermes_sessions"][0]
+
+
+def test_hermes_session_attribution_groups_recent_requests_by_session(plugin_api, monkeypatch):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    snapshot = plugin_api.normalize_snapshot(_raw_snapshot(now), now=now)
+    monkeypatch.setattr(plugin_api, "_session_title", lambda session_id: f"Live {session_id}")
+
+    attached = plugin_api.attach_hermes_session_attribution(
+        snapshot,
+        now_dt=now,
+        events=[
+            _hermes_event(
+                account_match_keys=["Primary Codex"],
+                session_id="session-123",
+                status="ok",
+                started_at="2026-01-01T00:00:00Z",
+                updated_at="2026-01-01T00:00:05Z",
+                completed_at="2026-01-01T00:00:05Z",
+            ),
+            _hermes_event(
+                account_match_keys=["Primary Codex"],
+                session_id="session-123",
+                status="ok",
+                started_at="2026-01-01T00:00:06Z",
+                updated_at="2026-01-01T00:00:08Z",
+                completed_at="2026-01-01T00:00:08Z",
+            ),
+            _hermes_event(
+                account_match_keys=["Primary Codex"],
+                session_id="session-123",
+                status="in_flight",
+                started_at="2026-01-01T00:00:09Z",
+                updated_at="2026-01-01T00:00:09Z",
+            ),
+            _hermes_event(
+                account_match_keys=["Primary Codex"],
+                session_id="session-456",
+                title_snapshot="Other session",
+                status="ok",
+                started_at="2026-01-01T00:00:03Z",
+                updated_at="2026-01-01T00:00:04Z",
+                completed_at="2026-01-01T00:00:04Z",
+            ),
+        ],
+    )
+
+    account = attached["accounts"][0]
+    assert account["hermes_session_count"] == 2
+    assert account["hermes_request_count"] == 4
+    assert [item["session_id"] for item in account["hermes_sessions"]] == ["session-123", "session-456"]
+
+    active_session = account["hermes_sessions"][0]
+    assert active_session["title"] == "Live session-123"
+    assert active_session["status"] == "in_flight"
+    assert active_session["recent_request_count"] == 3
+    assert active_session["updated_at"] == "2026-01-01T00:00:09Z"
+    assert active_session["match_keys"] == ["primary-codex"]
 
 
 def test_hermes_session_attribution_rejects_no_match_and_fallback_only(plugin_api):
@@ -1293,6 +1354,8 @@ def test_frontend_renders_hermes_session_attribution_without_old_mapping_copy():
     assert "account.hermes_sessions" in frontend
     assert "Hermes sessions" in frontend
     assert "Untitled Hermes session" in frontend
+    assert "recent_request_count" in frontend
+    assert "reqs" in frontend
     assert "h(HermesSessionAttribution, { account: account })" in frontend
     assert "Active pulses come from quota drops" in frontend
     assert "Hermes session titles appear only when Hermes recorded a matching local request" in frontend

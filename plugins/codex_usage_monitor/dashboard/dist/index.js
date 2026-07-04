@@ -822,11 +822,13 @@
       h("div", { className: "codex-usage-hermes-sessions-label" }, "Hermes sessions"),
       h("div", { className: "codex-usage-hermes-sessions-list" },
         sessions.slice(0, 3).map(function (session, index) {
-          const status = session && session.status ? String(session.status) : "in flight";
+          const status = session && session.status ? String(session.status).replace(/_/g, " ") : "in flight";
+          const requestCount = Number(session && session.recent_request_count ? session.recent_request_count : 0);
+          const statusText = requestCount > 1 ? status + " · " + requestCount + " reqs" : status;
           const title = session && session.title ? String(session.title) : "Untitled Hermes session";
           return h("div", { key: (session && session.session_id ? session.session_id : index) + ":" + index, className: "codex-usage-hermes-session" },
             h("span", { className: "codex-usage-hermes-session-title" }, title),
-            h("span", { className: "codex-usage-hermes-session-status" }, status)
+            h("span", { className: "codex-usage-hermes-session-status" }, statusText)
           );
         })
       )

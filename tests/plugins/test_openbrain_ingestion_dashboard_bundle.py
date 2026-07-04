@@ -316,6 +316,7 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
         "CandidatePipelineTable",
         "CandidateTableRow",
         "CandidateStageCell",
+        "TechniquePill",
         "TagsDetailPanel",
     ):
         assert f"function {component}" in frontend
@@ -342,6 +343,9 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
     assert "ob-evidence-mini-label" not in frontend
     assert "candidateCardsForRow(row)" in frontend
     assert "function candidateIdentityKey(card)" in frontend
+    assert "function generationTechniqueFor(value)" in frontend
+    assert 'h(TechniquePill, { technique: technique })' in frontend
+    assert 'h(TechniquePill, { thought: thought })' in frontend
     assert 'policyPassedForCard(card)' in frontend
     assert 'topics.includes("policy reviewed")' in frontend
     assert "function dedupeDecisionForCard(card)" in frontend
@@ -356,6 +360,7 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
         ".ob-candidate-table-wrap",
         ".ob-candidate-table",
         ".ob-candidate-stage-cell",
+        ".ob-technique-pill",
         ".ob-candidate-cell-content",
         ".ob-dedupe-score-inline",
         ".ob-source-summary-strip",
@@ -399,8 +404,9 @@ def test_candidate_table_detail_cells_pass_selected_detail_stage_to_modal():
     assert "card && card.dedupe_nearest_similarity_score" in frontend
     assert "function formatDedupeSemanticScore(score)" in frontend
     assert "ob-dedupe-score-inline" in frontend
-    assert "semantic score " in frontend
-    assert '}, "score ", dedupeScoreText)' in frontend
+    assert "semantic similarity " in frontend
+    assert '}, dedupeScoreText)' in frontend
+    assert '}, "score ", dedupeScoreText)' not in frontend
     assert 'showCandidateStopTag' in frontend
     assert 'effectiveCode === "duplicate" || card.stop_stage_id === "deduped"' in frontend
     assert "function OriginalShapedThoughtPanel" in frontend
@@ -485,6 +491,7 @@ def test_css_uses_ob_namespace_and_required_selectors():
         ".ob-candidate-pipeline",
         ".ob-candidate-table",
         ".ob-candidate-stage-cell",
+        ".ob-technique-pill",
     ):
         assert selector in css
     assert "ready-for-cortexdb" in css
@@ -525,6 +532,9 @@ def test_docs_cover_snapshot_boundary_and_read_only_mvp():
         "Policy tags use this vocabulary",
         "Needs source validation",
         "Formation Trace",
+        "generation_technique",
+        "via Panning",
+        "meeting-synthesis",
         "exact LLM input package",
         "Column-specific detail",
         "Evidence card detail",

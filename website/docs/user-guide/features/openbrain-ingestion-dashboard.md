@@ -27,7 +27,7 @@ The Candidate memory pipeline still uses the canonical ingestion stages as table
 5. Ready for CortexDB
 6. CortexDB
 
-Evidence cards stay in the Evidence grid as source-grounded nuggets. They are not mixed into the Candidate memory table. Each Evidence card shows the Evidence title and compact tags such as **used**; Thought candidates appear as stable table rows with clickable cells for Tags, Policy, Deduped, Ready for CortexDB, and **CortexDB import** detail.
+Evidence cards stay in the Evidence grid as source-grounded nuggets. They are not mixed into the Candidate memory table. Each Evidence card shows the Evidence title and compact tags such as **used**; Thought candidates appear as stable table rows with clickable cells for Tags, Policy, Deduped, Ready for CortexDB, and **CortexDB import** detail. Candidate rows can also show a subtle **via Panning** or **via Meeting** technique pill so the generation recipe or skill is visible without opening database fields.
 
 The top metrics show **visible / total** counts for source units, thoughts, review items, stopped items, imported items, and zero-thought sources. Visible counts follow the current filters, source-date range, and search; total counts describe the selected source type in the snapshot.
 
@@ -74,7 +74,7 @@ Older snapshots may not have every field. Missing fields are shown as empty stat
 
 The Thought Detail panel can show a **Formation Trace** when the snapshot includes it. This trace explains how a thought was formed from source material as it moves across the board. It may include the primary lineage cards, additional source context, the exact LLM input package, the shaped output, and later Policy/Dedupe/CortexDB gate decisions.
 
-The trace does not show hidden model reasoning. It shows auditable inputs, outputs, and decisions so the dashboard can distinguish direct evidence from extra context that helped interpret the evidence.
+The trace does not show hidden model reasoning. It shows auditable inputs, outputs, and decisions so the dashboard can distinguish direct evidence from extra context that helped interpret the evidence. Candidate snapshots can include `generation_technique` at the thought, formation-trace, or producer level. The API normalizes known techniques such as `panning-for-gold` and `meeting-synthesis`, including whether the source is a recipe or a skill.
 
 Older thoughts or snapshots without trace data show a clear “No formation trace in this snapshot” message instead of pretending the trace was empty.
 
@@ -128,7 +128,7 @@ The exporter boundary is:
 Panning-for-Gold artifacts -> SnapshotV1 -> dashboard API -> read-only UI
 ```
 
-The Panning exporter converts artifacts such as `source-items.jsonl`, `inventory.jsonl`, `dedupe-receipts.jsonl`, `capture-candidates.jsonl`, `capture-audit.jsonl`, and `summary.json` into a sanitized **SnapshotV1** document. The dashboard backend validates and redacts that snapshot, normalizes stage aliases, surfaces inventory rows that stop before `Ready for CortexDB` as visible stopped cards, and exposes only the source-scoped board/detail API used by the frontend.
+The Panning exporter converts artifacts such as `source-items.jsonl`, `inventory.jsonl`, `dedupe-receipts.jsonl`, `capture-candidates.jsonl`, `capture-audit.jsonl`, and `summary.json` into a sanitized **SnapshotV1** document. The dashboard backend validates and redacts that snapshot, normalizes stage aliases, surfaces inventory rows that stop before `Ready for CortexDB` as visible stopped cards, records the candidate generation technique, and exposes only the source-scoped board/detail API used by the frontend.
 
 The frontend does not read Panning artifacts directly and does not include adapter-specific logic. It only calls the dashboard plugin API through the Hermes plugin SDK.
 

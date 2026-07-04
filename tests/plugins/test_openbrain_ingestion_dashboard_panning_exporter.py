@@ -68,6 +68,12 @@ def test_panning_run_exports_valid_sanitized_dashboard_snapshot():
         "kind": "panning_for_gold",
         "adapter": "otter_package",
         "source_type": "transcripts",
+        "generation_technique": {
+            "id": "panning-for-gold",
+            "label": "Panning for Gold",
+            "kind": "recipe",
+            "short_label": "Panning",
+        },
         "run_root_label": "openbrain_ingestion_panning_run",
         "artifacts": [
             "source-items.jsonl",
@@ -119,6 +125,8 @@ def test_imported_duplicate_and_derived_lineage_rows_map_correctly_without_sqlit
     assert imported["stage_detail"]["cortexdb"]["stored_text"] == "Stakeholder acceptance is delivery risk, not only a communications concern."
     assert imported["cortexdb_id"] == "thought_demo_7f3a"
     assert imported["related_memories"][0]["id"] == "thought_existing_a"
+    assert imported["generation_technique"]["id"] == "panning-for-gold"
+    assert imported["generation_technique"]["kind"] == "recipe"
 
     duplicate = thoughts["cand_002_duplicate"]
     assert duplicate["lineage_id"] == "thread_duplicate_config"
@@ -200,6 +208,7 @@ def test_candidate_formation_trace_flat_fields_export_to_dashboard_snapshot(tmp_
         "summary": "Candidate carries shaping provenance.",
         "final_memory_text": "Formation trace should survive exporter normalization.",
         "stage": "deduped",
+        "generation_skill": "skills/meeting-synthesis",
         "primary_lineage_ids": ["pan:trace-01", "pan:trace-02"],
         "primary_lineage_cards": [
             {"lineage_id": "pan:trace-01", "stage": "extracted", "title": "Input card"}
@@ -232,6 +241,9 @@ def test_candidate_formation_trace_flat_fields_export_to_dashboard_snapshot(tmp_
     assert trace["additional_context_used"][0]["kind"] == "source_title"
     assert trace["llm_output_text"] == "Exact shaped output."
     assert trace["created_by"]["model"] == "gpt-5.5"
+    assert trace["generation_technique"]["id"] == "meeting-synthesis"
+    assert trace["generation_technique"]["kind"] == "skill"
+    assert thoughts["cand_009_formation_trace"]["generation_technique"]["short_label"] == "Meeting"
     assert trace["gate_events"][0]["stage"] == "policy"
     assert stage_trace["llm_output_text"] == trace["llm_output_text"]
 

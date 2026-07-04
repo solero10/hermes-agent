@@ -247,20 +247,8 @@ def test_prepare_login_missing_grant_returns_sanitized_failure(monkeypatch):
 
 def test_prepare_login_success_does_not_return_password(monkeypatch):
     hidden = "unit-test-login-value"
-    calls = []
 
     def fake_run(cmd, **kwargs):
-        calls.append({"cmd": cmd, **kwargs})
-        if len(cmd) > 1 and cmd[1] == "-c":
-            assert kwargs.get("env", {}).get("PYTHONPATH")
-            return _json_cp(
-                cmd,
-                {
-                    "success": True,
-                    "operation": "approval_grant_created",
-                    "created_by": "hermes_secret_capture",
-                },
-            )
         assert cmd == [
             bws._TOOL,
             "login-website",
@@ -270,9 +258,7 @@ def test_prepare_login_success_does_not_return_password(monkeypatch):
             "openrouter.ai",
             "--profile",
             "abbyclaw1",
-            "--fill-browser",
         ]
-        assert kwargs.get("timeout") == 180
         return _json_cp(
             cmd,
             {
@@ -283,14 +269,6 @@ def test_prepare_login_success_does_not_return_password(monkeypatch):
             },
         )
 
-    import tools.skills_tool as skills_tool
-
-    monkeypatch.setattr(bws.secrets, "token_hex", lambda n: "ABC123")
-    monkeypatch.setattr(
-        skills_tool,
-        "capture_transient_secret",
-        lambda *args, **kwargs: {"success": True, "value": "ABC123"},
-    )
     monkeypatch.setattr(bws.subprocess, "run", fake_run)
 
     raw = bws.bitwarden_prepare_website_login("openrouter", "openrouter.ai")
@@ -300,7 +278,6 @@ def test_prepare_login_success_does_not_return_password(monkeypatch):
     assert result["prepared"] is True
     assert result["nested"] == {"ok": True}
     assert hidden not in raw
-    assert [call["cmd"][1] for call in calls] == ["-c", "login-website"]
 
 
 def test_all_bitwarden_safe_tools_are_registered_and_in_toolsets():

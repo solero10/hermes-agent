@@ -232,6 +232,19 @@ _FORMATION_TEXT_LIMITS = {
 _FORMATION_DEFAULT_TEXT_LIMIT = 4_000
 _FORMATION_TRACE_META_ONLY_KEYS = {"version", "stage"}
 
+_KNOWN_GENERATION_TECHNIQUES: dict[str, dict[str, str]] = {
+    "panning-for-gold": {
+        "label": "Panning for Gold",
+        "short_label": "Panning",
+        "kind": "recipe",
+    },
+    "meeting-synthesis": {
+        "label": "Meeting Synthesis",
+        "short_label": "Meeting",
+        "kind": "skill",
+    },
+}
+
 _RAW_REFERENCE_KEYS = {
     "path",
     "source_path",
@@ -752,6 +765,34 @@ class DatabaseFieldRecord(BaseModel):
     note: str | None = None
 
 
+class GenerationTechnique(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str | None = None
+    label: str | None = None
+    kind: str | None = None
+    short_label: str | None = None
+    version: str | None = None
+    source: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_payload(cls, value: Any) -> Any:
+        return _normalize_generation_technique(value) or value
+
+    @model_validator(mode="after")
+    def _fill_known_defaults(self) -> "GenerationTechnique":
+        if not self.id and self.label:
+            self.id = _generation_technique_id(self.label)
+        if self.id and not self.label:
+            self.label = _generation_technique_label(self.id)
+        if self.id and not self.short_label:
+            self.short_label = _generation_technique_short_label(self.id, self.label)
+        if self.id and not self.kind:
+            self.kind = _generation_technique_kind(self.id)
+        return self
+
+
 class FormationActor(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -826,6 +867,7 @@ class FormationTrace(BaseModel):
 
     version: int = 1
     stage: StageId | None = None
+    generation_technique: GenerationTechnique | None = None
     created_at: str | None = None
     created_by: FormationActor | None = None
     primary_lineage_ids: list[str] = Field(default_factory=list)
@@ -841,7 +883,12 @@ class FormationTrace(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _sanitize_trace_payload(cls, value: Any) -> Any:
-        return _sanitize_formation_node(value)
+        clean = _sanitize_formation_node(value)
+        if isinstance(clean, dict):
+            technique = _generation_technique_from_record(clean)
+            if technique:
+                clean["generation_technique"] = technique
+        return clean
 
     @field_validator("stage", mode="before")
     @classmethod
@@ -929,8 +976,26 @@ class ProducerInfo(BaseModel):
     kind: str
     adapter: str
     source_type: str | None = None
+    generation_technique: GenerationTechnique | None = None
     run_root_label: str | None = None
     artifacts: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_producer_payload(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        if not data.get("generation_technique"):
+            technique = _normalize_generation_technique(
+                data.get("technique") or data.get("recipe") or data.get("skill") or data.get("kind")
+            )
+            if technique:
+                data["generation_technique"] = technique
+        data.pop("technique", None)
+        data.pop("recipe", None)
+        data.pop("skill", None)
+        return data
 
     @field_validator("run_root_label", mode="before")
     @classmethod
@@ -994,6 +1059,7 @@ class ThoughtRecord(BaseModel):
     final_memory_text: str | None = None
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
+    generation_technique: GenerationTechnique | None = None
     formation_trace: FormationTrace | None = None
     stage_detail: StageDetail | None = None
     stages: list[StageRecord] | None = None
@@ -1015,6 +1081,9 @@ class ThoughtRecord(BaseModel):
             data["current_stage"] = _normalize_stage(data["current_stage"])
         if data.get("stop_stage_id") is not None:
             data["stop_stage_id"] = _normalize_stage(data["stop_stage_id"])
+        technique = _generation_technique_from_record(data)
+        if technique:
+            data["generation_technique"] = technique
         if "formation_trace" in data and not _formation_trace_has_content(data.get("formation_trace")):
             data.pop("formation_trace", None)
         stage_detail = data.get("stage_detail")
@@ -1134,6 +1203,32 @@ class Snapshot(BaseModel):
     source_types: list[SourceType] = Field(default_factory=list)
     source_units: list[SourceUnit] = Field(default_factory=list)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _inherit_producer_technique(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = copy.deepcopy(value)
+        producer = data.get("producer")
+        producer_technique = None
+        if isinstance(producer, dict):
+            producer_technique = _normalize_generation_technique(
+                producer.get("generation_technique")
+                or producer.get("technique")
+                or producer.get("recipe")
+                or producer.get("skill")
+                or producer.get("kind")
+            )
+        if not producer_technique:
+            return data
+        for source_unit in data.get("source_units") or []:
+            if not isinstance(source_unit, dict):
+                continue
+            for thought in source_unit.get("thoughts") or []:
+                if isinstance(thought, dict) and not _generation_technique_from_record(thought):
+                    thought["generation_technique"] = copy.deepcopy(producer_technique)
+        return data
+
 
 class ThoughtCard(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -1155,6 +1250,7 @@ class ThoughtCard(BaseModel):
     confidence: float | None = None
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
+    generation_technique: GenerationTechnique | None = None
     dedupe_similarity_score: float | None = None
     dedupe_nearest_similarity_score: float | None = None
     cortexdb_id: str | None = None
@@ -1202,6 +1298,7 @@ class ThoughtDetail(BaseModel):
     final_memory_text: str | None = None
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
+    generation_technique: GenerationTechnique | None = None
     formation_trace: FormationTrace | None = None
     stage_detail: StageDetail | None = None
     source_unit: dict[str, Any]
@@ -1344,6 +1441,130 @@ def _first_present(*values: Any) -> Any:
     return None
 
 
+def _clean_text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _generation_technique_id(value: Any) -> str | None:
+    text = _clean_text_or_none(value)
+    if not text:
+        return None
+    text = re.sub(r"(?i)^(?:skills?|recipes?)[:/\\\s]+", "", text)
+    text = text.strip().lower().replace("_", "-")
+    slug = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return slug or None
+
+
+def _generation_technique_label(identifier: Any) -> str | None:
+    slug = _generation_technique_id(identifier)
+    if not slug:
+        return None
+    known = _KNOWN_GENERATION_TECHNIQUES.get(slug)
+    if known:
+        return known["label"]
+    return " ".join(part.capitalize() for part in slug.split("-") if part)
+
+
+def _generation_technique_short_label(identifier: Any, label: Any = None) -> str | None:
+    slug = _generation_technique_id(identifier)
+    if slug and slug in _KNOWN_GENERATION_TECHNIQUES:
+        return _KNOWN_GENERATION_TECHNIQUES[slug]["short_label"]
+    text = _clean_text_or_none(label) or _generation_technique_label(slug)
+    if not text:
+        return None
+    words = [part for part in re.split(r"\s+", text) if part]
+    return " ".join(words[:2]) if words else None
+
+
+def _generation_technique_kind(identifier: Any) -> str | None:
+    slug = _generation_technique_id(identifier)
+    if slug and slug in _KNOWN_GENERATION_TECHNIQUES:
+        return _KNOWN_GENERATION_TECHNIQUES[slug]["kind"]
+    return None
+
+
+def _normalize_generation_technique(value: Any, *, default_kind: str | None = None) -> dict[str, Any] | None:
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, str):
+        identifier = _generation_technique_id(value)
+        if not identifier:
+            return None
+        label = _generation_technique_label(identifier)
+        technique = {
+            "id": identifier,
+            "label": label,
+            "short_label": _generation_technique_short_label(identifier, label),
+            "kind": default_kind or _generation_technique_kind(identifier),
+        }
+        return {key: item for key, item in technique.items() if item not in (None, "", [], {})}
+    if not isinstance(value, dict):
+        return None
+
+    raw_identifier = _first_present(
+        value.get("id"),
+        value.get("slug"),
+        value.get("name"),
+        value.get("technique"),
+        value.get("method"),
+        value.get("recipe"),
+        value.get("skill"),
+    )
+    raw_label = _first_present(value.get("label"), value.get("display_name"), value.get("title"))
+    identifier = _generation_technique_id(raw_identifier or raw_label)
+    label = _clean_text_or_none(raw_label) or _generation_technique_label(identifier)
+    if not identifier and not label:
+        return None
+    kind = _clean_text_or_none(value.get("kind") or value.get("type") or default_kind)
+    if not kind and identifier:
+        kind = _generation_technique_kind(identifier)
+    technique = {
+        "id": identifier,
+        "label": label,
+        "kind": kind,
+        "short_label": _clean_text_or_none(value.get("short_label"))
+        or _generation_technique_short_label(identifier, label),
+        "version": _clean_text_or_none(value.get("version")),
+        "source": _clean_text_or_none(value.get("source")),
+    }
+    return {key: item for key, item in technique.items() if item not in (None, "", [], {})} or None
+
+
+def _generation_technique_from_record(record: Any) -> dict[str, Any] | None:
+    if isinstance(record, BaseModel):
+        record = record.model_dump(mode="json", exclude_none=True)
+    if not isinstance(record, dict):
+        return None
+
+    direct_candidates: tuple[tuple[str, str | None], ...] = (
+        ("generation_technique", None),
+        ("technique", None),
+        ("generation_method", None),
+        ("derivation_method", None),
+        ("recipe", "recipe"),
+        ("generation_recipe", "recipe"),
+        ("created_by_recipe", "recipe"),
+        ("skill", "skill"),
+        ("generation_skill", "skill"),
+        ("created_by_skill", "skill"),
+    )
+    for key, default_kind in direct_candidates:
+        technique = _normalize_generation_technique(record.get(key), default_kind=default_kind)
+        if technique:
+            return technique
+
+    for nested_key in ("created_by", "producer", "formation_trace"):
+        nested = record.get(nested_key)
+        if isinstance(nested, dict):
+            technique = _generation_technique_from_record(nested)
+            if technique:
+                return technique
+    return None
+
+
 def _database_metadata(thought: dict[str, Any], source_unit: Any) -> dict[str, Any]:
     raw_metadata = thought.get("metadata")
     metadata = copy.deepcopy(raw_metadata) if isinstance(raw_metadata, dict) else {}
@@ -1360,6 +1581,10 @@ def _database_metadata(thought: dict[str, Any], source_unit: Any) -> dict[str, A
         value = thought.get(key)
         if value and key not in metadata:
             metadata[key] = value
+
+    technique = _generation_technique_from_record(thought)
+    if technique and "generation_technique" not in metadata:
+        metadata["generation_technique"] = technique
 
     source_summary = _source_unit_summary(source_unit)
     if source_summary.get("id") and "source_unit_id" not in metadata:
@@ -1519,6 +1744,7 @@ def _card(thought: Any, source_unit_id: str) -> dict[str, Any]:
         "confidence": t.get("confidence"),
         "stopped_reason": t.get("stopped_reason"),
         "matched_memory_id": t.get("matched_memory_id"),
+        "generation_technique": _generation_technique_from_record(t),
     }
     stage_detail_raw = t.get("stage_detail")
     stage_detail: dict[str, Any] = stage_detail_raw if isinstance(stage_detail_raw, dict) else {}
@@ -1705,7 +1931,14 @@ _BOARD_CARD_SEARCH_FIELDS: tuple[str, ...] = (
     "stop_stage_id",
     "matched_memory_id",
     "cortexdb_id",
+    "generation_technique.id",
+    "generation_technique.label",
+    "generation_technique.kind",
+    "generation_technique.short_label",
     "final_memory_text",
+    "formation_trace.generation_technique.id",
+    "formation_trace.generation_technique.label",
+    "formation_trace.generation_technique.kind",
     "formation_trace.primary_lineage_ids",
     "formation_trace.output_title",
     "formation_trace.llm_output_text",

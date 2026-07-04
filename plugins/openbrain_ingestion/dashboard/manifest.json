@@ -5,7 +5,7 @@
   "icon": "Database",
   "version": "0.1.0",
   "tab": { "path": "/openbrain", "position": "after:kanban" },
-  "entry": "dist/index.js?v=20260704-dedupe-score-inline-v2",
-  "css": "dist/style.css?v=20260704-dedupe-score-inline-v2",
+  "entry": "dist/index.js?v=20260704-dedupe-score-inline-v3",
+  "css": "dist/style.css?v=20260704-dedupe-score-inline-v3",
   "api": "plugin_api.py"
 }

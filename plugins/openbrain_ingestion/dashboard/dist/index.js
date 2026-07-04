@@ -834,7 +834,9 @@
   function CandidateTableRow(props) {
     const card = props.card || {};
     const effectiveCode = effectiveStopCode(card);
+    const technique = generationTechniqueFor(card);
     const showCandidateStopTag = card.disposition === "stopped" && effectiveCode && !(effectiveCode === "duplicate" || card.stop_stage_id === "deduped");
+    const showCandidateSubline = !!technique || showCandidateStopTag;
     return h("tr", { className: cx("ob-candidate-row", "ob-candidate-row--" + stageSlug(card.disposition || "in_progress")) },
       h("th", { scope: "row", className: "ob-candidate-title-cell" },
         h("button", {
@@ -843,12 +845,13 @@
           onClick: function () { props.onOpenDetail(card, "shaped"); },
           "aria-label": "Open Thought candidate details for " + safeText(card.title || card.lineage_id, "candidate"),
         }, safeText(card.title || card.summary || card.lineage_id, "Untitled candidate")),
-        showCandidateStopTag ? h("div", { className: "ob-candidate-subline" },
-          h(PolicyTag, {
+        showCandidateSubline ? h("div", { className: "ob-candidate-subline" },
+          h(TechniquePill, { technique: technique }),
+          showCandidateStopTag ? h(PolicyTag, {
             code: effectiveCode,
             definitions: props.policyDefinitions,
             onShow: props.onPolicyDefinition,
-          })
+          }) : null
         ) : null
       ),
       CANDIDATE_TABLE_STAGES.map(function (stage) {
@@ -869,7 +872,7 @@
     const label = candidateStageLabel(card, stage.id);
     const dedupeScoreText = stage.id === "deduped" ? formatDedupeSemanticScore(dedupeSemanticScoreForCard(card)) : "";
     const ariaLabel = "Open " + safeText(stage.label, "stage") + " details for " + safeText(card.title || card.lineage_id, "candidate") +
-      (dedupeScoreText ? " (semantic score " + dedupeScoreText + ")" : "");
+      (dedupeScoreText ? " (semantic similarity " + dedupeScoreText + ")" : "");
     if (stage.id === "tags") {
       const topics = asArray(card.topics);
       return h("td", { className: cx("ob-candidate-stage-cell", "ob-candidate-stage-cell--tags") },
@@ -896,8 +899,8 @@
           h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(status)) }, label),
           dedupeScoreText ? h("span", {
             className: "ob-dedupe-score-inline",
-            title: "Semantic score " + dedupeScoreText,
-          }, "score ", dedupeScoreText) : null
+            title: "Semantic similarity " + dedupeScoreText,
+          }, dedupeScoreText) : null
         )
       )
     );
@@ -953,6 +956,7 @@
       h("div", { className: "ob-card-head" },
         h("h3", null, safeText(card.title || card.summary || card.lineage_id, "Untitled thought")),
         !isEvidenceCard ? h("div", { className: "ob-card-badges" },
+          h(TechniquePill, { card: card }),
           h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(disposition)) }, dispositionLabel(disposition)),
           stopCode ? h(PolicyTag, {
             code: effectiveCode,
@@ -1025,6 +1029,47 @@
   function traceActorText(actor) {
     if (!actor || typeof actor !== "object") return "";
     return [actor.provider, actor.model, actor.tool || actor.kind].filter(Boolean).join(" / ");
+  }
+
+  function generationTechniqueFor(value) {
+    if (!value || typeof value !== "object") return null;
+    const raw = value.generation_technique || (value.formation_trace && value.formation_trace.generation_technique);
+    if (!raw) return null;
+    if (typeof raw === "string") {
+      const label = raw.replace(/^(skills?|recipes?)[/:\s]+/i, "").replace(/[_-]+/g, " ").replace(/\b\w/g, function (char) { return char.toUpperCase(); });
+      return { id: raw, label: label, short_label: label.split(/\s+/).slice(0, 2).join(" ") };
+    }
+    if (typeof raw !== "object") return null;
+    const id = raw.id || raw.slug || raw.name || raw.recipe || raw.skill || raw.method || raw.technique || "";
+    const label = raw.label || raw.display_name || raw.title || (id ? String(id).replace(/^(skills?|recipes?)[/:\s]+/i, "").replace(/[_-]+/g, " ").replace(/\b\w/g, function (char) { return char.toUpperCase(); }) : "");
+    if (!label) return null;
+    return {
+      id: id,
+      label: label,
+      kind: raw.kind || raw.type || "",
+      short_label: raw.short_label || label.split(/\s+/).slice(0, 2).join(" "),
+      version: raw.version || "",
+    };
+  }
+
+  function techniqueDisplayText(technique) {
+    if (!technique) return "";
+    const label = safeText(technique.label || technique.id, "");
+    const kind = safeText(technique.kind, "");
+    return [kind, label].filter(Boolean).join(" · ");
+  }
+
+  function TechniquePill(props) {
+    const technique = props.technique || generationTechniqueFor(props.thought || props.card);
+    if (!technique) return null;
+    const label = safeText(technique.short_label || technique.label, "");
+    if (!label) return null;
+    const title = "Generated by " + techniqueDisplayText(technique);
+    return h("span", {
+      className: cx("ob-technique-pill", technique.kind ? "ob-technique-pill--" + stageSlug(technique.kind) : null),
+      title: title,
+      "aria-label": title,
+    }, "via ", label);
   }
 
   function traceContextLabel(item) {
@@ -1622,6 +1667,7 @@
           !isOriginalShapedView ? h("div", { className: "ob-detail-summary" },
             h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(thought.disposition)) }, dispositionLabel(thought.disposition)),
             h("span", { className: cx("ob-badge", stageClass(thought.current_stage)) }, stageLabel(thought.current_stage)),
+            h(TechniquePill, { thought: thought }),
             thought.disposition === "stopped" && detailStopLabel ? h(PolicyTag, {
               code: detailStopCode,
               definitions: props.policyDefinitions,

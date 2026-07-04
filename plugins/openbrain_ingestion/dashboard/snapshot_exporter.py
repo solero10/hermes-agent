@@ -119,6 +119,21 @@ _CANDIDATE_STAGE_ALIASES: dict[str, str] = {
     "candidate": "ready_for_cortexdb",
     "capture_candidate": "ready_for_cortexdb",
 }
+_DEFAULT_PANNING_GENERATION_TECHNIQUE: dict[str, str] = {
+    "id": "panning-for-gold",
+    "label": "Panning for Gold",
+    "kind": "recipe",
+    "short_label": "Panning",
+}
+_KNOWN_GENERATION_TECHNIQUES: dict[str, dict[str, str]] = {
+    "panning-for-gold": _DEFAULT_PANNING_GENERATION_TECHNIQUE,
+    "meeting-synthesis": {
+        "id": "meeting-synthesis",
+        "label": "Meeting Synthesis",
+        "kind": "skill",
+        "short_label": "Meeting",
+    },
+}
 
 _POLICY_NEEDS_SOURCE_VALIDATION_MARKERS = {
     "auto generated outline",
@@ -350,6 +365,7 @@ def build_snapshot_from_panning_run(
             "kind": "panning_for_gold",
             "adapter": adapter,
             "source_type": material_source_type,
+            "generation_technique": _DEFAULT_PANNING_GENERATION_TECHNIQUE,
             "run_root_label": str(run_root),
             "artifacts": [str(run_root / name) for name in _existing_artifact_names(run_root)],
         }
@@ -635,9 +651,14 @@ def _thought_from_candidate(
             or _dig(candidate, "content")
             or _dig(candidate, "text")
         ),
+        "matched_memory_id": _string_or_none(
+            _dig(candidate, "matched_memory_id") or _dig(candidate, "existing_memory_id")
+        ),
         "content_fingerprint": fingerprint,
+        "generation_technique": _candidate_generation_technique(candidate, inventory, dedupe, audit),
     }
     formation_trace = _formation_trace_from_record(candidate, current_stage=current_stage)
+
     if formation_trace:
         thought["formation_trace"] = formation_trace
 
@@ -903,7 +924,10 @@ def _formation_trace_from_record(record: dict[str, Any], *, current_stage: str) 
         trace.setdefault("version", 1)
         trace.setdefault("stage", "shaped")
         clean = {key: value for key, value in trace.items() if value is not None and value != [] and value != {}}
-        return clean if _formation_trace_has_content(clean) else None
+        if _formation_trace_has_content(clean):
+            clean.setdefault("generation_technique", _candidate_generation_technique(record))
+            return clean
+        return None
 
     primary_lineage_ids = _list_of_strings(_dig(record, "primary_lineage_ids"))
     primary_lineage_cards = _list_of_dicts(_dig(record, "primary_lineage_cards"))
@@ -942,7 +966,10 @@ def _formation_trace_from_record(record: dict[str, Any], *, current_stage: str) 
     }
 
     clean = {key: value for key, value in trace.items() if value is not None and value != [] and value != {}}
-    return clean if _formation_trace_has_content(clean) else None
+    if _formation_trace_has_content(clean):
+        clean.setdefault("generation_technique", _candidate_generation_technique(record))
+        return clean
+    return None
 
 
 def _formation_trace_has_content(value: dict[str, Any]) -> bool:
@@ -1185,6 +1212,7 @@ def _stopped_thought_from_inventory(
         "stopped_reason": _string_or_none(_dig(record, "reason") or _dig(record, "capture_content")),
         "matched_memory_id": stop_target_id,
         "content_fingerprint": fingerprint,
+        "generation_technique": _candidate_generation_technique(record),
     }
     formation_trace = _formation_trace_from_record(record, current_stage=current_stage)
     if formation_trace:
@@ -1331,6 +1359,87 @@ def _candidate_summary(candidate: dict[str, Any]) -> str | None:
         if value:
             return value
     return None
+
+
+def _generation_technique_id(value: Any) -> str | None:
+    text = _string_or_none(value)
+    if not text:
+        return None
+    text = re.sub(r"(?i)^(?:skills?|recipes?)[:/\\\s]+", "", text)
+    text = text.strip().lower().replace("_", "-")
+    slug = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    return slug or None
+
+
+def _generation_technique_from_value(value: Any, *, default_kind: str | None = None) -> dict[str, Any] | None:
+    if isinstance(value, str):
+        identifier = _generation_technique_id(value)
+        if not identifier:
+            return None
+        known = _KNOWN_GENERATION_TECHNIQUES.get(identifier)
+        if known:
+            technique = copy.deepcopy(known)
+            if default_kind and "kind" not in technique:
+                technique["kind"] = default_kind
+            return technique
+        label = " ".join(part.capitalize() for part in identifier.split("-") if part)
+        return {"id": identifier, "label": label, "kind": default_kind} if label else None
+    if not isinstance(value, dict):
+        return None
+    raw_id = _string_or_none(
+        _dig(value, "id")
+        or _dig(value, "slug")
+        or _dig(value, "name")
+        or _dig(value, "recipe")
+        or _dig(value, "skill")
+        or _dig(value, "method")
+        or _dig(value, "technique")
+    )
+    raw_label = _string_or_none(_dig(value, "label") or _dig(value, "display_name") or _dig(value, "title"))
+    identifier = _generation_technique_id(raw_id or raw_label)
+    if not identifier and not raw_label:
+        return None
+    known = _KNOWN_GENERATION_TECHNIQUES.get(identifier or "") or {}
+    label = raw_label or known.get("label") or (" ".join(part.capitalize() for part in (identifier or "").split("-") if part) or None)
+    technique = {
+        "id": identifier,
+        "label": label,
+        "kind": _string_or_none(_dig(value, "kind") or _dig(value, "type") or default_kind or known.get("kind")),
+        "short_label": _string_or_none(_dig(value, "short_label") or known.get("short_label")),
+        "version": _string_or_none(_dig(value, "version")),
+        "source": _string_or_none(_dig(value, "source")),
+    }
+    return {key: item for key, item in technique.items() if item not in (None, "", [], {})} or None
+
+
+def _candidate_generation_technique(*records: dict[str, Any]) -> dict[str, Any]:
+    keys: tuple[tuple[str, str | None], ...] = (
+        ("generation_technique", None),
+        ("technique", None),
+        ("generation_method", None),
+        ("derivation_method", None),
+        ("recipe", "recipe"),
+        ("generation_recipe", "recipe"),
+        ("created_by_recipe", "recipe"),
+        ("skill", "skill"),
+        ("generation_skill", "skill"),
+        ("created_by_skill", "skill"),
+    )
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for key, default_kind in keys:
+            technique = _generation_technique_from_value(_dig(record, key), default_kind=default_kind)
+            if technique:
+                return technique
+        for nested_key in ("formation_trace", "created_by", "producer"):
+            nested = _dig(record, nested_key)
+            if isinstance(nested, dict):
+                for key, default_kind in keys:
+                    technique = _generation_technique_from_value(_dig(nested, key), default_kind=default_kind)
+                    if technique:
+                        return technique
+    return copy.deepcopy(_DEFAULT_PANNING_GENERATION_TECHNIQUE)
 
 
 def _receipt_from_audit(

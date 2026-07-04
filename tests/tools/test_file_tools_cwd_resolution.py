@@ -16,6 +16,7 @@ Core invariant these tests pin:
 """
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -313,6 +314,57 @@ def test_patch_reports_resolved_absolute_path(_isolated_cwd, monkeypatch):
     assert out.get("files_modified") == [expected]
     assert "WORKSPACE_PATCHED" in (workspace / "target.py").read_text()
     # And the decoy copy is untouched.
+    assert (decoy / "target.py").read_text() == "DECOY_ORIGINAL\n"
+
+
+def test_v4a_patch_rewrites_headers_to_resolved_workspace_path(_isolated_cwd, monkeypatch):
+    """Patch-mode V4A headers must resolve like replace-mode paths.
+
+    This reproduces the noisy "Patch validation failed: File not found" class:
+    the tool layer knows the session workspace, but the shared shell cwd points
+    elsewhere. If the V4A body is passed through with relative headers, the
+    shell layer reads the wrong directory and the patch fails or mutates a decoy.
+    """
+    workspace, decoy = _isolated_cwd
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": str(workspace))
+
+    class _DecoyCwdEnv:
+        cwd = str(decoy)
+        cwd_owner = "other-session"
+
+        def execute(self, command, cwd=None, **kwargs):
+            proc = subprocess.run(
+                ["bash", "-c", command],
+                cwd=cwd or self.cwd,
+                input=kwargs.get("stdin_data"),
+                capture_output=True,
+                text=True,
+            )
+            return {"output": proc.stdout + proc.stderr, "returncode": proc.returncode}
+
+    from tools.file_operations import ShellFileOperations
+
+    monkeypatch.setattr(ft, "_get_file_ops", lambda task_id="default": ShellFileOperations(_DecoyCwdEnv()))
+
+    import json
+    out = json.loads(ft.patch_tool(
+        mode="patch",
+        patch=(
+            "*** Begin Patch\n"
+            "*** Update File: target.py\n"
+            "@@ @@\n"
+            "-WORKSPACE_ORIGINAL\n"
+            "+WORKSPACE_V4A_PATCHED\n"
+            "*** End Patch\n"
+        ),
+        task_id="t1",
+    ))
+
+    expected = str((workspace / "target.py").resolve())
+    assert not out.get("error"), out
+    assert out.get("resolved_path") == expected
+    assert out.get("files_modified") == [expected]
+    assert (workspace / "target.py").read_text() == "WORKSPACE_V4A_PATCHED\n"
     assert (decoy / "target.py").read_text() == "DECOY_ORIGINAL\n"
 
 

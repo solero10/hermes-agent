@@ -5,7 +5,9 @@ import errno
 import json
 import logging
 import os
+import re
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 
 from agent.file_safety import get_read_block_error
@@ -389,6 +391,64 @@ def _is_blocked_device(filepath: str, base_dir: str | Path | None = None) -> boo
     if _is_blocked_device_path(resolved):
         return True
     return False
+
+
+_V4A_SIMPLE_FILE_HEADER_RE = re.compile(
+    r"^(?P<prefix>\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*)(?P<path>.+)$",
+    re.MULTILINE,
+)
+_V4A_MOVE_FILE_HEADER_RE = re.compile(
+    r"^(?P<prefix>\*\*\*\s+Move\s+File:\s*)(?P<src>.+?)\s*->\s*(?P<dst>.+)$",
+    re.MULTILINE,
+)
+
+
+def _iter_v4a_header_paths(patch_text: str):
+    """Yield paths from V4A file-operation headers."""
+    if not patch_text:
+        return
+    for match in _V4A_SIMPLE_FILE_HEADER_RE.finditer(patch_text):
+        path = match.group("path").strip()
+        if path:
+            yield path
+    for match in _V4A_MOVE_FILE_HEADER_RE.finditer(patch_text):
+        src = match.group("src").strip()
+        dst = match.group("dst").strip()
+        if src:
+            yield src
+        if dst:
+            yield dst
+
+
+def _rewrite_v4a_header_paths(patch_text: str, path_to_resolved: Mapping[str, str | None]) -> str:
+    """Rewrite V4A file headers to the resolved task/workspace paths.
+
+    ``patch_tool`` resolves relative paths against the active task/session
+    workspace, but ``ShellFileOperations.patch_v4a`` applies the patch using the
+    shell environment's cwd. Desktop/TUI sessions can share a shell whose live
+    cwd belongs to another session, so passing original relative headers can
+    produce false "File not found" failures even when the target exists in this
+    session's workspace. Rewriting headers mirrors replace-mode, which already
+    passes an absolute target to the shell layer.
+    """
+    if not patch_text or not path_to_resolved:
+        return patch_text
+
+    def _resolved(path: str) -> str:
+        key = path.strip()
+        return path_to_resolved.get(key) or key
+
+    def _simple_repl(match: re.Match) -> str:
+        return f"{match.group('prefix')}{_resolved(match.group('path'))}"
+
+    def _move_repl(match: re.Match) -> str:
+        return (
+            f"{match.group('prefix')}{_resolved(match.group('src'))}"
+            f" -> {_resolved(match.group('dst'))}"
+        )
+
+    rewritten = _V4A_SIMPLE_FILE_HEADER_RE.sub(_simple_repl, patch_text)
+    return _V4A_MOVE_FILE_HEADER_RE.sub(_move_repl, rewritten)
 
 
 # Paths that file tools should refuse to write to without going through the
@@ -1424,10 +1484,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     if path:
         _paths_to_check.append(path)
     if mode == "patch" and patch:
-        import re as _re
         from tools.path_security import has_traversal_component
-        for _m in _re.finditer(r'^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)$', patch, _re.MULTILINE):
-            v4a_path = _m.group(1).strip()
+        for v4a_path in _iter_v4a_header_paths(patch):
             # V4A path headers come from patch CONTENT, not the explicit
             # ``path=`` arg — so they're more attacker-influenceable (skill
             # content, web extract, prompt injection). Reject ``..`` traversal
@@ -1440,7 +1498,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 return tool_error(
                     f"V4A patch header contains '..' traversal: {v4a_path!r}. "
                     "Use the agent's cwd-relative path (no '..') or an absolute "
-                    "path in '*** Update File:' / '*** Add File:' / '*** Delete File:' headers."
+                    "path in '*** Update File:', '*** Add File:', '*** Delete File:', "
+                    "or '*** Move File:' headers."
                 )
             _paths_to_check.append(v4a_path)
     for _p in _paths_to_check:
@@ -1478,7 +1537,7 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             # Collect warnings — cross-agent registry first (names sibling),
             # then per-task tracker as a fallback.
             stale_warnings: list[str] = []
-            _path_to_resolved: dict[str, str] = {}
+            _path_to_resolved: dict[str, str | None] = {}
             for _p in _paths_to_check:
                 try:
                     _r = str(_resolve_path_for_task(_p, task_id))
@@ -1511,7 +1570,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             elif mode == "patch":
                 if not patch:
                     return tool_error("patch content required")
-                result = file_ops.patch_v4a(patch)
+                _patch_for_apply = _rewrite_v4a_header_paths(patch, _path_to_resolved)
+                result = file_ops.patch_v4a(_patch_for_apply)
             else:
                 return tool_error(f"Unknown mode: {mode}")
 

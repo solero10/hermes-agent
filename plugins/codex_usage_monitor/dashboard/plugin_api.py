@@ -178,6 +178,7 @@ def attach_hermes_session_attribution(
         if isinstance(account, dict):
             account.pop("hermes_sessions", None)
             account.pop("hermes_session_count", None)
+            account.pop("hermes_request_count", None)
 
     recent_events = events
     if recent_events is None:
@@ -196,7 +197,7 @@ def attach_hermes_session_attribution(
     if not account_key_sets:
         return snapshot
 
-    seen_by_account: dict[int, set[str]] = {}
+    grouped_by_account: dict[int, dict[str, dict[str, Any]]] = {}
     for event in recent_events:
         if not isinstance(event, dict):
             continue
@@ -210,38 +211,52 @@ def attach_hermes_session_attribution(
             matched_keys = sorted(account_keys.intersection(event_keys))
             if not matched_keys:
                 continue
-            account_seen = seen_by_account.setdefault(id(account), set())
-            dedupe_key = f"{session_id}:{event.get('started_at') or event.get('updated_at') or ''}"
-            if dedupe_key in account_seen:
-                continue
-            account_seen.add(dedupe_key)
-            title = _session_title(session_id) or event.get("title_snapshot") or session_id
-            sessions = account.setdefault("hermes_sessions", [])
-            sessions.append(
-                {
+            sessions_by_id = grouped_by_account.setdefault(id(account), {})
+            latest_at = event.get("updated_at") or event.get("started_at") or ""
+            status = event.get("status") or "in_flight"
+            existing = sessions_by_id.get(session_id)
+            if existing is None:
+                title = _session_title(session_id) or event.get("title_snapshot") or session_id
+                sessions_by_id[session_id] = {
                     "session_id": session_id,
                     "title": str(title),
-                    "status": event.get("status") or "in_flight",
+                    "status": status,
                     "started_at": event.get("started_at"),
                     "updated_at": event.get("updated_at"),
                     "completed_at": event.get("completed_at"),
                     "credential_label": event.get("credential_label"),
                     "match_confidence": event.get("match_confidence") or "label",
                     "match_keys": matched_keys,
+                    "recent_request_count": 1,
                 }
-            )
+                continue
+
+            existing["recent_request_count"] = int(existing.get("recent_request_count") or 0) + 1
+            existing["match_keys"] = sorted(set(existing.get("match_keys") or []).union(matched_keys))
+            current_latest = existing.get("updated_at") or existing.get("started_at") or ""
+            if latest_at >= current_latest:
+                existing["updated_at"] = event.get("updated_at")
+                existing["completed_at"] = event.get("completed_at")
+                existing["credential_label"] = event.get("credential_label") or existing.get("credential_label")
+                existing["match_confidence"] = event.get("match_confidence") or existing.get("match_confidence") or "label"
+                if existing.get("status") != "in_flight":
+                    existing["status"] = status
+            if status == "in_flight":
+                existing["status"] = "in_flight"
 
     for account in accounts:
         if not isinstance(account, dict):
             continue
-        sessions = account.get("hermes_sessions")
+        sessions = list(grouped_by_account.get(id(account), {}).values())
         if not isinstance(sessions, list) or not sessions:
             account.pop("hermes_sessions", None)
             account.pop("hermes_session_count", None)
+            account.pop("hermes_request_count", None)
             continue
         sessions.sort(key=lambda item: item.get("updated_at") or item.get("started_at") or "", reverse=True)
         account["hermes_sessions"] = sessions[:5]
         account["hermes_session_count"] = len(sessions)
+        account["hermes_request_count"] = sum(int(item.get("recent_request_count") or 0) for item in sessions)
     return snapshot
 
 
