@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 from hermes_cli import auth as auth_mod
 from agent.credential_pool import CredentialPool, PooledCredential, get_custom_provider_pool_key, load_pool
+from agent.llm_request_attribution import safe_credential_metadata
 from agent.secret_scope import get_secret as _get_secret
 from hermes_cli.auth import (
     AuthError,
@@ -431,6 +432,7 @@ def _resolve_runtime_from_pool_entry(
         "api_key": api_key,
         "source": getattr(entry, "source", "pool"),
         "credential_pool": pool,
+        "request_attribution_credential": safe_credential_metadata(entry),
         "requested_provider": requested_provider,
     }
 
@@ -481,6 +483,7 @@ def _try_resolve_from_custom_pool(
             "api_key": pool_api_key,
             "source": f"pool:{pool_key}",
             "credential_pool": pool,
+            "request_attribution_credential": safe_credential_metadata(entry),
         }
     except Exception:
         return None

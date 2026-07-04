@@ -25,6 +25,8 @@ def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
         access_token = "pool-token"
         source = "manual"
         base_url = "https://chatgpt.com/backend-api/codex"
+        label = "Primary Codex"
+        priority = 1
 
     class _Pool:
         def has_credentials(self):
@@ -42,6 +44,14 @@ def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
     assert resolved["api_key"] == "pool-token"
     assert resolved["credential_pool"] is not None
     assert resolved["source"] == "manual"
+    assert resolved["request_attribution_credential"] == {
+        "credential_label": "Primary Codex",
+        "credential_priority": 1,
+        "credential_source": "manual",
+        "account_match_keys": ["primary-codex"],
+        "fallback_match_keys": ["priority-1"],
+        "match_confidence": "label",
+    }
 
 
 def test_resolve_runtime_provider_anthropic_pool_respects_config_base_url(monkeypatch):

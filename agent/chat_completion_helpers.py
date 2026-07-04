@@ -122,6 +122,61 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _session_title_snapshot(agent) -> str | None:
+    session_id = getattr(agent, "session_id", None)
+    if not session_id:
+        return None
+    db = getattr(agent, "_session_db", None)
+    if db is not None:
+        try:
+            row = db.get_session(session_id)
+        except Exception:
+            row = None
+        if isinstance(row, dict):
+            title = row.get("title")
+            if isinstance(title, str) and title.strip():
+                return title.strip()
+    return None
+
+
+def _start_codex_request_attribution(agent, api_kwargs: dict) -> str | None:
+    if not _is_openai_codex_backend(agent):
+        return None
+    metadata = getattr(agent, "_request_attribution_credential", None)
+    if not isinstance(metadata, dict) or not metadata.get("account_match_keys"):
+        return None
+    try:
+        from agent.llm_request_attribution import record_request_start
+
+        return record_request_start(
+            provider=getattr(agent, "provider", None) or "openai-codex",
+            api_mode=getattr(agent, "api_mode", None) or "codex_responses",
+            model=api_kwargs.get("model") or getattr(agent, "model", None) or "",
+            session_id=getattr(agent, "session_id", None) or "",
+            title_snapshot=_session_title_snapshot(agent),
+            credential_label=metadata.get("credential_label"),
+            credential_priority=metadata.get("credential_priority"),
+            credential_source=metadata.get("credential_source"),
+            account_match_keys=list(metadata.get("account_match_keys") or []),
+            fallback_match_keys=list(metadata.get("fallback_match_keys") or []),
+            match_confidence=metadata.get("match_confidence"),
+        )
+    except Exception:
+        logger.debug("Codex request attribution start failed", exc_info=True)
+        return None
+
+
+def _finish_codex_request_attribution(event_id: str | None, status: str) -> None:
+    if not event_id:
+        return
+    try:
+        from agent.llm_request_attribution import record_request_finish
+
+        record_request_finish(event_id, status=status)
+    except Exception:
+        logger.debug("Codex request attribution finish failed", exc_info=True)
+
+
 def interruptible_api_call(agent, api_kwargs: dict):
     """
     Run the API call in a background thread so the main conversation loop
@@ -148,6 +203,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
     # a network bug and surfaced to the caller. (PR #6600 — cascading interrupt
     # hang.)
     _request_cancelled = {"value": False}
+    _attribution_event_id = _start_codex_request_attribution(agent, api_kwargs)
 
     def _set_request_client(client):
         with request_client_lock:
@@ -545,9 +601,12 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     _close_request_client_once("interrupt_abort")
             except Exception:
                 pass
+            _finish_codex_request_attribution(_attribution_event_id, "interrupted")
             raise InterruptedError("Agent interrupted during API call")
     if result["error"] is not None:
+        _finish_codex_request_attribution(_attribution_event_id, "error")
         raise result["error"]
+    _finish_codex_request_attribution(_attribution_event_id, "ok")
     return result["response"]
 
 

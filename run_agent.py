@@ -421,6 +421,7 @@ class AIAgent:
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
+        request_attribution_credential: Optional[Dict[str, Any]] = None,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 20,
         checkpoint_max_total_size_mb: int = 500,
@@ -496,6 +497,7 @@ class AIAgent:
             iteration_budget=iteration_budget,
             fallback_model=fallback_model,
             credential_pool=credential_pool,
+            request_attribution_credential=request_attribution_credential,
             checkpoints_enabled=checkpoints_enabled,
             checkpoint_max_snapshots=checkpoint_max_snapshots,
             checkpoint_max_total_size_mb=checkpoint_max_total_size_mb,
@@ -1044,6 +1046,7 @@ class AIAgent:
             "base_url": getattr(self, "base_url", "") or "",
             "api_key": getattr(self, "api_key", "") or "",
             "api_mode": getattr(self, "api_mode", "") or "",
+            "request_attribution_credential": getattr(self, "_request_attribution_credential", {}) or {},
         }
 
     def _check_compression_model_feasibility(self) -> None:
@@ -4071,6 +4074,7 @@ class AIAgent:
 
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_client, _is_oauth_token
+            from agent.llm_request_attribution import safe_credential_metadata
 
             try:
                 self._anthropic_client.close()
@@ -4086,10 +4090,14 @@ class AIAgent:
             self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
             self.api_key = runtime_key
             self.base_url = runtime_base
+            self._request_attribution_credential = safe_credential_metadata(entry)
             return
+
+        from agent.llm_request_attribution import safe_credential_metadata
 
         self.api_key = runtime_key
         self.base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
+        self._request_attribution_credential = safe_credential_metadata(entry)
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
         self._apply_client_headers_for_base_url(self.base_url)

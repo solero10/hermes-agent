@@ -29,6 +29,7 @@ class TestCliTurnRoutePool:
             acp_command=None,
             acp_args=[],
             _credential_pool=fake_pool,
+            _request_attribution_credential={"account_match_keys": ["primary-codex"]},
             service_tier=None,
         )
 
@@ -37,6 +38,7 @@ class TestCliTurnRoutePool:
         route = bound("test message")
 
         assert route["runtime"]["credential_pool"] is fake_pool
+        assert route["runtime"]["request_attribution_credential"] == {"account_match_keys": ["primary-codex"]}
 
 
 # ---------------------------------------------------------------------------
@@ -58,12 +60,14 @@ class TestGatewayTurnRoutePool:
             "command": None,
             "args": [],
             "credential_pool": fake_pool,
+            "request_attribution_credential": {"account_match_keys": ["primary-codex"]},
         }
 
         bound = GatewayRunner._resolve_turn_agent_config.__get__(runner)
         route = bound("test message", "gpt-5.4", runtime_kwargs)
 
         assert route["runtime"]["credential_pool"] is fake_pool
+        assert route["runtime"]["request_attribution_credential"] == {"account_match_keys": ["primary-codex"]}
 
 
 # ---------------------------------------------------------------------------

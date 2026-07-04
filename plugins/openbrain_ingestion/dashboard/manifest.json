@@ -5,7 +5,7 @@
   "icon": "Database",
   "version": "0.1.0",
   "tab": { "path": "/openbrain", "position": "after:kanban" },
-  "entry": "dist/index.js?v=20260703-header-meta-wrap-v1",
-  "css": "dist/style.css?v=20260703-header-meta-wrap-v1",
+  "entry": "dist/index.js?v=20260704-evidence-title-tags-v4",
+  "css": "dist/style.css?v=20260704-evidence-title-tags-v4",
   "api": "plugin_api.py"
 }

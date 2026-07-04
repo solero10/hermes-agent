@@ -30,6 +30,7 @@ from typing import Any, Iterable
 from fastapi import APIRouter, Query
 
 from hermes_constants import get_hermes_home
+from agent.llm_request_attribution import normalize_match_key, read_recent_events
 
 _PLUGIN_DIR = Path(__file__).resolve().parent
 if str(_PLUGIN_DIR) not in sys.path:
@@ -86,6 +87,161 @@ _LONG_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_=-]{48,}(?![A-Za-z0-9
 
 _CACHE_LOCK = threading.Lock()
 _SNAPSHOT_CACHE: dict[str, Any] | None = None
+
+
+def _is_fallback_match_key(key: str | None) -> bool:
+    if not key:
+        return False
+    return bool(re.fullmatch(r"(?:priority|index)-\d+|account-\d+", key))
+
+
+def _normalized_key_set(values: Iterable[Any]) -> set[str]:
+    keys: set[str] = set()
+    for value in values:
+        key = normalize_match_key(value)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _account_match_keys(account: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """Return strong and fallback match keys for a normalized account."""
+    label_values = [
+        account.get("stored_label"),
+        account.get("label"),
+        account.get("display_label"),
+    ]
+    strong = _normalized_key_set(label_values)
+    account_id = normalize_match_key(account.get("id"))
+    if account_id and strong and not _is_fallback_match_key(account_id):
+        strong.add(account_id)
+
+    fallback_values: list[Any] = []
+    if account.get("priority") not in (None, ""):
+        fallback_values.append(f"priority-{account.get('priority')}")
+    if account.get("index") not in (None, ""):
+        fallback_values.append(f"index-{account.get('index')}")
+    if account_id and _is_fallback_match_key(account_id):
+        fallback_values.append(account_id)
+    fallback = _normalized_key_set(fallback_values)
+    return strong, fallback
+
+
+def _event_strong_match_keys(event: dict[str, Any]) -> set[str]:
+    keys = _normalized_key_set(event.get("account_match_keys") or [])
+    return {key for key in keys if not _is_fallback_match_key(key)}
+
+
+_SESSION_TITLE_CACHE: dict[str, str | None] = {}
+
+
+def _session_title(session_id: Any) -> str | None:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    cached_title = _SESSION_TITLE_CACHE.get(sid)
+    if cached_title:
+        return cached_title
+    title: str | None = None
+    try:
+        from hermes_state import SessionDB
+
+        row = SessionDB().get_session(sid)
+        if isinstance(row, dict):
+            raw_title = row.get("title")
+            if isinstance(raw_title, str) and raw_title.strip():
+                title = raw_title.strip()
+    except Exception:
+        title = None
+    if title:
+        _SESSION_TITLE_CACHE[sid] = title
+    return title
+
+
+def attach_hermes_session_attribution(
+    snapshot: dict[str, Any],
+    *,
+    now_dt: datetime | None = None,
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Attach recent Hermes session attribution to matching Codex accounts.
+
+    Attribution is intentionally dynamic/runtime-only. It is reattached when
+    serving ``/snapshot`` and stripped before matching so stale cached fields do
+    not become the source of truth.
+    """
+    accounts = snapshot.get("accounts")
+    if not isinstance(accounts, list):
+        return snapshot
+    for account in accounts:
+        if isinstance(account, dict):
+            account.pop("hermes_sessions", None)
+            account.pop("hermes_session_count", None)
+
+    recent_events = events
+    if recent_events is None:
+        recent_events = read_recent_events(provider="openai-codex", now=now_dt or _utcnow())
+    if not recent_events:
+        return snapshot
+
+    account_key_sets: list[tuple[dict[str, Any], set[str]]] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        strong_keys, _fallback_keys = _account_match_keys(account)
+        if strong_keys:
+            account_key_sets.append((account, strong_keys))
+
+    if not account_key_sets:
+        return snapshot
+
+    seen_by_account: dict[int, set[str]] = {}
+    for event in recent_events:
+        if not isinstance(event, dict):
+            continue
+        session_id = str(event.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        event_keys = _event_strong_match_keys(event)
+        if not event_keys:
+            continue
+        for account, account_keys in account_key_sets:
+            matched_keys = sorted(account_keys.intersection(event_keys))
+            if not matched_keys:
+                continue
+            account_seen = seen_by_account.setdefault(id(account), set())
+            dedupe_key = f"{session_id}:{event.get('started_at') or event.get('updated_at') or ''}"
+            if dedupe_key in account_seen:
+                continue
+            account_seen.add(dedupe_key)
+            title = _session_title(session_id) or event.get("title_snapshot") or session_id
+            sessions = account.setdefault("hermes_sessions", [])
+            sessions.append(
+                {
+                    "session_id": session_id,
+                    "title": str(title),
+                    "status": event.get("status") or "in_flight",
+                    "started_at": event.get("started_at"),
+                    "updated_at": event.get("updated_at"),
+                    "completed_at": event.get("completed_at"),
+                    "credential_label": event.get("credential_label"),
+                    "match_confidence": event.get("match_confidence") or "label",
+                    "match_keys": matched_keys,
+                }
+            )
+
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        sessions = account.get("hermes_sessions")
+        if not isinstance(sessions, list) or not sessions:
+            account.pop("hermes_sessions", None)
+            account.pop("hermes_session_count", None)
+            continue
+        sessions.sort(key=lambda item: item.get("updated_at") or item.get("started_at") or "", reverse=True)
+        account["hermes_sessions"] = sessions[:5]
+        account["hermes_session_count"] = len(sessions)
+    return snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -1311,6 +1467,7 @@ def _with_runtime_fields(
     accounts = snapshot.get("accounts")
     if isinstance(accounts, list) and history_rows is not None:
         snapshot["accounts"] = _attach_history_to_accounts(accounts, history_rows, history_points)
+    attach_hermes_session_attribution(snapshot, now_dt=now_dt)
     snapshot["source"] = sanitize(snapshot.get("source") or {})
     return sanitize(snapshot)
 

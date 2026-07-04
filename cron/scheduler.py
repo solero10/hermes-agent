@@ -2428,9 +2428,9 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             )
 
         fallback_model = _cfg.get("fallback_providers") or _cfg.get("fallback_model") or None
-        credential_pool = None
+        credential_pool = runtime.get("credential_pool")
         runtime_provider = str(runtime.get("provider") or "").strip().lower()
-        if runtime_provider:
+        if credential_pool is None and runtime_provider:
             try:
                 from agent.credential_pool import load_pool
                 pool = load_pool(runtime_provider)
@@ -2479,6 +2479,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             prefill_messages=prefill_messages,
             fallback_model=fallback_model,
             credential_pool=credential_pool,
+            request_attribution_credential=runtime.get("request_attribution_credential") or {},
             providers_allowed=pr.get("only"),
             providers_ignored=pr.get("ignore"),
             providers_order=pr.get("order"),

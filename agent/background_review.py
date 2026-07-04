@@ -61,6 +61,7 @@ def _resolve_review_runtime(agent: Any) -> Dict[str, Any]:
         "api_key": parent_runtime.get("api_key") or None,
         "base_url": parent_runtime.get("base_url") or None,
         "api_mode": parent_api_mode,
+        "request_attribution_credential": parent_runtime.get("request_attribution_credential") or {},
         "routed": False,
     }
     try:
@@ -92,6 +93,7 @@ def _resolve_review_runtime(agent: Any) -> Dict[str, Any]:
             "api_key": rp.get("api_key"),
             "base_url": rp.get("base_url"),
             "api_mode": rp.get("api_mode"),
+            "request_attribution_credential": rp.get("request_attribution_credential") or {},
             "routed": True,
         }
     except Exception as e:
@@ -648,6 +650,7 @@ def _run_review_in_thread(
                 base_url=_rt.get("base_url") or None,
                 api_key=_rt.get("api_key") or None,
                 credential_pool=getattr(agent, "_credential_pool", None),
+                request_attribution_credential=_rt.get("request_attribution_credential") or {},
                 parent_session_id=agent.session_id,
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),

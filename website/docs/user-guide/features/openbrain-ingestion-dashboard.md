@@ -12,7 +12,13 @@ The dashboard is registered as a dashboard plugin named `openbrain_ingestion` an
 
 ## What it shows
 
-The board is organized by **source unit**. Each row represents one item from the snapshot, such as a transcript, document, or other source-specific unit. Inside each row, thought cards are grouped by canonical ingestion stage:
+The board is organized by **source unit**. Each row represents one item from the snapshot, such as a transcript, document, or other source-specific unit. Expanding a row now shows a dense review layout:
+
+- a compact source summary strip;
+- an **Evidence grid** under the transcript/source row;
+- a sticky **Candidate memory table** for the durable Thought candidates.
+
+The Candidate memory pipeline still uses the canonical ingestion stages as table columns:
 
 1. Evidence cards
 2. Thought candidates
@@ -20,6 +26,8 @@ The board is organized by **source unit**. Each row represents one item from the
 4. Deduped
 5. Ready for CortexDB
 6. CortexDB
+
+Evidence cards stay in the Evidence grid as source-grounded nuggets. They are not mixed into the Candidate memory table. Each Evidence card shows the Evidence title and compact tags such as **used**; Thought candidates appear as stable table rows with clickable cells for Tags, Policy, Deduped, Ready for CortexDB, and **CortexDB import** detail.
 
 The top metrics show **visible / total** counts for source units, thoughts, review items, stopped items, imported items, and zero-thought sources. Visible counts follow the current filters, source-date range, and search; total counts describe the selected source type in the snapshot.
 

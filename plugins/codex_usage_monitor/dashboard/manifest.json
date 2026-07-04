@@ -5,7 +5,7 @@
   "icon": "Activity",
   "version": "0.1.0",
   "tab": { "path": "/codex-usage", "position": "after:analytics" },
-  "entry": "dist/index.js?v=20260703-strong-active-last-v1",
-  "css": "dist/style.css?v=20260703-strong-active-last-v1",
+  "entry": "dist/index.js?v=20260703-hermes-sessions-v1",
+  "css": "dist/style.css?v=20260703-hermes-sessions-v1",
   "api": "plugin_api.py"
 }

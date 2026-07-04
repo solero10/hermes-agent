@@ -137,8 +137,8 @@ def test_manifest_registers_expected_dashboard_plugin():
         "icon": "Activity",
         "version": "0.1.0",
         "tab": {"path": "/codex-usage", "position": "after:analytics"},
-        "entry": "dist/index.js?v=20260703-strong-active-last-v1",
-        "css": "dist/style.css?v=20260703-strong-active-last-v1",
+        "entry": "dist/index.js?v=20260703-hermes-sessions-v1",
+        "css": "dist/style.css?v=20260703-hermes-sessions-v1",
         "api": "plugin_api.py",
     }
 
@@ -305,6 +305,102 @@ def test_normalize_strips_token_fields_and_maps_windows(plugin_api):
     assert weekly_exhausted["cooldown_seconds_left"] == 4 * 24 * 60 * 60
     assert weekly_exhausted["windows"]["weekly"]["is_exhausted"] is True
     assert weekly_exhausted["windows"]["five_hour"].get("is_exhausted") is None
+
+
+def _hermes_event(
+    *,
+    account_match_keys: list[str],
+    fallback_match_keys: list[str] | None = None,
+    session_id: str = "session-123",
+    title_snapshot: str = "Fallback title",
+    status: str = "in_flight",
+) -> dict[str, Any]:
+    return {
+        "provider": "openai-codex",
+        "api_mode": "codex_responses",
+        "model": "gpt-5.5-codex",
+        "session_id": session_id,
+        "title_snapshot": title_snapshot,
+        "credential_label": "Primary Codex",
+        "account_match_keys": account_match_keys,
+        "fallback_match_keys": fallback_match_keys or [],
+        "match_confidence": "label",
+        "status": status,
+        "started_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:02Z",
+    }
+
+
+def test_hermes_session_attribution_attaches_only_matching_strong_keys(plugin_api, monkeypatch):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    snapshot = plugin_api.normalize_snapshot(_raw_snapshot(now), now=now)
+    monkeypatch.setattr(plugin_api, "_session_title", lambda session_id: "Live DB title")
+
+    attached = plugin_api.attach_hermes_session_attribution(
+        snapshot,
+        now_dt=now,
+        events=[_hermes_event(account_match_keys=["Primary Codex"], fallback_match_keys=["priority-1"])],
+    )
+
+    account = attached["accounts"][0]
+    assert account["hermes_session_count"] == 1
+    assert account["hermes_sessions"][0]["session_id"] == "session-123"
+    assert account["hermes_sessions"][0]["title"] == "Live DB title"
+    assert account["hermes_sessions"][0]["match_keys"] == ["primary-codex"]
+    assert "event_id" not in account["hermes_sessions"][0]
+
+
+def test_hermes_session_attribution_rejects_no_match_and_fallback_only(plugin_api):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    no_match = plugin_api.attach_hermes_session_attribution(
+        plugin_api.normalize_snapshot(_raw_snapshot(now), now=now),
+        now_dt=now,
+        events=[_hermes_event(account_match_keys=["Other Codex"])],
+    )
+    assert "hermes_sessions" not in no_match["accounts"][0]
+
+    fallback_only = plugin_api.attach_hermes_session_attribution(
+        plugin_api.normalize_snapshot(_raw_snapshot(now), now=now),
+        now_dt=now,
+        events=[_hermes_event(account_match_keys=["priority-1"], fallback_match_keys=["priority-1"])],
+    )
+    assert "hermes_sessions" not in fallback_only["accounts"][0]
+
+
+def test_hermes_session_attribution_is_runtime_only_and_not_history(plugin_api):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    snapshot = plugin_api.normalize_snapshot(_raw_snapshot(now), now=now)
+    plugin_api.attach_hermes_session_attribution(
+        snapshot,
+        now_dt=now,
+        events=[_hermes_event(account_match_keys=["Primary Codex"])],
+    )
+
+    payload = json.dumps(plugin_api._history_row_from_snapshot(snapshot))
+    assert "hermes_sessions" not in payload
+    assert "Fallback title" not in payload
+
+
+def test_snapshot_reattaches_hermes_session_attribution_from_cache(plugin_api, monkeypatch):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(plugin_api, "_utcnow", lambda: now)
+    monkeypatch.setattr(
+        plugin_api,
+        "read_recent_events",
+        lambda **_kwargs: [_hermes_event(account_match_keys=["Primary Codex"])],
+    )
+    base_snapshot = plugin_api.normalize_snapshot(_raw_snapshot(now), now=now)
+    assert "hermes_sessions" not in base_snapshot["accounts"][0]
+    plugin_api.cache_helpers.write_json_atomic(
+        plugin_api.cache_helpers.latest_with_history_path(),
+        base_snapshot,
+    )
+    plugin_api._SNAPSHOT_CACHE = None
+
+    snapshot = plugin_api.build_snapshot(history_points=240, force=False)
+
+    assert snapshot["accounts"][0]["hermes_sessions"][0]["title"] == "Fallback title"
 
 
 def test_reset_credit_normalization_attaches_only_safe_available_credit_info(plugin_api):
@@ -1127,6 +1223,24 @@ def test_frontend_styles_active_account_with_subtle_usage_pulse():
     assert "z-index: 0" in css
     assert "filter: saturate" not in css
     assert "grayscale(1)" not in css
+
+
+def test_frontend_renders_hermes_session_attribution_without_old_mapping_copy():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+    css = FRONTEND_CSS_PATH.read_text(encoding="utf-8")
+
+    assert "function HermesSessionAttribution" in frontend
+    assert "account.hermes_sessions" in frontend
+    assert "Hermes sessions" in frontend
+    assert "Untitled Hermes session" in frontend
+    assert "h(HermesSessionAttribution, { account: account })" in frontend
+    assert "Active pulses come from quota drops" in frontend
+    assert "Hermes session titles appear only when Hermes recorded a matching local request" in frontend
+    assert "Active account is inferred from quota drops, not session mapping" not in frontend
+
+    assert ".codex-usage-hermes-sessions" in css
+    assert ".codex-usage-hermes-session-title" in css
+    assert ".codex-usage-hermes-session-status" in css
 
 
 def test_css_keeps_codex_usage_banner_compact():

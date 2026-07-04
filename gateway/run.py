@@ -1812,6 +1812,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
+        "request_attribution_credential": runtime.get("request_attribution_credential") or {},
         "max_tokens": max_tokens,
     }
 
@@ -1860,6 +1861,7 @@ def _try_resolve_fallback_provider() -> dict | None:
                     "command": runtime.get("command"),
                     "args": list(runtime.get("args") or []),
                     "credential_pool": runtime.get("credential_pool"),
+                    "request_attribution_credential": runtime.get("request_attribution_credential") or {},
                     "model": entry.get("model"),
                 }
             except Exception as fb_exc:
@@ -3511,6 +3513,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "command": runtime_kwargs.get("command"),
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
+            "request_attribution_credential": runtime_kwargs.get("request_attribution_credential") or {},
             "max_tokens": runtime_kwargs.get("max_tokens"),
         }
         route = {

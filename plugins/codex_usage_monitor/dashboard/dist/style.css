@@ -341,6 +341,59 @@
   line-height: 1.35;
 }
 
+.codex-usage-hermes-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  border: 1px solid color-mix(in srgb, #38bdf8 36%, var(--color-border));
+  border-radius: calc(var(--radius) * 0.7);
+  background: color-mix(in srgb, #38bdf8 8%, transparent);
+  padding: 0.46rem 0.58rem;
+}
+
+.codex-usage-hermes-sessions-label {
+  color: color-mix(in srgb, #bae6fd 78%, var(--color-muted-foreground));
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.62rem;
+  font-weight: 780;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.codex-usage-hermes-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.16rem;
+}
+
+.codex-usage-hermes-session {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.codex-usage-hermes-session-title {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, #e0f2fe 88%, var(--color-foreground));
+  font-size: 0.72rem;
+  font-weight: 680;
+  line-height: 1.28;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-usage-hermes-session-status {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, #93c5fd 78%, var(--color-muted-foreground));
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.6rem;
+  line-height: 1.2;
+}
+
 .codex-usage-cooldown {
   display: grid;
   grid-template-columns: max-content 1fr;

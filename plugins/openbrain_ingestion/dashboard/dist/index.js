@@ -258,6 +258,82 @@
     return formatSourceDate(row.source_date || row.occurred_at || row.processed_at);
   }
 
+  const CANDIDATE_TABLE_STAGES = [
+    { id: "tags", label: "Tags" },
+    { id: "policy", label: "Policy" },
+    { id: "deduped", label: "Deduped" },
+    { id: "ready_for_cortexdb", label: "Ready for CortexDB" },
+    { id: "cortexdb", label: "CortexDB import" },
+  ];
+
+  function cardsForStage(row, stageId) {
+    const columns = (row && row.columns) || {};
+    return asArray(columns[stageId]);
+  }
+
+  function evidenceCardsForRow(row) {
+    return cardsForStage(row, "extracted");
+  }
+
+  function evidenceCardTitle(card) {
+    return safeText(
+      (card && (card.title || card.evidence_title || card.summary || card.source_snippet || card.quote || card.raw_text || card.lineage_id || card.id)),
+      "Untitled Evidence"
+    );
+  }
+
+  function evidenceTopicLabel(topic) {
+    const text = safeText(topic, "");
+    const normalized = text.trim().toLowerCase();
+    if (normalized === "covered by thought candidate") return "used";
+    return text;
+  }
+
+  function candidateCardsForRow(row) {
+    const columns = (row && row.columns) || {};
+    const cards = [];
+    Object.keys(columns).forEach(function (stageId) {
+      if (stageId !== "extracted") {
+        asArray(columns[stageId]).forEach(function (card) { cards.push(card); });
+      }
+    });
+    return cards;
+  }
+
+  function stageIndex(stageId) {
+    const normalized = String(stageId || "").replace(/-/g, "_");
+    return STAGES.findIndex(function (stage) { return stage.id === normalized; });
+  }
+
+  function candidateStageStatus(card, stageId) {
+    const currentStage = card && card.current_stage ? card.current_stage : "shaped";
+    const disposition = card && card.disposition ? card.disposition : "in_progress";
+    const targetIndex = stageIndex(stageId);
+    const currentIndex = stageIndex(currentStage);
+
+    if (stageId === "tags") return "metadata";
+    if (stageId === "cortexdb") {
+      return disposition === "imported" && card.cortexdb_id ? "imported" : "not_imported";
+    }
+    if (disposition === "stopped" && currentStage === stageId) return "stopped";
+    if ((disposition === "needs_review" || card.needs_review) && currentStage === stageId) return "needs_review";
+    if (targetIndex >= 0 && currentIndex >= 0 && targetIndex < currentIndex) return "complete";
+    if (stageId === currentStage) return "current";
+    return "not_reached";
+  }
+
+  function candidateStageLabel(card, stageId) {
+    const status = candidateStageStatus(card, stageId);
+    if (stageId === "tags") return "Tags";
+    if (status === "imported") return "Imported";
+    if (status === "not_imported") return "Not imported";
+    if (status === "complete") return "Complete";
+    if (status === "current") return "Current";
+    if (status === "stopped") return "Stopped";
+    if (status === "needs_review") return "Needs review";
+    return "Not reached";
+  }
+
   function errorMessage(error) {
     if (!error) return "Unknown error";
     const raw = error.message ? String(error.message) : String(error);
@@ -548,6 +624,7 @@
     const bodyId = "ob-row-body-" + String(rowKey).replace(/[^a-z0-9_-]+/gi, "-");
     const expanded = props.expanded;
     const sourceDate = sourceDateText(row);
+    const candidateCards = candidateCardsForRow(row);
     return h("article", { className: "ob-row" },
       h("header", { className: "ob-row-header" },
         h("button", {
@@ -568,20 +645,172 @@
         )
       ),
       expanded ? h("div", { className: "ob-row-body", id: bodyId },
+        h(SourceCompactSummary, { row: row }),
+        h(EvidenceGrid, {
+          row: row,
+          cards: evidenceCardsForRow(row),
+          onOpenDetail: props.onOpenDetail,
+        }),
         countOf(row, "thought_count") === 0 ? h("div", { className: "ob-zero-thoughts" }, "No durable thoughts extracted") :
-          h("div", { className: "ob-stage-grid" },
-            props.columns.map(function (column) {
-              return h(StageColumn, {
-                key: column.id,
-                column: column,
-                cards: asArray(row.columns && row.columns[column.id]),
-                onOpenDetail: props.onOpenDetail,
-                policyDefinitions: props.policyDefinitions,
-                onPolicyDefinition: props.onPolicyDefinition,
-              });
-            })
-          )
+          h(CandidatePipelineTable, {
+            row: row,
+            cards: candidateCards,
+            onOpenDetail: props.onOpenDetail,
+            policyDefinitions: props.policyDefinitions,
+            onPolicyDefinition: props.onPolicyDefinition,
+          })
       ) : null
+    );
+  }
+
+  function SourceCompactSummary(props) {
+    const row = props.row || {};
+    const sourceDate = sourceDateText(row);
+    return h("section", { className: "ob-source-summary-strip", "aria-label": "Source summary" },
+      h("div", { className: "ob-source-summary-main" },
+        h("strong", null, safeText(row.label || row.id, "Source unit")),
+        h("span", null, safeText(row.subtitle || row.source_type || row.id, "Source metadata unavailable"))
+      ),
+      h("div", { className: "ob-source-summary-counts" },
+        sourceDate ? h("span", null, "Source date: ", sourceDate) : null,
+        h("span", null, countOf(row, "thought_count"), " thoughts"),
+        h("span", null, evidenceCardsForRow(row).length, " Evidence"),
+        h("span", null, candidateCardsForRow(row).length, " Candidates"),
+        countOf(row, "imported_count") ? h("span", null, countOf(row, "imported_count"), " imported") : null,
+        countOf(row, "stopped_count") ? h("span", null, countOf(row, "stopped_count"), " stopped") : null
+      )
+    );
+  }
+
+  function EvidenceGrid(props) {
+    const cards = asArray(props.cards);
+    return h("section", { className: "ob-evidence-section", "aria-label": "Evidence grid" },
+      h("div", { className: "ob-section-heading" },
+        h("h3", null, "Evidence grid"),
+        h("span", { className: "ob-stage-count" }, cards.length)
+      ),
+      cards.length ? h("div", { className: "ob-evidence-grid", role: "list" }, cards.map(function (card) {
+        return h(EvidenceMiniCard, {
+          key: card.id || card.lineage_id,
+          card: card,
+          onOpenDetail: props.onOpenDetail,
+        });
+      })) : h("div", { className: "ob-stage-empty" }, "No Evidence cards")
+    );
+  }
+
+  function EvidenceMiniCard(props) {
+    const card = props.card || {};
+    const evidenceTitle = evidenceCardTitle(card);
+    const topics = asArray(card.topics).filter(function (topic) {
+      return String(topic || "").trim().toLowerCase() !== "extracted evidence";
+    });
+    return h("button", {
+      type: "button",
+      className: cx("ob-evidence-mini-card", "ob-evidence-mini-card--" + stageSlug(card.disposition || "in_progress")),
+      onClick: function () { props.onOpenDetail(card, "extracted"); },
+      title: evidenceTitle,
+      "aria-label": "Open Evidence details for " + evidenceTitle,
+      role: "listitem",
+    },
+      h("strong", { className: "ob-evidence-mini-title" }, evidenceTitle),
+      topics.length ? h("span", { className: "ob-topic-list" }, topics.slice(0, 3).map(function (topic, index) {
+        return h("span", { key: String(topic) + "-" + index, className: "ob-topic" }, evidenceTopicLabel(topic));
+      })) : null
+    );
+  }
+
+  function CandidatePipelineTable(props) {
+    const cards = asArray(props.cards);
+    return h("section", { className: "ob-candidate-pipeline", "aria-label": "Candidate memory pipeline" },
+      h("div", { className: "ob-section-heading" },
+        h("h3", null, "Candidate memory table"),
+        h("span", { className: "ob-stage-count" }, cards.length)
+      ),
+      cards.length ? h("div", { className: "ob-candidate-table-wrap" },
+        h("table", { className: "ob-candidate-table" },
+          h("thead", null,
+            h("tr", null,
+              h("th", { scope: "col" }, "Candidate thought"),
+              CANDIDATE_TABLE_STAGES.map(function (stage) {
+                return h("th", { key: stage.id, scope: "col" }, stage.label);
+              })
+            )
+          ),
+          h("tbody", null, cards.map(function (card) {
+            return h(CandidateTableRow, {
+              key: card.id || card.lineage_id,
+              card: card,
+              onOpenDetail: props.onOpenDetail,
+              policyDefinitions: props.policyDefinitions,
+              onPolicyDefinition: props.onPolicyDefinition,
+            });
+          }))
+        )
+      ) : h("div", { className: "ob-stage-empty" }, "No Thought candidates")
+    );
+  }
+
+  function CandidateTableRow(props) {
+    const card = props.card || {};
+    const effectiveCode = effectiveStopCode(card);
+    return h("tr", { className: cx("ob-candidate-row", "ob-candidate-row--" + stageSlug(card.disposition || "in_progress")) },
+      h("th", { scope: "row", className: "ob-candidate-title-cell" },
+        h("button", {
+          type: "button",
+          className: "ob-candidate-title-button",
+          onClick: function () { props.onOpenDetail(card, "shaped"); },
+          "aria-label": "Open Thought candidate details for " + safeText(card.title || card.lineage_id, "candidate"),
+        }, safeText(card.title || card.summary || card.lineage_id, "Untitled candidate")),
+        card.disposition === "stopped" && effectiveCode ? h("div", { className: "ob-candidate-subline" },
+          h(PolicyTag, {
+            code: effectiveCode,
+            definitions: props.policyDefinitions,
+            onShow: props.onPolicyDefinition,
+          })
+        ) : null
+      ),
+      CANDIDATE_TABLE_STAGES.map(function (stage) {
+        return h(CandidateStageCell, {
+          key: stage.id,
+          stage: stage,
+          card: card,
+          onOpenDetail: props.onOpenDetail,
+        });
+      })
+    );
+  }
+
+  function CandidateStageCell(props) {
+    const card = props.card || {};
+    const stage = props.stage || {};
+    const status = candidateStageStatus(card, stage.id);
+    const label = candidateStageLabel(card, stage.id);
+    const ariaLabel = "Open " + safeText(stage.label, "stage") + " details for " + safeText(card.title || card.lineage_id, "candidate");
+    if (stage.id === "tags") {
+      const topics = asArray(card.topics);
+      return h("td", { className: cx("ob-candidate-stage-cell", "ob-candidate-stage-cell--tags") },
+        h("button", {
+          type: "button",
+          className: "ob-candidate-cell-button",
+          onClick: function () { props.onOpenDetail(card, "tags"); },
+          "aria-label": ariaLabel,
+        },
+          topics.length ? h("span", { className: "ob-topic-list" }, topics.slice(0, 3).map(function (topic) {
+            return h("span", { key: topic, className: "ob-topic" }, topic);
+          })) : h("span", { className: "ob-badge" }, "No tags")
+        )
+      );
+    }
+    return h("td", { className: cx("ob-candidate-stage-cell", "ob-candidate-stage-cell--" + stageSlug(stage.id), "ob-candidate-stage-cell--" + stageSlug(status)) },
+      h("button", {
+        type: "button",
+        className: "ob-candidate-cell-button",
+        onClick: function () { props.onOpenDetail(card, stage.id); },
+        "aria-label": ariaLabel,
+      },
+        h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(status)) }, label)
+      )
     );
   }
 
@@ -634,14 +863,14 @@
     return h("article", cardProps,
       h("div", { className: "ob-card-head" },
         h("h3", null, safeText(card.title || card.summary || card.lineage_id, "Untitled thought")),
-        h("div", { className: "ob-card-badges" },
+        !isEvidenceCard ? h("div", { className: "ob-card-badges" },
           h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(disposition)) }, dispositionLabel(disposition)),
-          stopCode && !isEvidenceCard ? h(PolicyTag, {
+          stopCode ? h(PolicyTag, {
             code: effectiveCode,
             definitions: props.policyDefinitions,
             onShow: props.onPolicyDefinition,
           }) : null
-        )
+        ) : null
       ),
       cardSummary && !isEvidenceCard ? h("p", { className: "ob-card-summary" }, cardSummary) : null,
       cardTopics.length ? h("div", { className: "ob-topic-list" }, cardTopics.map(function (topic) {
@@ -1051,6 +1280,26 @@
     }));
   }
 
+  function TagsDetailPanel(props) {
+    const thought = props.thought || {};
+    const topics = asArray(thought.topics);
+    const people = asArray(thought.people);
+    const detail = stageDetailFor(thought, "tags");
+    return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--tags" },
+      h("div", { className: "ob-section-heading" }, h("h3", null, "Tags")),
+      h("p", { className: "ob-stage-detail-note" }, "Candidate metadata used for review and retrieval. Tags are not proof that this candidate was imported into CortexDB."),
+      topics.length ? h("div", { className: "ob-topic-list" }, topics.map(function (topic) {
+        return h("span", { key: topic, className: "ob-topic" }, topic);
+      })) : h(StageEmpty, null, "No tags recorded for this candidate."),
+      h(StageKeyValueList, { rows: [
+        { label: "People", value: people },
+        { label: "Memory type", value: detail.memory_type || thought.memory_type || thought.type },
+        { label: "Candidate ID", value: thought.candidate_id },
+        { label: "Current stage", value: stageLabel(thought.current_stage) },
+      ] })
+    );
+  }
+
   function ExtractedEvidencePanel(props) {
     const thought = props.thought || {};
     const detail = stageDetailFor(thought, "extracted");
@@ -1193,12 +1442,14 @@
 
   function StageSpecificDetailPanel(props) {
     const thought = props.thought || {};
-    if (thought.current_stage === "extracted") return h(ExtractedEvidencePanel, props);
-    if (thought.current_stage === "shaped") return h(ShapedFormationPanel, props);
-    if (thought.current_stage === "policy") return h(PolicyDecisionPanel, props);
-    if (thought.current_stage === "deduped") return h(DedupeEvidencePanel, props);
-    if (thought.current_stage === "ready_for_cortexdb") return h(ReadyPackagePanel, props);
-    if (thought.current_stage === "cortexdb") return h(CortexDBReceiptPanel, props);
+    const selectedStage = props.selectedStage || thought.current_stage;
+    if (selectedStage === "tags") return h(TagsDetailPanel, props);
+    if (selectedStage === "extracted") return h(ExtractedEvidencePanel, props);
+    if (selectedStage === "shaped") return h(ShapedFormationPanel, props);
+    if (selectedStage === "policy") return h(PolicyDecisionPanel, props);
+    if (selectedStage === "deduped") return h(DedupeEvidencePanel, props);
+    if (selectedStage === "ready_for_cortexdb") return h(ReadyPackagePanel, props);
+    if (selectedStage === "cortexdb") return h(CortexDBReceiptPanel, props);
     return h("section", { className: "ob-stage-detail-panel" },
       h("h3", null, "Stage detail"),
       h("p", { className: "ob-muted" }, "No stage-specific detail is available for this card.")
@@ -1245,6 +1496,7 @@
           thought.source_snippet || thought.quote || thought.raw_text ? h("blockquote", { className: "ob-source-snippet" }, thought.source_snippet || thought.quote || thought.raw_text) : null,
           h(StageSpecificDetailPanel, {
             thought: thought,
+            selectedStage: props.selectedDetailStage,
             policyDefinitions: props.policyDefinitions,
             onPolicyDefinition: props.onPolicyDefinition,
           }),
@@ -1308,6 +1560,9 @@
     const detailErrorState = useState(null);
     const detailError = detailErrorState[0];
     const setDetailError = detailErrorState[1];
+    const selectedDetailStageState = useState(null);
+    const selectedDetailStage = selectedDetailStageState[0];
+    const setSelectedDetailStage = selectedDetailStageState[1];
     const policyDefinitionState = useState(null);
     const policyDefinition = policyDefinitionState[0];
     const setPolicyDefinition = policyDefinitionState[1];
@@ -1369,7 +1624,8 @@
       });
     }
 
-    async function openDetail(card) {
+    async function openDetail(card, detailStage) {
+      setSelectedDetailStage(detailStage || null);
       setDetail(null);
       setDetailError(null);
       setDetailLoading(true);
@@ -1387,6 +1643,7 @@
       setDetail(null);
       setDetailError(null);
       setDetailLoading(false);
+      setSelectedDetailStage(null);
     }
 
     function handleDateFromChange(value) {
@@ -1427,6 +1684,7 @@
         thought: detail,
         loading: detailLoading,
         error: detailError,
+        selectedDetailStage: selectedDetailStage,
         policyDefinitions: board ? policyDefinitions(board) : DEFAULT_POLICY_STOP_DEFINITIONS,
         onPolicyDefinition: setPolicyDefinition,
         onClose: closeDetail,

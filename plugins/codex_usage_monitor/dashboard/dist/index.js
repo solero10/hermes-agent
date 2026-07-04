@@ -815,6 +815,24 @@
     );
   }
 
+  function HermesSessionAttribution(props) {
+    const sessions = Array.isArray(props.account && props.account.hermes_sessions) ? props.account.hermes_sessions : [];
+    if (!sessions.length) return null;
+    return h("div", { className: "codex-usage-hermes-sessions" },
+      h("div", { className: "codex-usage-hermes-sessions-label" }, "Hermes sessions"),
+      h("div", { className: "codex-usage-hermes-sessions-list" },
+        sessions.slice(0, 3).map(function (session, index) {
+          const status = session && session.status ? String(session.status) : "in flight";
+          const title = session && session.title ? String(session.title) : "Untitled Hermes session";
+          return h("div", { key: (session && session.session_id ? session.session_id : index) + ":" + index, className: "codex-usage-hermes-session" },
+            h("span", { className: "codex-usage-hermes-session-title" }, title),
+            h("span", { className: "codex-usage-hermes-session-status" }, status)
+          );
+        })
+      )
+    );
+  }
+
   function AccountCard(props) {
     const account = props.account || {};
     const windows = account.windows || {};
@@ -869,6 +887,7 @@
         ),
         h("div", { className: "codex-usage-helper" }, helperText),
         exhausted ? h(CooldownNotice, { account: account }) : null,
+        h(HermesSessionAttribution, { account: account }),
         account.error ? h("div", { className: "codex-usage-account-error" }, String(account.error)) : null,
         h(WindowMetric, { title: "5-hour", windowData: windows.five_hour }),
         h(WindowMetric, { title: "Weekly", windowData: windows.weekly }),
@@ -897,6 +916,7 @@
         ),
         h("span", { className: "codex-usage-detail-badge" }, "5-hour + weekly")
       ),
+      h(HermesSessionAttribution, { account: account }),
       h("div", { className: "codex-usage-detail-charts" },
         h(WindowMetric, {
           title: "5-hour",
@@ -1036,7 +1056,7 @@
           h("div", { className: "codex-usage-kicker" }, "Codex OAuth usage"),
           h("h1", null, "Codex Usage Monitor")
         ),
-        h("p", { className: "codex-usage-poll-note" }, "Polls every 10 seconds. Collector checks quota every 15 seconds. Active account is inferred from quota drops, not session mapping."),
+        h("p", { className: "codex-usage-poll-note" }, "Polls every 10 seconds. Collector checks quota every 15 seconds. Active pulses come from quota drops. Hermes session titles appear only when Hermes recorded a matching local request."),
         snapshot ? h(SnapshotMeta, { snapshot: snapshot }) : h("div", { className: "codex-usage-meta", "aria-hidden": "true" })
       ),
 

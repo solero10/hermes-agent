@@ -73,6 +73,12 @@ def test_frontend_declares_all_required_components_before_registration():
         "PolicyTag",
         "PolicyDefinitionDialog",
         "SourceRow",
+        "SourceCompactSummary",
+        "EvidenceGrid",
+        "EvidenceMiniCard",
+        "CandidatePipelineTable",
+        "CandidateTableRow",
+        "CandidateStageCell",
         "StageColumn",
         "ThoughtCard",
         "ThoughtDetail",
@@ -90,6 +96,7 @@ def test_frontend_declares_all_required_components_before_registration():
         "DatabaseFields",
         "DatabaseFieldValue",
         "StageSpecificDetailPanel",
+        "TagsDetailPanel",
         "ExtractedEvidencePanel",
         "ShapedFormationPanel",
         "PolicyDecisionPanel",
@@ -267,7 +274,7 @@ def test_abbreviated_thought_cards_do_not_render_stage_or_lineage_metadata():
     assert "Lineage ID" in frontend  # detail view keeps the lineage identifier.
 
 
-def test_evidence_cards_keep_badge_tags_and_open_details_from_card_face():
+def test_evidence_cards_keep_tags_without_status_badge_and_open_details_from_card_face():
     frontend = _read(FRONTEND_JS_PATH)
     css = _read(FRONTEND_CSS_PATH)
     card_start = frontend.index("function ThoughtCard")
@@ -280,6 +287,7 @@ def test_evidence_cards_keep_badge_tags_and_open_details_from_card_face():
     assert "cardProps.tabIndex = 0;" in thought_card
     assert "cardProps.onClick = function () { props.onOpenDetail(card); };" in thought_card
     assert 'event.key === "Enter" || event.key === " "' in thought_card
+    assert '!isEvidenceCard ? h("div", { className: "ob-card-badges" }' in thought_card
     assert 'h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(disposition)) }, dispositionLabel(disposition))' in thought_card
     assert 'String(topic || "").trim().toLowerCase() !== "extracted evidence"' in thought_card
     assert 'cardTopics.length ? h("div", { className: "ob-topic-list" }, cardTopics.map(function (topic)' in thought_card
@@ -288,6 +296,80 @@ def test_evidence_cards_keep_badge_tags_and_open_details_from_card_face():
     assert '!isEvidenceCard ? h("button", {' in thought_card
     assert "ob-thought-card--clickable" in css
     assert ".ob-thought-card--clickable:focus-visible" in css
+
+
+def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
+    frontend = _read(FRONTEND_JS_PATH)
+    css = _read(FRONTEND_CSS_PATH)
+
+    for component in (
+        "SourceCompactSummary",
+        "EvidenceGrid",
+        "EvidenceMiniCard",
+        "CandidatePipelineTable",
+        "CandidateTableRow",
+        "CandidateStageCell",
+        "TagsDetailPanel",
+    ):
+        assert f"function {component}" in frontend
+
+    source_row = frontend[frontend.index("function SourceRow"):frontend.index("function SourceCompactSummary")]
+    assert "h(SourceCompactSummary" in source_row
+    assert "h(EvidenceGrid" in source_row
+    assert "h(CandidatePipelineTable" in source_row
+    assert "ob-stage-grid" not in source_row
+
+    assert 'return cardsForStage(row, "extracted");' in frontend
+    assert "function evidenceCardTitle(card)" in frontend
+    assert "function evidenceTopicLabel(topic)" in frontend
+    assert "card.title || card.evidence_title || card.summary" in frontend
+    assert 'title: evidenceTitle' in frontend
+    assert 'h("strong", { className: "ob-evidence-mini-title" }, evidenceTitle)' in frontend
+    evidence_card_start = frontend.index("function EvidenceMiniCard")
+    evidence_card_end = frontend.index("function CandidatePipelineTable")
+    evidence_card = frontend[evidence_card_start:evidence_card_end]
+    assert 'className: "ob-card-badges"' not in evidence_card
+    assert 'dispositionLabel(card.disposition || "in_progress")' not in evidence_card
+    assert 'normalized === "covered by thought candidate"' in frontend
+    assert 'return "used";' in frontend
+    assert "ob-evidence-mini-label" not in frontend
+    assert "candidateCardsForRow(row)" in frontend
+    assert "Object.keys(columns).forEach(function (stageId)" in frontend
+    assert 'stageId !== "extracted"' in frontend
+
+    for selector in (
+        ".ob-evidence-grid",
+        ".ob-evidence-mini-card",
+        ".ob-candidate-table-wrap",
+        ".ob-candidate-table",
+        ".ob-candidate-stage-cell",
+        ".ob-source-summary-strip",
+    ):
+        assert selector in css
+    assert "-webkit-line-clamp: 2;" in css
+    assert "white-space: nowrap;" not in css[css.index(".ob-evidence-mini-title {"):css.index(".ob-candidate-table-wrap {")]
+    assert "white-space: nowrap;" not in css[css.index(".ob-candidate-title-button {"):css.index(".ob-candidate-title-button:hover")]
+    assert "position: sticky;" in css
+
+
+def test_candidate_table_detail_cells_pass_selected_detail_stage_to_modal():
+    frontend = _read(FRONTEND_JS_PATH)
+
+    assert "selectedDetailStage" in frontend
+    assert "async function openDetail(card, detailStage)" in frontend
+    assert "setSelectedDetailStage(detailStage || null);" in frontend
+    assert "h(ThoughtDetail, {" in frontend
+    assert "selectedDetailStage: selectedDetailStage" in frontend
+    assert "function TagsDetailPanel" in frontend
+    assert 'const selectedStage = props.selectedStage || thought.current_stage;' in frontend
+    assert 'selectedStage === "tags"' in frontend
+    assert "selectedStage: props.selectedDetailStage" in frontend
+
+    for stage in ("tags", "policy", "deduped", "ready_for_cortexdb", "cortexdb"):
+        assert f'id: "{stage}"' in frontend
+    assert 'props.onOpenDetail(card, "tags");' in frontend
+    assert 'props.onOpenDetail(card, "shaped");' in frontend
+    assert "props.onOpenDetail(card, stage.id);" in frontend
 
 
 def test_database_fields_are_wired_into_detail_bottom_and_render_field_payloads():
@@ -327,7 +409,30 @@ def test_database_fields_are_wired_into_detail_bottom_and_render_field_payloads(
 def test_css_uses_ob_namespace_and_required_selectors():
     css = _read(FRONTEND_CSS_PATH)
 
-    for selector in (".ob-ingestion", ".ob-toolbar", ".ob-row", ".ob-stage", ".ob-card-badges", ".ob-policy-tag", ".ob-policy-definition-dialog", ".ob-formation-trace", ".ob-trace-card", ".ob-trace-pre", ".ob-trace-kv-list", ".ob-stage-detail-panel", ".ob-stage-checklist", ".ob-database-fields", ".ob-db-field-row"):
+    for selector in (
+        ".ob-ingestion",
+        ".ob-toolbar",
+        ".ob-row",
+        ".ob-stage",
+        ".ob-card-badges",
+        ".ob-policy-tag",
+        ".ob-policy-definition-dialog",
+        ".ob-formation-trace",
+        ".ob-trace-card",
+        ".ob-trace-pre",
+        ".ob-trace-kv-list",
+        ".ob-stage-detail-panel",
+        ".ob-stage-detail-panel--tags",
+        ".ob-stage-checklist",
+        ".ob-database-fields",
+        ".ob-db-field-row",
+        ".ob-source-summary-strip",
+        ".ob-evidence-grid",
+        ".ob-evidence-mini-card",
+        ".ob-candidate-pipeline",
+        ".ob-candidate-table",
+        ".ob-candidate-stage-cell",
+    ):
         assert selector in css
     assert "ready-for-cortexdb" in css
     assert ":disabled" in css or "[disabled]" in css
@@ -355,6 +460,10 @@ def test_docs_cover_snapshot_boundary_and_read_only_mvp():
         "each card appears exactly once",
         "Evidence cards",
         "Thought candidates",
+        "Candidate memory table",
+        "Evidence grid",
+        "Candidate memory pipeline",
+        "CortexDB import",
         "Ready for CortexDB",
         "Stopped and not-imported cards",
         "~/.hermes/openbrain-ingestion-dashboard/snapshot.json",
