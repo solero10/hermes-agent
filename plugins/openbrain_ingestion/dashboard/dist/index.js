@@ -337,6 +337,9 @@
       if (dedupeDecision === "duplicate") return "duplicate";
       if (dedupeDecision === "review_required") return "needs_review";
       if (dedupeDecision === "not_run") return "not_reached";
+      if (card.stop_stage_id === "deduped" && effectiveStopCode(card) === "duplicate") return "duplicate";
+      if (currentStage === "deduped" && (disposition === "needs_review" || card.needs_review)) return "needs_review";
+      if (currentStage === "deduped" && disposition === "in_progress") return "complete";
     }
     if (stageId === "cortexdb") {
       return disposition === "imported" && card.cortexdb_id ? "imported" : "not_imported";
@@ -359,6 +362,9 @@
       if (dedupeDecision === "duplicate") return "Duplicate";
       if (dedupeDecision === "review_required") return "Review";
       if (dedupeDecision === "not_run") return "Not run";
+      if (card.stop_stage_id === "deduped" && effectiveStopCode(card) === "duplicate") return "Duplicate";
+      if (card.current_stage === "deduped" && (card.disposition === "needs_review" || card.needs_review)) return "Review";
+      if (card.current_stage === "deduped" && card.disposition === "in_progress") return "Unique";
     }
     if (status === "imported") return "Imported";
     if (status === "not_imported") return "Not imported";
@@ -367,6 +373,31 @@
     if (status === "stopped") return "Stopped";
     if (status === "needs_review") return "Needs review";
     return "Not reached";
+  }
+
+  function dedupeSemanticScoreForCard(card) {
+    const detail = stageDetailFor(card, "deduped");
+    const related = asArray(card && card.related_memories)[0] || {};
+    const candidates = [
+      card && card.dedupe_similarity_score,
+      card && card.dedupe_nearest_similarity_score,
+      detail.similarity_score,
+      detail.nearest_similarity_score,
+      detail.score,
+      related.score,
+    ];
+    for (let index = 0; index < candidates.length; index += 1) {
+      const raw = candidates[index];
+      if (raw === null || raw === undefined || raw === "") continue;
+      const value = Number(raw);
+      if (Number.isFinite(value)) return value;
+    }
+    return null;
+  }
+
+  function formatDedupeSemanticScore(score) {
+    if (score === null || score === undefined || !Number.isFinite(Number(score))) return "";
+    return Number(score).toFixed(3);
   }
 
   function policyResultForCard(card) {
@@ -836,7 +867,9 @@
     const stage = props.stage || {};
     const status = candidateStageStatus(card, stage.id);
     const label = candidateStageLabel(card, stage.id);
-    const ariaLabel = "Open " + safeText(stage.label, "stage") + " details for " + safeText(card.title || card.lineage_id, "candidate");
+    const dedupeScoreText = stage.id === "deduped" ? formatDedupeSemanticScore(dedupeSemanticScoreForCard(card)) : "";
+    const ariaLabel = "Open " + safeText(stage.label, "stage") + " details for " + safeText(card.title || card.lineage_id, "candidate") +
+      (dedupeScoreText ? " (semantic score " + dedupeScoreText + ")" : "");
     if (stage.id === "tags") {
       const topics = asArray(card.topics);
       return h("td", { className: cx("ob-candidate-stage-cell", "ob-candidate-stage-cell--tags") },
@@ -859,7 +892,13 @@
         onClick: function () { props.onOpenDetail(card, stage.id); },
         "aria-label": ariaLabel,
       },
-        h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(status)) }, label)
+        h("span", { className: "ob-candidate-cell-content" },
+          h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(status)) }, label),
+          dedupeScoreText ? h("span", {
+            className: "ob-dedupe-score-inline",
+            title: "Semantic score " + dedupeScoreText,
+          }, "score ", dedupeScoreText) : null
+        )
       )
     );
   }
@@ -1409,7 +1448,8 @@
     const thought = props.thought || {};
     const trace = formationTraceForThought(thought);
     return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--shaped" },
-      h(OriginalShapedThoughtPanel, { thought: thought, trace: trace })
+      h(OriginalShapedThoughtPanel, { thought: thought, trace: trace }),
+      h(FormationTrace, { thought: thought, showGateEvents: false })
     );
   }
 
@@ -1448,6 +1488,10 @@
     const related = asArray(thought.related_memories)[0] || {};
     const hasDetail = stageDetailHasContent(detail) || thought.matched_memory_id || related.id;
     const exactMatch = detail.exact_match === true ? "Yes" : detail.exact_match === false ? "No" : undefined;
+    const semanticScore = detail.similarity_score !== undefined && detail.similarity_score !== null ? detail.similarity_score :
+      detail.nearest_similarity_score !== undefined && detail.nearest_similarity_score !== null ? detail.nearest_similarity_score : related.score;
+    const duplicateCutoff = detail.semantic_duplicate_cutoff !== undefined && detail.semantic_duplicate_cutoff !== null ? detail.semantic_duplicate_cutoff :
+      detail.search_threshold !== undefined && detail.search_threshold !== null ? detail.search_threshold : undefined;
     return h("section", { className: "ob-stage-detail-panel ob-stage-detail-panel--deduped" },
       h("div", { className: "ob-section-heading" }, h("h3", null, "Dedupe framework")),
       h("p", { className: "ob-stage-detail-note" }, "Semantic pre-search and exact-fingerprint result for this Candidate. Dedupe-column clicks open this framework view."),
@@ -1456,8 +1500,10 @@
           { label: "Framework", value: detail.framework || "CortexDB/OpenBrain semantic pre-search" },
           { label: "Dedupe decision", value: detail.decision },
           { label: "Dedupe method", value: detail.method },
+          { label: "Duplicate cutoff", value: duplicateCutoff },
           { label: "Matched memory", value: detail.matched_memory_title || detail.matched_memory_id || thought.matched_memory_id || related.title || related.id },
-          { label: "Similarity score", value: detail.similarity_score !== undefined ? detail.similarity_score : related.score },
+          { label: "Nearest memory", value: detail.nearest_memory_title || detail.nearest_memory_id },
+          { label: "Semantic score", value: semanticScore },
           { label: "Exact match", value: exactMatch },
           { label: "Content fingerprint", value: detail.content_fingerprint },
           { label: "Semantic dedupe evidence", value: detail.evidence_note },
@@ -1583,7 +1629,7 @@
             }) : null,
             thought.current_stage === "ready_for_cortexdb" ? h("span", { className: "ob-ready-label" }, "Ready for CortexDB") : null
           ) : null,
-          !isOriginalShapedView ? h(DetailIDs, { thought: thought }) : null,
+          h(DetailIDs, { thought: thought }),
           detailSummary ? h("p", { className: "ob-detail-copy" }, detailSummary) : null,
           !isOriginalShapedView && (thought.source_snippet || thought.quote || thought.raw_text) ? h("blockquote", { className: "ob-source-snippet" }, thought.source_snippet || thought.quote || thought.raw_text) : null,
           h(StageSpecificDetailPanel, {
@@ -1592,8 +1638,8 @@
             policyDefinitions: props.policyDefinitions,
             onPolicyDefinition: props.onPolicyDefinition,
           }),
-          !isOriginalShapedView ? h(SourceContext, { thought: thought }) : null,
-          !isOriginalShapedView ? h(LineageTimeline, { thought: thought }) : null,
+          h(SourceContext, { thought: thought }),
+          h(LineageTimeline, { thought: thought }),
           !isOriginalShapedView ? h("div", { className: "ob-readonly-actions" },
             h(ReadOnlyButton, null, "Reopen later"),
             h(ReadOnlyButton, null, "Promote later"),

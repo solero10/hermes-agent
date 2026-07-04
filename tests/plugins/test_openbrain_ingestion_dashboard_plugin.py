@@ -114,6 +114,10 @@ def hermes_home(tmp_path, monkeypatch):
                                 "method": "semantic",
                                 "decision": "duplicate",
                                 "matched_memory_id": "thought_existing_91c",
+                                "nearest_memory_title": "Start narrow",
+                                "nearest_similarity_score": 0.88,
+                                "semantic_duplicate_cutoff": 0.92,
+                                "search_threshold": 0.0,
                             }
                         },
                         "related_memories": [
@@ -304,6 +308,7 @@ def test_board_groups_thoughts_by_current_stage_once_and_splits_counts(client):
     assert first["columns"]["cortexdb"][0]["id"] == "lineage_demo_7f3a"
     assert first["columns"]["deduped"][0]["id"] == "lineage_dup_1"
     assert first["columns"]["deduped"][0]["dedupe_decision"] == "duplicate"
+    assert first["columns"]["deduped"][0]["dedupe_nearest_similarity_score"] == 0.88
     assert first["columns"]["ready_for_cortexdb"][0]["id"] == "lineage_ready_1"
     assert first["columns"]["ready_for_cortexdb"][0]["policy_result"] == "passed"
 
@@ -590,6 +595,11 @@ def test_thought_detail_stopped_duplicate_strips_receipt(client):
     assert thought["stop_target_id"] == "thought_existing_91c"
     assert thought["stop_target_label"] == "Start narrow"
     assert thought["stop_stage_id"] == "deduped"
+    dedupe_detail = thought["stage_detail"]["deduped"]
+    assert dedupe_detail["nearest_memory_title"] == "Start narrow"
+    assert dedupe_detail["nearest_similarity_score"] == 0.88
+    assert dedupe_detail["semantic_duplicate_cutoff"] == 0.92
+    assert dedupe_detail["search_threshold"] == 0.0
     assert "cortexdb_receipt" not in thought or thought["cortexdb_receipt"] in ({}, None)
     assert next(stage for stage in thought["stages"] if stage["id"] == "policy")["status"] == "complete"
     later = [stage for stage in thought["stages"] if stage["id"] in {"ready_for_cortexdb", "cortexdb"}]

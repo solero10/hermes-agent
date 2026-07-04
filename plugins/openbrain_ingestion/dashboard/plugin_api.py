@@ -706,6 +706,11 @@ class DedupeEvidenceDetail(BaseModel):
     matched_memory_id: str | None = None
     matched_memory_title: str | None = None
     similarity_score: float | None = None
+    nearest_memory_id: str | None = None
+    nearest_memory_title: str | None = None
+    nearest_similarity_score: float | None = None
+    semantic_duplicate_cutoff: float | None = None
+    search_threshold: float | None = None
     content_fingerprint: str | None = None
     exact_match: bool | None = None
     merge_note: str | None = None
@@ -1150,6 +1155,8 @@ class ThoughtCard(BaseModel):
     confidence: float | None = None
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
+    dedupe_similarity_score: float | None = None
+    dedupe_nearest_similarity_score: float | None = None
     cortexdb_id: str | None = None
 
     @field_validator("current_stage", mode="before")
@@ -1513,15 +1520,22 @@ def _card(thought: Any, source_unit_id: str) -> dict[str, Any]:
         "stopped_reason": t.get("stopped_reason"),
         "matched_memory_id": t.get("matched_memory_id"),
     }
-    stage_detail = t.get("stage_detail") if isinstance(t.get("stage_detail"), dict) else {}
-    policy_detail = stage_detail.get("policy") if isinstance(stage_detail.get("policy"), dict) else {}
+    stage_detail_raw = t.get("stage_detail")
+    stage_detail: dict[str, Any] = stage_detail_raw if isinstance(stage_detail_raw, dict) else {}
+    policy_detail_raw = stage_detail.get("policy")
+    policy_detail: dict[str, Any] = policy_detail_raw if isinstance(policy_detail_raw, dict) else {}
     policy_result = policy_detail.get("result")
     if policy_result:
         card["policy_result"] = policy_result
-    dedupe_detail = stage_detail.get("deduped") if isinstance(stage_detail.get("deduped"), dict) else {}
+    dedupe_detail_raw = stage_detail.get("deduped")
+    dedupe_detail: dict[str, Any] = dedupe_detail_raw if isinstance(dedupe_detail_raw, dict) else {}
     dedupe_decision = dedupe_detail.get("decision")
     if dedupe_decision:
         card["dedupe_decision"] = dedupe_decision
+    if dedupe_detail.get("similarity_score") is not None:
+        card["dedupe_similarity_score"] = dedupe_detail.get("similarity_score")
+    if dedupe_detail.get("nearest_similarity_score") is not None:
+        card["dedupe_nearest_similarity_score"] = dedupe_detail.get("nearest_similarity_score")
     cortexdb_id = _receipt_id(t)
     if cortexdb_id:
         card["cortexdb_id"] = cortexdb_id

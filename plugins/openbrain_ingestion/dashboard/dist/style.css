@@ -508,6 +508,25 @@
   min-width: 7.5rem;
 }
 
+.ob-candidate-cell-content {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.ob-dedupe-score-inline {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--ob-accent) 42%, var(--ob-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ob-accent) 8%, var(--ob-bg-strong));
+  color: color-mix(in srgb, var(--ob-accent) 76%, var(--ob-text));
+  font-size: 0.68rem;
+  line-height: 1;
+  padding: 0.2rem 0.42rem;
+}
+
 .ob-candidate-stage-cell .ob-topic-list {
   max-height: 2.6rem;
   overflow: hidden;

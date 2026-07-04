@@ -222,6 +222,9 @@ def test_board_detail_and_state_strings_are_present():
         "Candidate text reviewed",
         "Dedupe framework",
         "Dedupe-column clicks open this framework view.",
+        "Duplicate cutoff",
+        "Nearest memory",
+        "Semantic score",
         "Semantic dedupe evidence",
         "Ready package",
         "Import payload preview",
@@ -353,6 +356,8 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
         ".ob-candidate-table-wrap",
         ".ob-candidate-table",
         ".ob-candidate-stage-cell",
+        ".ob-candidate-cell-content",
+        ".ob-dedupe-score-inline",
         ".ob-source-summary-strip",
     ):
         assert selector in css
@@ -387,6 +392,15 @@ def test_candidate_table_detail_cells_pass_selected_detail_stage_to_modal():
     assert 'return "Skipped";' in frontend
     assert 'dedupeDecision === "duplicate"' in frontend
     assert 'return "duplicate";' in frontend
+    assert 'card.stop_stage_id === "deduped" && effectiveStopCode(card) === "duplicate"' in frontend
+    assert 'card.current_stage === "deduped" && card.disposition === "in_progress"' in frontend
+    assert "function dedupeSemanticScoreForCard(card)" in frontend
+    assert "card && card.dedupe_similarity_score" in frontend
+    assert "card && card.dedupe_nearest_similarity_score" in frontend
+    assert "function formatDedupeSemanticScore(score)" in frontend
+    assert "ob-dedupe-score-inline" in frontend
+    assert "semantic score " in frontend
+    assert '}, "score ", dedupeScoreText)' in frontend
     assert 'showCandidateStopTag' in frontend
     assert 'effectiveCode === "duplicate" || card.stop_stage_id === "deduped"' in frontend
     assert "function OriginalShapedThoughtPanel" in frontend
@@ -394,12 +408,17 @@ def test_candidate_table_detail_cells_pass_selected_detail_stage_to_modal():
     assert "function originalShapedThoughtText" in frontend
     assert "h(OriginalShapedThoughtPanel, { thought: thought, trace: trace })" in frontend
     shaped_panel = frontend[frontend.index("function ShapedFormationPanel"):frontend.index("function PolicyDecisionPanel")]
-    assert "h(FormationTrace" not in shaped_panel
+    assert "h(FormationTrace, { thought: thought, showGateEvents: false })" in shaped_panel
+    assert shaped_panel.index("h(OriginalShapedThoughtPanel") < shaped_panel.index("h(FormationTrace")
     assert "trace && trace.llm_output_text" in frontend
     assert "thought && thought.summary" not in frontend[frontend.index("function originalShapedThoughtText"):frontend.index("function OriginalShapedThoughtPanel")]
     assert "const isOriginalShapedView = selectedStage === \"shaped\";" in frontend
-    assert "!isOriginalShapedView ? h(DetailIDs, { thought: thought }) : null" in frontend
-    assert "!isOriginalShapedView ? h(LineageTimeline, { thought: thought }) : null" in frontend
+    assert "h(DetailIDs, { thought: thought })" in frontend
+    assert "h(SourceContext, { thought: thought })" in frontend
+    assert "h(LineageTimeline, { thought: thought })" in frontend
+    assert "!isOriginalShapedView ? h(DetailIDs" not in frontend
+    assert "!isOriginalShapedView ? h(SourceContext" not in frontend
+    assert "!isOriginalShapedView ? h(LineageTimeline" not in frontend
     assert "!isOriginalShapedView ? h(RelatedMemories, { thought: thought }) : null" in frontend
     assert "showGateEvents ? h(FormationGateEvents, { trace: trace }) : null" in frontend
 

@@ -39,3 +39,8 @@ export function resolvePageTitle(
   }
   return t.app.webUi;
 }
+
+export function formatBrowserPageTitle(pageTitle: string | null | undefined): string {
+  const trimmed = pageTitle?.trim();
+  return trimmed ? `Hermes - ${trimmed}` : "Hermes";
+}

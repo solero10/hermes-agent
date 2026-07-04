@@ -1,7 +1,16 @@
-import { useLayoutEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { useLocation } from "react-router-dom";
 import { PageHeaderContext } from "./page-header-context";
-import { resolvePageTitle } from "@/lib/resolve-page-title";
+import {
+  formatBrowserPageTitle,
+  resolvePageTitle,
+} from "@/lib/resolve-page-title";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
 
@@ -33,6 +42,10 @@ export function PageHeaderProvider({
     [pathname, t, pluginTabs],
   );
   const displayTitle = titleOverride ?? defaultTitle;
+
+  useEffect(() => {
+    document.title = formatBrowserPageTitle(displayTitle);
+  }, [displayTitle]);
 
   const isChatRoute = pathname === "/chat" || pathname === "/chat/";
   /** Env jump-nav is wide — stack below title on small screens so KEYS stays readable. */
