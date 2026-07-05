@@ -114,10 +114,37 @@ _OCCURRENCE_KEYS = ("occurred_at", "recorded_at", "meeting_started_at", "created
 _PROCESSED_KEYS = ("processed_at", "completed_at", "updated_at", "ingested_at")
 _CANDIDATE_STAGE_ALIASES: dict[str, str] = {
     "raw_extraction": "extracted",
+    "policy": "shaped",
+    "policy_review": "shaped",
+    "thought_enrichment": "enrich",
+    "thought-enrichment": "enrich",
+    "enriched": "enrich",
+    "atomized": "atomize",
+    "atomizer": "atomize",
+    "provenance_chains": "provenance",
+    "provenance-chains": "provenance",
+    "schema_aware_routing": "entities_action",
+    "schema-aware-routing": "entities_action",
+    "entities/action": "entities_action",
+    "entities": "entities_action",
+    "entity_action": "entities_action",
     "ready": "ready_for_cortexdb",
     "ready_to_import": "ready_for_cortexdb",
     "candidate": "ready_for_cortexdb",
     "capture_candidate": "ready_for_cortexdb",
+}
+_RECIPE_STAGE_IDS: tuple[str, ...] = ("enrich", "atomize", "provenance", "entities_action")
+_RECIPE_STAGE_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "enrich": ("thought_enrichment", "thought-enrichment", "enriched"),
+    "atomize": ("atomized", "atomizer"),
+    "provenance": ("provenance_chains", "provenance-chains"),
+    "entities_action": (
+        "schema_aware_routing",
+        "schema-aware-routing",
+        "entities/action",
+        "entities",
+        "entity_action",
+    ),
 }
 _DEFAULT_PANNING_GENERATION_TECHNIQUE: dict[str, str] = {
     "id": "panning-for-gold",
@@ -1440,6 +1467,28 @@ def _candidate_generation_technique(*records: dict[str, Any]) -> dict[str, Any]:
                     if technique:
                         return technique
     return copy.deepcopy(_DEFAULT_PANNING_GENERATION_TECHNIQUE)
+
+
+def _candidate_metadata(*records: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        raw_metadata = _dig(record, "metadata")
+        if isinstance(raw_metadata, dict):
+            metadata.update(copy.deepcopy(raw_metadata))
+        for key in (
+            "atomization",
+            "workflow_status",
+            "workflow_statuses",
+            "recipe_status",
+            "recipe_statuses",
+            "recipe_workflow",
+        ):
+            value = _dig(record, key)
+            if value not in (None, "", [], {}):
+                metadata[key] = copy.deepcopy(value)
+    return metadata
 
 
 def _receipt_from_audit(

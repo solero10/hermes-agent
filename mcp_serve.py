@@ -59,13 +59,62 @@ except ImportError:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_sessions_dir() -> Path:
-    """Return the sessions directory using HERMES_HOME."""
+def _get_hermes_home() -> Path:
+    """Return the active Hermes home directory."""
     try:
         from hermes_constants import get_hermes_home
-        return get_hermes_home() / "sessions"
+        return get_hermes_home()
     except ImportError:
-        return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "sessions"
+        return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+
+
+def _get_sessions_dir() -> Path:
+    """Return the sessions directory using HERMES_HOME."""
+    return _get_hermes_home() / "sessions"
+
+
+def _routing_for_entry(session_key: str, entry: dict) -> dict:
+    """Build read-only platform routing visibility for a session entry."""
+    origin = entry.get("origin", {}) if isinstance(entry.get("origin", {}), dict) else {}
+    platform = entry.get("platform") or origin.get("platform", "")
+    chat_id = origin.get("chat_id", "")
+    thread_id = origin.get("thread_id")
+    target = f"{platform}:{chat_id}" if platform and chat_id else platform
+    if thread_id not in (None, "") and target:
+        routed_target = f"{target}:{thread_id}"
+    else:
+        routed_target = target
+
+    return {
+        "target": target,
+        "routed_target": routed_target,
+        "platform": platform,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
+        "chat_name": origin.get("chat_name", ""),
+        "chat_topic": origin.get("chat_topic"),
+        "user_id": origin.get("user_id", ""),
+        "user_name": origin.get("user_name", ""),
+        "session_key": session_key,
+        "session_id": entry.get("session_id", ""),
+    }
+
+
+def _provenance_for_entry(session_key: str, entry: dict) -> dict:
+    """Build read-only source provenance for an MCP conversation record."""
+    origin = entry.get("origin", {}) if isinstance(entry.get("origin", {}), dict) else {}
+    return {
+        "read_only": True,
+        "source": "gateway_sessions_index",
+        "sessions_index_path": str(_get_sessions_dir() / "sessions.json"),
+        "session_db_path": str(_get_hermes_home() / "state.db"),
+        "session_key": session_key,
+        "session_id": entry.get("session_id", ""),
+        "origin_present": bool(origin),
+        "created_at": entry.get("created_at", ""),
+        "updated_at": entry.get("updated_at", ""),
+    }
 
 
 def _get_session_db():
@@ -454,13 +503,14 @@ class EventBridge:
 # MCP Server
 # ---------------------------------------------------------------------------
 
-def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
+def create_mcp_server(event_bridge: Optional[EventBridge] = None):
     """Create and return the Hermes MCP server with all tools registered."""
     if not _MCP_SERVER_AVAILABLE:
         raise ImportError(
             "MCP server requires the 'mcp' package. "
             f"Install with: {sys.executable} -m pip install 'mcp'"
         )
+    assert FastMCP is not None
 
     mcp = FastMCP(
         "hermes",
@@ -484,7 +534,8 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         """List active messaging conversations across connected platforms.
 
         Returns conversations with their session keys (needed for messages_read),
-        platform, chat type, display name, and last activity time.
+        platform, chat type, display name, last activity time, and read-only
+        routing/provenance metadata for deciding where a conversation came from.
 
         Args:
             platform: Filter by platform name (telegram, discord, slack, etc.)
@@ -520,6 +571,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
                 "chat_name": chat_name,
                 "user_name": origin.get("user_name", ""),
                 "updated_at": entry.get("updated_at", ""),
+                "routing": _routing_for_entry(key, entry),
             })
 
         conversations.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
@@ -527,6 +579,8 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
 
         return json.dumps({
             "count": len(conversations),
+            "read_only": True,
+            "provenance_source": "gateway_sessions_index",
             "conversations": conversations,
         }, indent=2)
 
@@ -535,6 +589,9 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
     @mcp.tool()
     def conversation_get(session_key: str) -> str:
         """Get detailed info about one conversation by its session key.
+
+        Includes read-only routing and provenance blocks so MCP clients can see
+        the platform target/session-index source without sending a message.
 
         Args:
             session_key: The session key from conversations_list
@@ -561,6 +618,8 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
             "input_tokens": entry.get("input_tokens", 0),
             "output_tokens": entry.get("output_tokens", 0),
             "total_tokens": entry.get("total_tokens", 0),
+            "routing": _routing_for_entry(session_key, entry),
+            "provenance": _provenance_for_entry(session_key, entry),
         }, indent=2)
 
     # -- messages_read -----------------------------------------------------
@@ -573,7 +632,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         """Read recent messages from a conversation.
 
         Returns the message history in chronological order with role, content,
-        and timestamp for each message.
+        timestamp, and read-only routing/provenance metadata for the transcript.
 
         Args:
             session_key: The session key from conversations_list
@@ -615,6 +674,10 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
 
         return json.dumps({
             "session_key": session_key,
+            "session_id": session_id,
+            "read_only": True,
+            "routing": _routing_for_entry(session_key, entry),
+            "provenance": _provenance_for_entry(session_key, entry),
             "count": len(messages),
             "total_in_session": len(filtered),
             "messages": messages,
@@ -802,9 +865,13 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
                 seen.add(target_str)
                 targets.append({
                     "target": target_str,
+                    "routed_target": _routing_for_entry(key, entry).get("routed_target", target_str),
                     "platform": p,
                     "name": entry.get("display_name") or origin.get("chat_name", ""),
                     "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
+                    "session_key": key,
+                    "session_id": entry.get("session_id", ""),
+                    "provenance_source": "gateway_sessions_index",
                 })
             return json.dumps({"count": len(targets), "channels": targets}, indent=2)
 
@@ -818,9 +885,11 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
                         chat_id = ch.get("id", ch.get("chat_id", ""))
                         channels.append({
                             "target": f"{plat}:{chat_id}" if chat_id else plat,
+                            "routed_target": f"{plat}:{chat_id}" if chat_id else plat,
                             "platform": plat,
                             "name": ch.get("name", ch.get("display_name", "")),
                             "chat_type": ch.get("type", ""),
+                            "provenance_source": "channel_directory",
                         })
 
         return json.dumps({"count": len(channels), "channels": channels}, indent=2)

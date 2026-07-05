@@ -875,6 +875,7 @@
       (dedupeScoreText ? " (semantic similarity " + dedupeScoreText + ")" : "");
     if (stage.id === "tags") {
       const topics = asArray(card.topics);
+      const technique = generationTechniqueFor(card);
       return h("td", { className: cx("ob-candidate-stage-cell", "ob-candidate-stage-cell--tags") },
         h("button", {
           type: "button",
@@ -882,9 +883,11 @@
           onClick: function () { props.onOpenDetail(card, "tags"); },
           "aria-label": ariaLabel,
         },
-          topics.length ? h("span", { className: "ob-topic-list" }, topics.slice(0, 3).map(function (topic) {
+          topics.length || technique ? h("span", { className: "ob-topic-list" }, [
+            technique ? h(TechniquePill, { key: "generation-technique", technique: technique }) : null,
+          ].concat(topics.slice(0, 3).map(function (topic) {
             return h("span", { key: topic, className: "ob-topic" }, topic);
-          })) : h("span", { className: "ob-badge" }, "No tags")
+          }))) : h("span", { className: "ob-badge" }, "No tags")
         )
       );
     }

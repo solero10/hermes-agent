@@ -346,6 +346,10 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
     assert "function generationTechniqueFor(value)" in frontend
     assert 'h(TechniquePill, { technique: technique })' in frontend
     assert 'h(TechniquePill, { thought: thought })' in frontend
+    candidate_stage_cell = frontend[frontend.index("function CandidateStageCell"):frontend.index("function StageColumn")]
+    assert 'const technique = generationTechniqueFor(card);' in candidate_stage_cell
+    assert 'topics.length || technique ? h("span", { className: "ob-topic-list" }, [' in candidate_stage_cell
+    assert 'h(TechniquePill, { key: "generation-technique", technique: technique })' in candidate_stage_cell
     assert 'policyPassedForCard(card)' in frontend
     assert 'topics.includes("policy reviewed")' in frontend
     assert "function dedupeDecisionForCard(card)" in frontend

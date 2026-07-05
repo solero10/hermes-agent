@@ -108,8 +108,8 @@ def sample_sessions():
                 "chat_type": "group",
                 "user_id": "U5678",
                 "user_name": "Carol",
-                "thread_id": None,
-                "chat_topic": None,
+                "thread_id": "T999",
+                "chat_topic": "roadmap",
             },
         },
     }
@@ -358,6 +358,31 @@ class TestAttachmentExtraction:
         assert att[0]["type"] == "image"
 
 
+class TestRoutingAndProvenanceHelpers:
+    def test_routing_for_entry_exposes_thread_target(self, sample_sessions):
+        from mcp_serve import _routing_for_entry
+
+        session_key = "agent:main:slack:group:C1234:U5678"
+        routing = _routing_for_entry(session_key, sample_sessions[session_key])
+
+        assert routing["target"] == "slack:C1234"
+        assert routing["routed_target"] == "slack:C1234:T999"
+        assert routing["chat_topic"] == "roadmap"
+        assert routing["session_key"] == session_key
+
+    def test_provenance_for_entry_is_read_only(self, sample_sessions):
+        from mcp_serve import _provenance_for_entry
+
+        session_key = "agent:main:telegram:dm:123456"
+        provenance = _provenance_for_entry(session_key, sample_sessions[session_key])
+
+        assert provenance["read_only"] is True
+        assert provenance["source"] == "gateway_sessions_index"
+        assert provenance["session_id"] == "20260329_120000_abc123"
+        assert provenance["sessions_index_path"].endswith("sessions/sessions.json")
+        assert provenance["session_db_path"].endswith("state.db")
+
+
 # ---------------------------------------------------------------------------
 # 2. EVENT BRIDGE TESTS — queue, cursors, waiters, concurrency
 # ---------------------------------------------------------------------------
@@ -531,8 +556,13 @@ class TestE2EConversationsList:
         server, _ = mcp_server_e2e
         result = _run_tool(server, "conversations_list")
         assert result["count"] == 3
+        assert result["read_only"] is True
+        assert result["provenance_source"] == "gateway_sessions_index"
         platforms = {c["platform"] for c in result["conversations"]}
         assert platforms == {"telegram", "discord", "slack"}
+        telegram = next(c for c in result["conversations"] if c["platform"] == "telegram")
+        assert telegram["routing"]["target"] == "telegram:123456"
+        assert telegram["routing"]["session_id"] == "20260329_120000_abc123"
 
     def test_list_sorted_by_updated(self, mcp_server_e2e, _event_loop):
         server, _ = mcp_server_e2e
@@ -580,6 +610,10 @@ class TestE2EConversationGet:
         assert result["display_name"] == "Alice"
         assert result["chat_id"] == "123456"
         assert result["input_tokens"] == 50000
+        assert result["routing"]["target"] == "telegram:123456"
+        assert result["routing"]["routed_target"] == "telegram:123456"
+        assert result["provenance"]["read_only"] is True
+        assert result["provenance"]["source"] == "gateway_sessions_index"
 
     def test_get_nonexistent(self, mcp_server_e2e, _event_loop):
         server, _ = mcp_server_e2e
@@ -594,6 +628,10 @@ class TestE2EMessagesRead:
         result = _run_tool(server, "messages_read",
                           {"session_key": "agent:main:telegram:dm:123456"})
         assert result["count"] > 0
+        assert result["read_only"] is True
+        assert result["session_id"] == "20260329_120000_abc123"
+        assert result["routing"]["target"] == "telegram:123456"
+        assert result["provenance"]["source"] == "gateway_sessions_index"
         # Should filter out tool messages — only user/assistant
         roles = {m["role"] for m in result["messages"]}
         assert "tool" not in roles
@@ -819,6 +857,10 @@ class TestE2EChannelsList:
         assert "telegram:123456" in targets
         assert "discord:789" in targets
         assert "slack:C1234" in targets
+        slack = next(c for c in result["channels"] if c["target"] == "slack:C1234")
+        assert slack["routed_target"] == "slack:C1234:T999"
+        assert slack["session_key"] == "agent:main:slack:group:C1234:U5678"
+        assert slack["provenance_source"] == "gateway_sessions_index"
 
     def test_channels_platform_filter(self, mcp_server_e2e, _event_loop):
         server, _ = mcp_server_e2e
@@ -851,6 +893,7 @@ class TestE2EChannelsList:
         assert result["count"] == 3
         targets = {c["target"] for c in result["channels"]}
         assert targets == {"telegram:123456", "telegram:-100999", "discord:789"}
+        assert {c["provenance_source"] for c in result["channels"]} == {"channel_directory"}
 
     def test_channels_with_directory_platform_filter(self, mcp_server_e2e, _event_loop, monkeypatch):
         """Platform filter should work against the wrapped 'platforms' payload."""

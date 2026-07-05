@@ -754,10 +754,11 @@
 }
 
 .ob-technique-pill {
-  border-color: color-mix(in srgb, var(--ob-accent) 28%, var(--ob-border));
-  background: color-mix(in srgb, var(--ob-accent) 6%, transparent);
-  color: color-mix(in srgb, var(--ob-muted) 84%, var(--ob-accent));
-  font-weight: 620;
+  border-color: hsl(var(--ring, 174 86% 62%) / 0.45);
+  background: hsl(var(--ring, 174 86% 62%) / 0.12);
+  color: hsl(var(--ring, 174 86% 62%));
+  font-size: 0.72rem;
+  font-weight: 680;
   letter-spacing: 0.01em;
 }
 
