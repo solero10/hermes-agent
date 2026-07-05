@@ -119,8 +119,11 @@ _CANDIDATE_STAGE_ALIASES: dict[str, str] = {
     "thought_enrichment": "enrich",
     "thought-enrichment": "enrich",
     "enriched": "enrich",
-    "atomized": "atomize",
-    "atomizer": "atomize",
+    # Atomize was removed from the dashboard. Map legacy stage values to the
+    # next visible recipe lane instead of exposing an Atomize column.
+    "atomize": "provenance",
+    "atomized": "provenance",
+    "atomizer": "provenance",
     "provenance_chains": "provenance",
     "provenance-chains": "provenance",
     "schema_aware_routing": "entities_action",
@@ -133,10 +136,9 @@ _CANDIDATE_STAGE_ALIASES: dict[str, str] = {
     "candidate": "ready_for_cortexdb",
     "capture_candidate": "ready_for_cortexdb",
 }
-_RECIPE_STAGE_IDS: tuple[str, ...] = ("enrich", "atomize", "provenance", "entities_action")
+_RECIPE_STAGE_IDS: tuple[str, ...] = ("enrich", "provenance", "entities_action")
 _RECIPE_STAGE_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "enrich": ("thought_enrichment", "thought-enrichment", "enriched"),
-    "atomize": ("atomized", "atomizer"),
     "provenance": ("provenance_chains", "provenance-chains"),
     "entities_action": (
         "schema_aware_routing",
@@ -683,6 +685,7 @@ def _thought_from_candidate(
         ),
         "content_fingerprint": fingerprint,
         "generation_technique": _candidate_generation_technique(candidate, inventory, dedupe, audit),
+        "metadata": _candidate_metadata(candidate, inventory, dedupe, audit),
     }
     formation_trace = _formation_trace_from_record(candidate, current_stage=current_stage)
 
@@ -1240,6 +1243,7 @@ def _stopped_thought_from_inventory(
         "matched_memory_id": stop_target_id,
         "content_fingerprint": fingerprint,
         "generation_technique": _candidate_generation_technique(record),
+        "metadata": _candidate_metadata(record),
     }
     formation_trace = _formation_trace_from_record(record, current_stage=current_stage)
     if formation_trace:
@@ -1469,6 +1473,19 @@ def _candidate_generation_technique(*records: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(_DEFAULT_PANNING_GENERATION_TECHNIQUE)
 
 
+def _strip_removed_atomize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    clean = copy.deepcopy(metadata)
+    clean.pop("atomization", None)
+    for key in ("workflow_status", "workflow_statuses", "recipe_status", "recipe_statuses", "recipe_workflow"):
+        value = clean.get(key)
+        if isinstance(value, dict):
+            for removed_key in ("atomize", "atomized", "atomizer"):
+                value.pop(removed_key, None)
+            if not value:
+                clean.pop(key, None)
+    return clean
+
+
 def _candidate_metadata(*records: dict[str, Any]) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     for record in records:
@@ -1478,7 +1495,6 @@ def _candidate_metadata(*records: dict[str, Any]) -> dict[str, Any]:
         if isinstance(raw_metadata, dict):
             metadata.update(copy.deepcopy(raw_metadata))
         for key in (
-            "atomization",
             "workflow_status",
             "workflow_statuses",
             "recipe_status",
@@ -1488,7 +1504,7 @@ def _candidate_metadata(*records: dict[str, Any]) -> dict[str, Any]:
             value = _dig(record, key)
             if value not in (None, "", [], {}):
                 metadata[key] = copy.deepcopy(value)
-    return metadata
+    return _strip_removed_atomize_metadata(metadata)
 
 
 def _receipt_from_audit(

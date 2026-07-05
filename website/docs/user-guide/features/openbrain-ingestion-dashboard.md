@@ -22,12 +22,14 @@ The Candidate memory pipeline still uses the canonical ingestion stages as table
 
 1. Evidence cards
 2. Thought candidates
-3. Policy
-4. Deduped
-5. Ready for CortexDB
-6. CortexDB
+3. Enrich
+4. Provenance
+5. Entities/action
+6. Deduped
+7. Ready for CortexDB
+8. CortexDB
 
-Evidence cards stay in the Evidence grid as source-grounded nuggets. They are not mixed into the Candidate memory table. Each Evidence card shows the Evidence title and compact tags such as **used**; Thought candidates appear as stable table rows with clickable cells for Tags, Policy, Deduped, Ready for CortexDB, and **CortexDB import** detail. Candidate rows can also show a subtle **via Panning** or **via Meeting** technique pill so the generation recipe or skill is visible without opening database fields.
+Evidence cards stay in the Evidence grid as source-grounded nuggets. They are not mixed into the Candidate memory table. Each Evidence card shows the Evidence title and compact tags such as **used**; Thought candidates appear as stable table rows with clickable cells for Tags, **Enrich**, **Provenance**, **Entities/action**, Deduped, Ready for CortexDB, and **CortexDB import** detail. Candidate rows can also show a subtle **via Panning** or **via Meeting** technique pill so the generation recipe or skill is visible without opening database fields.
 
 The top metrics show **visible / total** counts for source units, thoughts, review items, stopped items, imported items, and zero-thought sources. Visible counts follow the current filters, source-date range, and search; total counts describe the selected source type in the snapshot.
 
@@ -63,10 +65,14 @@ The detail dialog keeps one shared shell, but the main panel changes by the card
 
 - **Evidence card detail** shows source evidence: quote/snippet, source section, extraction method, coverage status, and which Thought candidate cards used it.
 - **Thought candidate detail** shows Formation Trace: primary lineage cards, extra context, exact shaping input, shaped output, merge note, and gate events.
-- **Policy detail** shows the policy decision: pass/stop/review result, policy tag, reason, candidate text reviewed, redacted text, and fix note when available.
+- **Enrich detail** shows recipe workflow status, enrichment recipe/method, reason, notes, and evidence notes.
+- **Provenance detail** shows whether source evidence and lineage were attached.
+- **Entities/action detail** shows routing status for people, organizations, action/task shape, and follow-up classification.
 - **Dedupe detail** shows dedupe evidence: semantic/exact method, duplicate/unique/merge decision, matched memory, similarity score, fingerprint, and merge note.
 - **Ready detail** shows the final import package: final memory text, type/topics/people, source receipt, policy check, dedupe check, checklist, and import payload preview.
 - **CortexDB detail** shows the storage receipt: thought ID, stored text, metadata, capture time, source unit ID, candidate ID, and update/merge note.
+
+Policy decisions are still available as policy tags and stop detail when the exporter records them, but Policy is no longer a separate Candidate table column.
 
 Older snapshots may not have every field. Missing fields are shown as empty states instead of errors.
 
@@ -84,7 +90,7 @@ Older thoughts or snapshots without trace data show a clear “No formation trac
 
 ## Stopped and not-imported cards
 
-Stopped cards are candidates or inventory rows that did not become CortexDB records. Duplicate stops remain in **Deduped**. The **Policy** column is reserved only for thoughts blocked by a clearly defined capture policy; useful historical/reference material that merely needs rewriting should remain in **Shaped** until the policy/redaction pass runs, then dedupe can decide whether it stays, merges, or moves on.
+Stopped cards are candidates or inventory rows that did not become CortexDB records. Duplicate stops remain in **Deduped**. Capture-policy stops keep a policy tag and stopped reason on the candidate row/detail rather than occupying a separate Policy column; useful historical/reference material that merely needs rewriting should remain in **Thought candidates** until recipe workflow and dedupe decide whether it stays, merges, or moves on.
 
 Click a policy tag on a card or detail dialog to show its definition. Policy tags use this vocabulary:
 
@@ -128,7 +134,7 @@ The exporter boundary is:
 Panning-for-Gold artifacts -> SnapshotV1 -> dashboard API -> read-only UI
 ```
 
-The Panning exporter converts artifacts such as `source-items.jsonl`, `inventory.jsonl`, `dedupe-receipts.jsonl`, `capture-candidates.jsonl`, `capture-audit.jsonl`, and `summary.json` into a sanitized **SnapshotV1** document. The dashboard backend validates and redacts that snapshot, normalizes stage aliases, surfaces inventory rows that stop before `Ready for CortexDB` as visible stopped cards, records the candidate generation technique, and exposes only the source-scoped board/detail API used by the frontend.
+The Panning exporter converts artifacts such as `source-items.jsonl`, `inventory.jsonl`, `dedupe-receipts.jsonl`, `capture-candidates.jsonl`, `capture-audit.jsonl`, and `summary.json` into a sanitized **SnapshotV1** document. The dashboard backend validates and redacts that snapshot, normalizes stage aliases, surfaces inventory rows that stop before `Ready for CortexDB` as visible stopped cards, records the candidate generation technique, preserves Enrich/Provenance/Entities-action workflow status, and exposes only the source-scoped board/detail API used by the frontend.
 
 The frontend does not read Panning artifacts directly and does not include adapter-specific logic. It only calls the dashboard plugin API through the Hermes plugin SDK.
 

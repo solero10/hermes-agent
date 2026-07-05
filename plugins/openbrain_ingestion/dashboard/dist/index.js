@@ -15,11 +15,14 @@
   const STAGES = [
     { id: "extracted", label: "Evidence cards" },
     { id: "shaped", label: "Thought candidates" },
-    { id: "policy", label: "Policy" },
+    { id: "enrich", label: "Enrich" },
+    { id: "provenance", label: "Provenance" },
+    { id: "entities_action", label: "Entities/action" },
     { id: "deduped", label: "Deduped" },
     { id: "ready_for_cortexdb", label: "Ready for CortexDB" },
     { id: "cortexdb", label: "CortexDB" },
   ];
+  const RECIPE_STAGE_IDS = ["enrich", "provenance", "entities_action"];
   const FILTERS = [
     { value: "all", label: "All" },
     { value: "needs_review", label: "Needs review" },
@@ -260,7 +263,9 @@
 
   const CANDIDATE_TABLE_STAGES = [
     { id: "tags", label: "Tags" },
-    { id: "policy", label: "Policy" },
+    { id: "enrich", label: "Enrich" },
+    { id: "provenance", label: "Provenance" },
+    { id: "entities_action", label: "Entities/action" },
     { id: "deduped", label: "Deduped" },
     { id: "ready_for_cortexdb", label: "Ready for CortexDB" },
     { id: "cortexdb", label: "CortexDB import" },
@@ -321,6 +326,53 @@
     return STAGES.findIndex(function (stage) { return stage.id === normalized; });
   }
 
+  function isRecipeStage(stageId) {
+    return RECIPE_STAGE_IDS.indexOf(stageId) >= 0;
+  }
+
+  function workflowStatusForCard(card, stageId) {
+    const workflow = (card && card.workflow_status) || {};
+    const detail = stageDetailFor(card, stageId);
+    const direct = workflow && workflow[stageId];
+    const payload = direct || detail || {};
+    if (typeof payload === "string") return { status: payload };
+    return payload && typeof payload === "object" ? payload : {};
+  }
+
+  function normalizedWorkflowStatus(value) {
+    const text = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    if (!text) return "";
+    if (["skip", "skipped", "inherited", "already_atomic"].indexOf(text) >= 0) return "skipped";
+    if (["complete", "completed", "done", "passed", "ok", "success", "succeeded", "split"].indexOf(text) >= 0) return "complete";
+    if (["fail", "failed", "error", "errored"].indexOf(text) >= 0) return "failed";
+    if (["current", "running", "started", "in_progress", "processing"].indexOf(text) >= 0) return "current";
+    if (["review", "needs_review", "review_required", "review_needed"].indexOf(text) >= 0) return "needs_review";
+    if (["pending", "not_run", "not_reached", "todo", "queued"].indexOf(text) >= 0) return "not_reached";
+    return text;
+  }
+
+  function workflowStatusValue(entry) {
+    if (!entry || typeof entry !== "object") return "";
+    return normalizedWorkflowStatus(entry.status || entry.result || entry.decision || entry.outcome);
+  }
+
+  function workflowStatusLabel(status) {
+    if (status === "skipped") return "Skipped";
+    if (status === "failed") return "Failed";
+    if (status === "needs_review") return "Needs review";
+    if (status === "not_reached") return "Not reached";
+    if (status === "complete") return "Complete";
+    if (status === "current") return "Current";
+    return safeText(status, "Not reached").replace(/_/g, " ").replace(/\b\w/g, function (char) { return char.toUpperCase(); });
+  }
+
+  function workflowStageHelp(stageId) {
+    if (stageId === "enrich") return "Did the enrichment recipe add context, tags, and structured review material?";
+    if (stageId === "provenance") return "Did the provenance pass attach source evidence and lineage?";
+    if (stageId === "entities_action") return "Did entity/action routing classify people, organizations, tasks, and follow-up shape?";
+    return "Recipe workflow status for this Candidate.";
+  }
+
   function candidateStageStatus(card, stageId) {
     const currentStage = card && card.current_stage ? card.current_stage : "shaped";
     const disposition = card && card.disposition ? card.disposition : "in_progress";
@@ -330,6 +382,10 @@
     const dedupeDecision = dedupeDecisionForCard(card);
 
     if (stageId === "tags") return "metadata";
+    if (isRecipeStage(stageId)) {
+      const workflowStatus = workflowStatusValue(workflowStatusForCard(card, stageId));
+      if (workflowStatus) return workflowStatus;
+    }
     if (stageId === "policy" && policyResult === "skipped") return "skipped";
     if (stageId === "policy" && policyPassedForCard(card)) return "complete";
     if (stageId === "deduped") {
@@ -354,6 +410,7 @@
   function candidateStageLabel(card, stageId) {
     const status = candidateStageStatus(card, stageId);
     if (stageId === "tags") return "Tags";
+    if (isRecipeStage(stageId)) return workflowStatusLabel(status);
     if (stageId === "policy" && policyResultForCard(card) === "skipped") return "Skipped";
     if (stageId === "policy" && policyPassedForCard(card)) return "Passed";
     if (stageId === "deduped") {
@@ -371,6 +428,8 @@
     if (status === "complete") return "Complete";
     if (status === "current") return "Current";
     if (status === "stopped") return "Stopped";
+    if (status === "skipped") return "Skipped";
+    if (status === "failed") return "Failed";
     if (status === "needs_review") return "Needs review";
     return "Not reached";
   }
@@ -1530,6 +1589,38 @@
     );
   }
 
+  function WorkflowStagePanel(props) {
+    const thought = props.thought || {};
+    const selectedStage = props.selectedStage || thought.current_stage;
+    const detail = Object.assign({}, stageDetailFor(thought, selectedStage), workflowStatusForCard(thought, selectedStage));
+    const status = workflowStatusValue(detail) || candidateStageStatus(thought, selectedStage);
+    const createdIds = asArray(detail.created_candidate_ids);
+    const hasDetail = stageDetailHasContent(detail) || status !== "not_reached";
+    return h("section", { className: cx("ob-stage-detail-panel", "ob-stage-detail-panel--workflow", "ob-stage-detail-panel--" + stageSlug(selectedStage)) },
+      h("div", { className: "ob-section-heading" }, h("h3", null, stageLabel(selectedStage))),
+      h("p", { className: "ob-stage-detail-note" }, workflowStageHelp(selectedStage)),
+      hasDetail ? h(React.Fragment, null,
+        h(StageKeyValueList, { rows: [
+          { label: "Workflow status", value: workflowStatusLabel(status) },
+          { label: "Result", value: detail.result },
+          { label: "Decision", value: detail.decision },
+          { label: "Recipe", value: detail.recipe },
+          { label: "Method", value: detail.method },
+          { label: "Created count", value: detail.created_count },
+          { label: "Created candidate IDs", value: createdIds },
+          { label: "Parent candidate", value: detail.parent_candidate_id },
+          { label: "Parent lineage", value: detail.parent_lineage_id },
+          { label: "Reason", value: detail.reason },
+          { label: "Skipped reason", value: detail.skipped_reason },
+          { label: "Evidence note", value: detail.evidence_note },
+          { label: "Note", value: detail.note },
+          { label: "Decided at", value: detail.decided_at && formatDate(detail.decided_at) },
+          { label: "Decided by", value: detail.decided_by },
+        ] })
+      ) : h(StageEmpty, null, "No recipe workflow status recorded for this card.")
+    );
+  }
+
   function DedupeEvidencePanel(props) {
     const thought = props.thought || {};
     const detail = stageDetailFor(thought, "deduped");
@@ -1631,6 +1722,7 @@
     if (selectedStage === "extracted") return h(ExtractedEvidencePanel, props);
     if (selectedStage === "shaped") return h(ShapedFormationPanel, props);
     if (selectedStage === "policy") return h(PolicyDecisionPanel, props);
+    if (isRecipeStage(selectedStage)) return h(WorkflowStagePanel, props);
     if (selectedStage === "deduped") return h(DedupeEvidencePanel, props);
     if (selectedStage === "ready_for_cortexdb") return h(ReadyPackagePanel, props);
     if (selectedStage === "cortexdb") return h(CortexDBReceiptPanel, props);

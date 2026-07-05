@@ -32,7 +32,6 @@ StageId = Literal[
     "extracted",
     "shaped",
     "enrich",
-    "atomize",
     "provenance",
     "entities_action",
     "deduped",
@@ -54,7 +53,6 @@ CANONICAL_STAGES: tuple[str, ...] = (
     "extracted",
     "shaped",
     "enrich",
-    "atomize",
     "provenance",
     "entities_action",
     "deduped",
@@ -75,8 +73,6 @@ _STAGE_ALIASES: dict[str, str] = {
     "thought_enrichment": "enrich",
     "thought-enrichment": "enrich",
     "enriched": "enrich",
-    "atomized": "atomize",
-    "atomizer": "atomize",
     "provenance_chains": "provenance",
     "provenance-chains": "provenance",
     "schema_aware_routing": "entities_action",
@@ -90,11 +86,19 @@ _STAGE_ALIASES: dict[str, str] = {
     "ready-to-import": "ready_for_cortexdb",
 }
 
+_REMOVED_STAGE_ALIASES: dict[str, str] = {
+    # Atomize was removed from Ken's OpenBrain dashboard on 2026-07-05. Keep a
+    # compatibility shim so stale snapshots do not crash, but do not expose a
+    # visible Atomize column or detail stage.
+    "atomize": "provenance",
+    "atomized": "provenance",
+    "atomizer": "provenance",
+}
+
 _STAGE_LABELS: dict[str, str] = {
     "extracted": "Evidence cards",
     "shaped": "Thought candidates",
     "enrich": "Enrich",
-    "atomize": "Atomize",
     "provenance": "Provenance",
     "entities_action": "Entities/action",
     "deduped": "Deduped",
@@ -102,10 +106,9 @@ _STAGE_LABELS: dict[str, str] = {
     "cortexdb": "CortexDB",
 }
 
-RECIPE_STAGE_IDS: tuple[str, ...] = ("enrich", "atomize", "provenance", "entities_action")
+RECIPE_STAGE_IDS: tuple[str, ...] = ("enrich", "provenance", "entities_action")
 _RECIPE_STAGE_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "enrich": ("thought_enrichment", "thought-enrichment", "enriched"),
-    "atomize": ("atomized", "atomizer"),
     "provenance": ("provenance_chains", "provenance-chains"),
     "entities_action": (
         "schema_aware_routing",
@@ -331,7 +334,8 @@ def _normalize_stage(value: Any) -> str:
 
     text = str(value or "").strip()
     lowered = text.lower()
-    return _STAGE_ALIASES.get(lowered, lowered)
+    canonical = _STAGE_ALIASES.get(lowered, lowered)
+    return _REMOVED_STAGE_ALIASES.get(canonical, canonical)
 
 
 def _stage_label(stage_id: Any) -> str:
@@ -1011,7 +1015,6 @@ class StageDetail(BaseModel):
     shaped: FormationTrace | None = None
     policy: PolicyDecisionDetail | None = None
     enrich: WorkflowStepDetail | None = None
-    atomize: WorkflowStepDetail | None = None
     provenance: WorkflowStepDetail | None = None
     entities_action: WorkflowStepDetail | None = None
     deduped: DedupeEvidenceDetail | None = None
@@ -1029,8 +1032,6 @@ class StageDetail(BaseModel):
                 ("thought_enrichment", "enrich"),
                 ("thought-enrichment", "enrich"),
                 ("enriched", "enrich"),
-                ("atomized", "atomize"),
-                ("atomizer", "atomize"),
                 ("provenance_chains", "provenance"),
                 ("provenance-chains", "provenance"),
                 ("schema_aware_routing", "entities_action"),
@@ -1161,6 +1162,7 @@ class ThoughtRecord(BaseModel):
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
     generation_technique: GenerationTechnique | None = None
+    workflow_status: dict[str, WorkflowStepDetail] | None = None
     formation_trace: FormationTrace | None = None
     stage_detail: StageDetail | None = None
     stages: list[StageRecord] | None = None
@@ -1352,6 +1354,7 @@ class ThoughtCard(BaseModel):
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
     generation_technique: GenerationTechnique | None = None
+    workflow_status: dict[str, WorkflowStepDetail] | None = None
     dedupe_similarity_score: float | None = None
     dedupe_nearest_similarity_score: float | None = None
     cortexdb_id: str | None = None
@@ -1400,6 +1403,7 @@ class ThoughtDetail(BaseModel):
     stopped_reason: str | None = None
     matched_memory_id: str | None = None
     generation_technique: GenerationTechnique | None = None
+    workflow_status: dict[str, WorkflowStepDetail] | None = None
     formation_trace: FormationTrace | None = None
     stage_detail: StageDetail | None = None
     source_unit: dict[str, Any]
@@ -1890,59 +1894,7 @@ def _workflow_status_entry_from_payload(payload: Any) -> dict[str, Any] | None:
     return entry or None
 
 
-def _atomization_metadata(record: dict[str, Any]) -> dict[str, Any]:
-    raw_metadata = record.get("metadata")
-    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
-    raw_atomization = metadata.get("atomization")
-    atomization: dict[str, Any] = raw_atomization if isinstance(raw_atomization, dict) else {}
-    return atomization
-
-
-def _is_atomized_child_record(record: dict[str, Any]) -> bool:
-    atomization = _atomization_metadata(record)
-    if _first_present(atomization.get("parent_id"), atomization.get("parent_candidate_id"), atomization.get("parent_lineage_id")):
-        return True
-    candidate_id = str(_first_present(record.get("candidate_id"), record.get("memoryId"), record.get("memory_id"), "") or "")
-    if re.search(r"-split-\d+$", candidate_id):
-        return True
-    derived_from = _first_present(record.get("derived_from"), record.get("parent_candidate_id"), record.get("parent_lineage_id"))
-    derivation = " ".join(
-        str(part or "")
-        for part in (
-            record.get("derivation_method"),
-            record.get("generation_method"),
-            _search_field_value(record, "generation_technique.id"),
-            _search_field_value(record, "generation_technique.label"),
-        )
-    ).lower()
-    return bool(derived_from and "atom" in derivation)
-
-
-def _atomized_child_skipped_workflow(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    atomization = _atomization_metadata(record)
-    parent_id = _first_present(
-        atomization.get("parent_id"),
-        atomization.get("parent_candidate_id"),
-        atomization.get("parent_lineage_id"),
-        record.get("parent_candidate_id"),
-        record.get("parent_lineage_id"),
-        record.get("derived_from"),
-    )
-    skipped: dict[str, dict[str, Any]] = {}
-    for stage_id in RECIPE_STAGE_IDS:
-        skipped[stage_id] = {
-            "status": "skipped",
-            "skipped_reason": "Atomized child candidate inherits upstream recipe work from its parent; dedupe and later columns still run.",
-        }
-        if parent_id:
-            skipped[stage_id]["parent_candidate_id"] = parent_id
-    return skipped
-
-
 def _workflow_statuses(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    if _is_atomized_child_record(record):
-        return _atomized_child_skipped_workflow(record)
-
     raw_stage_detail = record.get("stage_detail")
     stage_detail: dict[str, Any] = raw_stage_detail if isinstance(raw_stage_detail, dict) else {}
     raw_metadata = record.get("metadata")
@@ -1954,7 +1906,10 @@ def _workflow_statuses(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
         record.get("recipe_status"),
         record.get("recipe_workflow"),
         metadata.get("workflow_statuses"),
+        metadata.get("workflow_status"),
         metadata.get("recipe_statuses"),
+        metadata.get("recipe_status"),
+        metadata.get("recipe_workflow"),
         stage_detail,
     )
     statuses: dict[str, dict[str, Any]] = {}
@@ -2195,14 +2150,11 @@ _BOARD_CARD_SEARCH_FIELDS: tuple[str, ...] = (
     "stage_detail.extracted.promotion_note",
     "stage_detail.enrich.note",
     "stage_detail.enrich.evidence_note",
-    "stage_detail.atomize.note",
-    "stage_detail.atomize.evidence_note",
     "stage_detail.provenance.note",
     "stage_detail.provenance.evidence_note",
     "stage_detail.entities_action.note",
     "stage_detail.entities_action.evidence_note",
     "workflow_status.enrich.status",
-    "workflow_status.atomize.status",
     "workflow_status.provenance.status",
     "workflow_status.entities_action.status",
     "stage_detail.policy.reason",
@@ -2236,6 +2188,7 @@ def _stage_timeline(thought: dict[str, Any]) -> list[dict[str, Any]]:
         current_idx = CANONICAL_STAGES.index(stop_stage)
     except ValueError:
         current_idx = 0
+    workflow_statuses = _workflow_statuses(thought)
 
     provided: dict[str, dict[str, Any]] = {}
     for raw_stage in thought.get("stages") or []:
@@ -2264,12 +2217,18 @@ def _stage_timeline(thought: dict[str, Any]) -> list[dict[str, Any]]:
             status = "pending"
 
         item = {"id": stage_id, "label": _stage_label(stage_id), "status": status}
+        workflow_entry = workflow_statuses.get(stage_id)
+        workflow_stage_status = workflow_entry.get("status") if workflow_entry else None
+        if workflow_stage_status:
+            timeline_status = "review_needed" if workflow_stage_status == "needs_review" else workflow_stage_status
+            if timeline_status in {"complete", "current", "pending", "not_reached", "skipped", "failed", "review_needed"}:
+                item["status"] = timeline_status
         if stage_id in provided:
             # Preserve producer-provided safe metadata, but keep canonical ID and
             # label.  For stopped thoughts, later stages must remain not_reached.
             merged = {**provided[stage_id], **item}
             if disposition != "stopped" or idx <= current_idx:
-                merged["status"] = provided[stage_id].get("status", status)
+                merged["status"] = item["status"] if workflow_stage_status else provided[stage_id].get("status", item["status"])
             item = merged
         timeline.append(StageRecord.model_validate(item).model_dump(mode="json", exclude_none=True))
     return timeline

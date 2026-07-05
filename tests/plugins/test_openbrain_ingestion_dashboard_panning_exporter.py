@@ -244,12 +244,74 @@ def test_candidate_formation_trace_flat_fields_export_to_dashboard_snapshot(tmp_
     assert trace["generation_technique"]["id"] == "meeting-synthesis"
     assert trace["generation_technique"]["kind"] == "skill"
     assert thoughts["cand_009_formation_trace"]["generation_technique"]["short_label"] == "Meeting"
-    assert trace["gate_events"][0]["stage"] == "policy"
+    assert trace["gate_events"][0]["stage"] == "shaped"
     assert stage_trace["llm_output_text"] == trace["llm_output_text"]
 
     rendered = json.dumps(trace)
     assert "secret123" not in rendered
     assert "/mnt/d/private" not in rendered
+
+
+def test_candidate_workflow_metadata_excludes_removed_atomize_stage(tmp_path, monkeypatch):
+    exporter = _load_exporter()
+    api = _load_plugin_api()
+    run_root = tmp_path / "workflow-metadata-run"
+    shutil.copytree(FIXTURE_RUN_ROOT, run_root)
+
+    candidates = [
+        {
+            "source_id": "otter-package:transcript-003",
+            "candidate_id": "cand_010_workflow_status",
+            "content_fingerprint": "sha256:fp_workflow_status_010",
+            "title": "Workflow status candidate",
+            "summary": "Candidate carries recipe workflow status metadata.",
+            "final_memory_text": "Workflow status metadata should reach the dashboard API.",
+            "stage": "deduped",
+            "metadata": {
+                "atomization": {"parent_candidate_id": "old-parent"},
+                "workflow_status": {
+                    "enrich": {"status": "complete", "note": "Enrichment completed."},
+                    "atomize": {"status": "complete", "created_count": 0},
+                    "provenance": {"status": "complete", "evidence_note": "Source evidence attached."},
+                    "entities_action": {"status": "review_required", "reason": "Action owner unclear."},
+                },
+            },
+        }
+    ]
+    with (run_root / "capture-candidates.jsonl").open("a", encoding="utf-8") as handle:
+        for candidate in candidates:
+            handle.write(json.dumps(candidate, sort_keys=True) + "\n")
+
+    snapshot = api.Snapshot.model_validate(_snapshot(exporter, run_root=run_root)).model_dump(
+        mode="json", exclude_none=True
+    )
+    thoughts = {
+        thought["candidate_id"]: thought
+        for unit in snapshot["source_units"]
+        for thought in unit.get("thoughts", [])
+    }
+    workflow = thoughts["cand_010_workflow_status"]
+    assert workflow["metadata"]["workflow_status"]["enrich"]["status"] == "complete"
+    assert "atomization" not in workflow["metadata"]
+    assert "atomize" not in workflow["metadata"]["workflow_status"]
+    assert workflow["metadata"]["workflow_status"]["entities_action"]["status"] == "review_required"
+
+    hermes_home = tmp_path / ".hermes"
+    out_path = hermes_home / "openbrain-ingestion-dashboard" / "snapshot.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    api = _load_plugin_api()
+    app = FastAPI()
+    app.include_router(api.router, prefix="/api/plugins/openbrain_ingestion")
+    client = TestClient(app)
+
+    board = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
+    cards = {card["candidate_id"]: card for card in _all_cards(board)}
+    assert cards["cand_010_workflow_status"]["workflow_status"]["entities_action"]["status"] == "needs_review"
+    assert "atomize" not in cards["cand_010_workflow_status"]["workflow_status"]
+    assert "atomize" not in [column["id"] for column in board["columns"]]
 
 
 def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, monkeypatch):
@@ -458,9 +520,9 @@ def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, m
 
     obsolete = thoughts["cand_005_obsolete_skip"]
     assert obsolete["disposition"] == "stopped"
-    assert obsolete["current_stage"] == "policy"
+    assert obsolete["current_stage"] == "shaped"
     assert obsolete["stop_code"] == "no_durable_value"
-    assert obsolete["stop_stage_id"] == "policy"
+    assert obsolete["stop_stage_id"] == "shaped"
     assert obsolete["stopped_reason"].startswith("Time-specific travel logistics")
 
     durable_context = thoughts["cand_006_durable_context"]
@@ -476,7 +538,7 @@ def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, m
 
     needs_validation = thoughts["cand_009_needs_current_validation"]
     assert needs_validation["disposition"] == "stopped"
-    assert needs_validation["current_stage"] == "policy"
+    assert needs_validation["current_stage"] == "shaped"
     assert needs_validation["stop_code"] == "needs_source_validation"
 
     assert thoughts["cand_010_sensitive_detail"]["stop_code"] == "sensitive_detail"
@@ -501,8 +563,8 @@ def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, m
     assert board["total_counts"]["thoughts"] == 12
     assert board["total_counts"]["stopped"] == 7
     assert board["total_counts"]["deduped"] == 1
-    assert board["total_counts"]["policy"] == 6
-    assert board["total_counts"]["shaped"] == 4
+    assert "policy" not in board["total_counts"]
+    assert board["total_counts"]["shaped"] == 10
     assert board["total_counts"]["ready_for_cortexdb"] == 0
     stop_codes = {card.get("stop_code") for card in _all_cards(board) if card.get("stop_code")}
     assert {

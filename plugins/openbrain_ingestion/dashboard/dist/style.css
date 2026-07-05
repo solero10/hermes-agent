@@ -558,8 +558,26 @@
   opacity: 0.68;
 }
 
+.ob-candidate-stage-cell--skipped .ob-badge,
+.ob-badge--skipped {
+  border-style: dashed;
+  opacity: 0.72;
+}
+
+.ob-candidate-stage-cell--failed .ob-badge,
+.ob-badge--failed,
+.ob-candidate-stage-cell--duplicate .ob-badge,
+.ob-badge--duplicate {
+  border-color: color-mix(in srgb, var(--ob-danger) 58%, var(--ob-border));
+  color: color-mix(in srgb, var(--ob-danger) 82%, var(--ob-text));
+}
+
 .ob-stage-detail-panel--tags .ob-topic-list {
   margin-top: 0.5rem;
+}
+
+.ob-stage-detail-panel--workflow {
+  border-color: color-mix(in srgb, var(--ob-accent) 42%, var(--ob-border));
 }
 
 .ob-stage-grid {

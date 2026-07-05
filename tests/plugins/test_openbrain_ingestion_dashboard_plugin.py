@@ -281,7 +281,9 @@ def test_board_groups_thoughts_by_current_stage_once_and_splits_counts(client):
     assert [c["id"] for c in payload["columns"]] == [
         "extracted",
         "shaped",
-        "policy",
+        "enrich",
+        "provenance",
+        "entities_action",
         "deduped",
         "ready_for_cortexdb",
         "cortexdb",
@@ -345,6 +347,60 @@ def test_board_and_detail_expose_generation_technique_without_field_lookup(clien
     assert detail["formation_trace"]["generation_technique"]["short_label"] == "Meeting"
     db_fields = {field["name"]: field for field in detail["database_fields"]}
     assert db_fields["metadata"]["value"]["generation_technique"]["kind"] == "skill"
+
+
+def test_board_and_detail_expose_recipe_workflow_status_without_atomize_stage(client, hermes_home):
+    path = hermes_home / "openbrain-ingestion-dashboard" / "snapshot.json"
+    data = json.loads(path.read_text())
+    recipe_stage_ids = ("enrich", "provenance", "entities_action")
+
+    ready = data["source_units"][0]["thoughts"][2]
+    ready.setdefault("stage_detail", {}).update(
+        {
+            "enrich": {
+                "status": "complete",
+                "recipe": "thought_enrichment",
+                "note": "Added topic context.",
+            },
+            # Legacy Atomize payloads are ignored after the stage was removed.
+            "atomize": {
+                "result": "already_atomic",
+                "method": "single-memory",
+                "note": "Candidate was already atomic.",
+            },
+        }
+    )
+    ready["metadata"] = {
+        "workflow_status": {
+            "atomize": {"status": "complete", "created_count": 0},
+            "provenance": {"status": "complete", "evidence_note": "Lineage attached."},
+            "entities_action": {
+                "status": "needs_review",
+                "reason": "Action routing needs owner confirmation.",
+            },
+        }
+    }
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    board = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
+    assert "atomize" not in [column["id"] for column in board["columns"]]
+    first = next(row for row in board["rows"] if row["id"] == "transcript-a")
+    ready_card = first["columns"]["ready_for_cortexdb"][0]
+    assert set(ready_card["workflow_status"]) == set(recipe_stage_ids)
+    assert ready_card["workflow_status"]["enrich"]["status"] == "complete"
+    assert "atomize" not in ready_card["workflow_status"]
+    assert ready_card["workflow_status"]["provenance"]["evidence_note"] == "Lineage attached."
+    assert ready_card["workflow_status"]["entities_action"]["status"] == "needs_review"
+
+    ready_detail = client.get(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_ready_1"
+    ).json()["thought"]
+    ready_stages = {stage["id"]: stage for stage in ready_detail["stages"]}
+    assert ready_stages["enrich"]["status"] == "complete"
+    assert "atomize" not in ready_stages
+    assert "atomize" not in ready_detail.get("stage_detail", {})
+    assert ready_stages["provenance"]["status"] == "complete"
+    assert ready_stages["entities_action"]["status"] == "review_needed"
 
 
 def test_board_filter_imported_prunes_cards_and_excludes_zero_rows(client):
@@ -496,7 +552,9 @@ def test_thought_detail_imported_has_normalized_timeline_and_receipt(client):
     assert [stage["id"] for stage in thought["stages"]] == [
         "extracted",
         "shaped",
-        "policy",
+        "enrich",
+        "provenance",
+        "entities_action",
         "deduped",
         "ready_for_cortexdb",
         "cortexdb",
@@ -587,7 +645,7 @@ def test_thought_detail_includes_formation_trace_with_sanitized_inputs(client):
     assert "[REDACTED_PATH]" in trace["additional_context_used"][2]["values"]["debug_path"]
     assert "Exact input package" in trace["llm_input_text"]
     assert "Shaped output text" in trace["llm_output_text"]
-    assert trace["gate_events"][0]["stage"] == "policy"
+    assert trace["gate_events"][0]["stage"] == "shaped"
     assert len(trace["llm_input_text"]) <= 20_000
     assert trace["llm_input_text"].endswith("...")
     assert thought["stage_detail"]["shaped"]["llm_output_text"] == trace["llm_output_text"]
@@ -631,7 +689,10 @@ def test_thought_detail_stopped_duplicate_strips_receipt(client):
     assert dedupe_detail["semantic_duplicate_cutoff"] == 0.92
     assert dedupe_detail["search_threshold"] == 0.0
     assert "cortexdb_receipt" not in thought or thought["cortexdb_receipt"] in ({}, None)
-    assert next(stage for stage in thought["stages"] if stage["id"] == "policy")["status"] == "complete"
+    recipe_stages = [
+        stage for stage in thought["stages"] if stage["id"] in {"enrich", "provenance", "entities_action"}
+    ]
+    assert all(stage["status"] == "complete" for stage in recipe_stages)
     later = [stage for stage in thought["stages"] if stage["id"] in {"ready_for_cortexdb", "cortexdb"}]
     assert all(stage["status"] == "not_reached" for stage in later)
 

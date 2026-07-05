@@ -101,6 +101,7 @@ def test_frontend_declares_all_required_components_before_registration():
         "ExtractedEvidencePanel",
         "ShapedFormationPanel",
         "PolicyDecisionPanel",
+        "WorkflowStagePanel",
         "DedupeEvidencePanel",
         "ReadyPackagePanel",
         "CortexDBReceiptPanel",
@@ -220,6 +221,10 @@ def test_board_detail_and_state_strings_are_present():
         "Used by Thought candidates",
         "Policy decision",
         "Candidate text reviewed",
+        "Workflow status",
+        "Created candidate IDs",
+        "Parent candidate",
+        "Recipe workflow status for this Candidate.",
         "Dedupe framework",
         "Dedupe-column clicks open this framework view.",
         "Duplicate cutoff",
@@ -346,6 +351,14 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
     assert "function generationTechniqueFor(value)" in frontend
     assert 'h(TechniquePill, { technique: technique })' in frontend
     assert 'h(TechniquePill, { thought: thought })' in frontend
+    table_stages = frontend[frontend.index("const CANDIDATE_TABLE_STAGES"):frontend.index("function cardsForStage")]
+    assert 'id: "policy"' not in table_stages
+    assert 'id: "atomize"' not in table_stages
+    for stage in ("enrich", "provenance", "entities_action", "deduped", "ready_for_cortexdb", "cortexdb"):
+        assert f'id: "{stage}"' in table_stages
+    assert "function workflowStatusForCard" in frontend
+    assert "function workflowStatusValue" in frontend
+    assert "isRecipeStage(stageId)" in frontend
     candidate_stage_cell = frontend[frontend.index("function CandidateStageCell"):frontend.index("function StageColumn")]
     assert 'const technique = generationTechniqueFor(card);' in candidate_stage_cell
     assert 'topics.length || technique ? h("span", { className: "ob-topic-list" }, [' in candidate_stage_cell
@@ -368,6 +381,8 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
         ".ob-candidate-cell-content",
         ".ob-dedupe-score-inline",
         ".ob-source-summary-strip",
+        ".ob-candidate-stage-cell--skipped",
+        ".ob-badge--skipped",
     ):
         assert selector in css
     assert "-webkit-line-clamp: 2;" in css
@@ -392,13 +407,27 @@ def test_candidate_table_detail_cells_pass_selected_detail_stage_to_modal():
     assert 'selectedStage === "tags"' in frontend
     assert "selectedStage: props.selectedDetailStage" in frontend
 
-    for stage in ("tags", "policy", "deduped", "ready_for_cortexdb", "cortexdb"):
+    for stage in (
+        "tags",
+        "enrich",
+        "provenance",
+        "entities_action",
+        "deduped",
+        "ready_for_cortexdb",
+        "cortexdb",
+    ):
         assert f'id: "{stage}"' in frontend
+    assert 'label: "Atomize"' not in frontend
+    assert "atomizer split" not in frontend
+    assert "function PolicyDecisionPanel" in frontend
     assert 'props.onOpenDetail(card, "tags");' in frontend
     assert 'props.onOpenDetail(card, "shaped");' in frontend
     assert "props.onOpenDetail(card, stage.id);" in frontend
     assert 'policyResult === "skipped"' in frontend
     assert 'return "Skipped";' in frontend
+    assert 'if (isRecipeStage(selectedStage)) return h(WorkflowStagePanel, props);' in frontend
+    assert "workflowStageHelp(selectedStage)" in frontend
+    assert "workflowStatusLabel(status)" in frontend
     assert 'dedupeDecision === "duplicate"' in frontend
     assert 'return "duplicate";' in frontend
     assert 'card.stop_stage_id === "deduped" && effectiveStopCode(card) === "duplicate"' in frontend
@@ -484,6 +513,7 @@ def test_css_uses_ob_namespace_and_required_selectors():
         ".ob-trace-kv-list",
         ".ob-stage-detail-panel",
         ".ob-stage-detail-panel--tags",
+        ".ob-stage-detail-panel--workflow",
         ".ob-stage-checklist",
         ".ob-original-shaped-thought",
         ".ob-original-shaped-text",
@@ -496,6 +526,7 @@ def test_css_uses_ob_namespace_and_required_selectors():
         ".ob-candidate-table",
         ".ob-candidate-stage-cell",
         ".ob-technique-pill",
+        ".ob-badge--failed",
     ):
         assert selector in css
     assert "ready-for-cortexdb" in css
@@ -543,7 +574,10 @@ def test_docs_cover_snapshot_boundary_and_read_only_mvp():
         "Column-specific detail",
         "Evidence card detail",
         "Thought candidate detail",
-        "Policy detail",
+        "Enrich detail",
+        "Provenance detail",
+        "Entities/action detail",
+        "Policy is no longer a separate Candidate table column",
         "Dedupe detail",
         "Ready detail",
         "CortexDB detail",
