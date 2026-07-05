@@ -354,7 +354,11 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
     table_stages = frontend[frontend.index("const CANDIDATE_TABLE_STAGES"):frontend.index("function cardsForStage")]
     assert 'id: "policy"' not in table_stages
     assert 'id: "atomize"' not in table_stages
-    for stage in ("enrich", "provenance", "entities_action", "deduped", "ready_for_cortexdb", "cortexdb"):
+    assert 'id: "provenance"' not in table_stages
+    assert 'id: "entities_action"' not in table_stages
+    assert 'label: "Provenance"' not in frontend
+    assert 'label: "Entities/action"' not in frontend
+    for stage in ("enrich", "deduped", "ready_for_cortexdb", "cortexdb"):
         assert f'id: "{stage}"' in table_stages
     assert "function workflowStatusForCard" in frontend
     assert "function workflowStatusValue" in frontend
@@ -410,14 +414,14 @@ def test_candidate_table_detail_cells_pass_selected_detail_stage_to_modal():
     for stage in (
         "tags",
         "enrich",
-        "provenance",
-        "entities_action",
         "deduped",
         "ready_for_cortexdb",
         "cortexdb",
     ):
         assert f'id: "{stage}"' in frontend
     assert 'label: "Atomize"' not in frontend
+    assert 'label: "Provenance"' not in frontend
+    assert 'label: "Entities/action"' not in frontend
     assert "atomizer split" not in frontend
     assert "function PolicyDecisionPanel" in frontend
     assert 'props.onOpenDetail(card, "tags");' in frontend
@@ -575,8 +579,6 @@ def test_docs_cover_snapshot_boundary_and_read_only_mvp():
         "Evidence card detail",
         "Thought candidate detail",
         "Enrich detail",
-        "Provenance detail",
-        "Entities/action detail",
         "Policy is no longer a separate Candidate table column",
         "Dedupe detail",
         "Ready detail",

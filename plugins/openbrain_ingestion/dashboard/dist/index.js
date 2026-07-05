@@ -16,13 +16,11 @@
     { id: "extracted", label: "Evidence cards" },
     { id: "shaped", label: "Thought candidates" },
     { id: "enrich", label: "Enrich" },
-    { id: "provenance", label: "Provenance" },
-    { id: "entities_action", label: "Entities/action" },
     { id: "deduped", label: "Deduped" },
     { id: "ready_for_cortexdb", label: "Ready for CortexDB" },
     { id: "cortexdb", label: "CortexDB" },
   ];
-  const RECIPE_STAGE_IDS = ["enrich", "provenance", "entities_action"];
+  const RECIPE_STAGE_IDS = ["enrich"];
   const FILTERS = [
     { value: "all", label: "All" },
     { value: "needs_review", label: "Needs review" },
@@ -264,8 +262,6 @@
   const CANDIDATE_TABLE_STAGES = [
     { id: "tags", label: "Tags" },
     { id: "enrich", label: "Enrich" },
-    { id: "provenance", label: "Provenance" },
-    { id: "entities_action", label: "Entities/action" },
     { id: "deduped", label: "Deduped" },
     { id: "ready_for_cortexdb", label: "Ready for CortexDB" },
     { id: "cortexdb", label: "CortexDB import" },
@@ -368,8 +364,6 @@
 
   function workflowStageHelp(stageId) {
     if (stageId === "enrich") return "Did the enrichment recipe add context, tags, and structured review material?";
-    if (stageId === "provenance") return "Did the provenance pass attach source evidence and lineage?";
-    if (stageId === "entities_action") return "Did entity/action routing classify people, organizations, tasks, and follow-up shape?";
     return "Recipe workflow status for this Candidate.";
   }
 

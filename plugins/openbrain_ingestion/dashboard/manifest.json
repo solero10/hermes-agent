@@ -5,7 +5,7 @@
   "icon": "Database",
   "version": "0.1.0",
   "tab": { "path": "/openbrain", "position": "after:kanban" },
-  "entry": "dist/index.js?v=20260705-no-atomize-v1",
-  "css": "dist/style.css?v=20260705-no-atomize-v1",
+  "entry": "dist/index.js?v=20260705-no-provenance-entities-v1",
+  "css": "dist/style.css?v=20260705-no-provenance-entities-v1",
   "api": "plugin_api.py"
 }

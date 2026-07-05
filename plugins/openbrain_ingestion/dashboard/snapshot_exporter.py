@@ -119,34 +119,29 @@ _CANDIDATE_STAGE_ALIASES: dict[str, str] = {
     "thought_enrichment": "enrich",
     "thought-enrichment": "enrich",
     "enriched": "enrich",
-    # Atomize was removed from the dashboard. Map legacy stage values to the
-    # next visible recipe lane instead of exposing an Atomize column.
-    "atomize": "provenance",
-    "atomized": "provenance",
-    "atomizer": "provenance",
-    "provenance_chains": "provenance",
-    "provenance-chains": "provenance",
-    "schema_aware_routing": "entities_action",
-    "schema-aware-routing": "entities_action",
-    "entities/action": "entities_action",
-    "entities": "entities_action",
-    "entity_action": "entities_action",
+    # Retired recipe stages remain accepted for stale artifacts, but they map
+    # back to the last visible recipe lane instead of exposing removed columns
+    # or implying Dedupe has run.
+    "atomize": "enrich",
+    "atomized": "enrich",
+    "atomizer": "enrich",
+    "provenance": "enrich",
+    "provenance_chains": "enrich",
+    "provenance-chains": "enrich",
+    "schema_aware_routing": "enrich",
+    "schema-aware-routing": "enrich",
+    "entities/action": "enrich",
+    "entities_action": "enrich",
+    "entities": "enrich",
+    "entity_action": "enrich",
     "ready": "ready_for_cortexdb",
     "ready_to_import": "ready_for_cortexdb",
     "candidate": "ready_for_cortexdb",
     "capture_candidate": "ready_for_cortexdb",
 }
-_RECIPE_STAGE_IDS: tuple[str, ...] = ("enrich", "provenance", "entities_action")
+_RECIPE_STAGE_IDS: tuple[str, ...] = ("enrich",)
 _RECIPE_STAGE_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "enrich": ("thought_enrichment", "thought-enrichment", "enriched"),
-    "provenance": ("provenance_chains", "provenance-chains"),
-    "entities_action": (
-        "schema_aware_routing",
-        "schema-aware-routing",
-        "entities/action",
-        "entities",
-        "entity_action",
-    ),
 }
 _DEFAULT_PANNING_GENERATION_TECHNIQUE: dict[str, str] = {
     "id": "panning-for-gold",
@@ -1473,13 +1468,29 @@ def _candidate_generation_technique(*records: dict[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(_DEFAULT_PANNING_GENERATION_TECHNIQUE)
 
 
-def _strip_removed_atomize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+_RETIRED_WORKFLOW_STAGE_KEYS: set[str] = {
+    "atomize",
+    "atomized",
+    "atomizer",
+    "provenance",
+    "provenance_chains",
+    "provenance-chains",
+    "entities_action",
+    "schema_aware_routing",
+    "schema-aware-routing",
+    "entities/action",
+    "entities",
+    "entity_action",
+}
+
+
+def _strip_retired_recipe_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     clean = copy.deepcopy(metadata)
     clean.pop("atomization", None)
     for key in ("workflow_status", "workflow_statuses", "recipe_status", "recipe_statuses", "recipe_workflow"):
         value = clean.get(key)
         if isinstance(value, dict):
-            for removed_key in ("atomize", "atomized", "atomizer"):
+            for removed_key in _RETIRED_WORKFLOW_STAGE_KEYS:
                 value.pop(removed_key, None)
             if not value:
                 clean.pop(key, None)
@@ -1504,7 +1515,7 @@ def _candidate_metadata(*records: dict[str, Any]) -> dict[str, Any]:
             value = _dig(record, key)
             if value not in (None, "", [], {}):
                 metadata[key] = copy.deepcopy(value)
-    return _strip_removed_atomize_metadata(metadata)
+    return _strip_retired_recipe_metadata(metadata)
 
 
 def _receipt_from_audit(

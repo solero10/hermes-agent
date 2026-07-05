@@ -252,7 +252,7 @@ def test_candidate_formation_trace_flat_fields_export_to_dashboard_snapshot(tmp_
     assert "/mnt/d/private" not in rendered
 
 
-def test_candidate_workflow_metadata_excludes_removed_atomize_stage(tmp_path, monkeypatch):
+def test_candidate_workflow_metadata_excludes_retired_recipe_stages(tmp_path, monkeypatch):
     exporter = _load_exporter()
     api = _load_plugin_api()
     run_root = tmp_path / "workflow-metadata-run"
@@ -294,7 +294,8 @@ def test_candidate_workflow_metadata_excludes_removed_atomize_stage(tmp_path, mo
     assert workflow["metadata"]["workflow_status"]["enrich"]["status"] == "complete"
     assert "atomization" not in workflow["metadata"]
     assert "atomize" not in workflow["metadata"]["workflow_status"]
-    assert workflow["metadata"]["workflow_status"]["entities_action"]["status"] == "review_required"
+    assert "provenance" not in workflow["metadata"]["workflow_status"]
+    assert "entities_action" not in workflow["metadata"]["workflow_status"]
 
     hermes_home = tmp_path / ".hermes"
     out_path = hermes_home / "openbrain-ingestion-dashboard" / "snapshot.json"
@@ -309,9 +310,13 @@ def test_candidate_workflow_metadata_excludes_removed_atomize_stage(tmp_path, mo
 
     board = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
     cards = {card["candidate_id"]: card for card in _all_cards(board)}
-    assert cards["cand_010_workflow_status"]["workflow_status"]["entities_action"]["status"] == "needs_review"
+    assert set(cards["cand_010_workflow_status"]["workflow_status"]) == {"enrich"}
     assert "atomize" not in cards["cand_010_workflow_status"]["workflow_status"]
+    assert "provenance" not in cards["cand_010_workflow_status"]["workflow_status"]
+    assert "entities_action" not in cards["cand_010_workflow_status"]["workflow_status"]
     assert "atomize" not in [column["id"] for column in board["columns"]]
+    assert "provenance" not in [column["id"] for column in board["columns"]]
+    assert "entities_action" not in [column["id"] for column in board["columns"]]
 
 
 def test_inventory_only_not_applicable_rows_surface_as_stopped_cards(tmp_path, monkeypatch):

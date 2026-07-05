@@ -68,9 +68,9 @@ def test_canonical_stage_aliases_are_normalized_in_snapshot_output():
     assert api._normalize_stage("raw_extraction") == "extracted"
     assert api._normalize_stage("policy") == "shaped"
     assert api._normalize_stage("thought_enrichment") == "enrich"
-    assert api._normalize_stage("atomized") == "provenance"
-    assert api._normalize_stage("provenance_chains") == "provenance"
-    assert api._normalize_stage("entities/action") == "entities_action"
+    assert api._normalize_stage("atomized") == "enrich"
+    assert api._normalize_stage("provenance_chains") == "enrich"
+    assert api._normalize_stage("entities/action") == "enrich"
     assert api._normalize_stage("ready") == "ready_for_cortexdb"
     assert api._normalize_stage("ready_to_import") == "ready_for_cortexdb"
 
@@ -80,6 +80,8 @@ def test_canonical_stage_aliases_are_normalized_in_snapshot_output():
     stage_ids = [stage["id"] for stage in thought["stages"]]
     assert "raw_extraction" not in stage_ids
     assert "atomize" not in stage_ids
+    assert "provenance" not in stage_ids
+    assert "entities_action" not in stage_ids
     assert "ready" not in stage_ids
     assert "extracted" in stage_ids
     ready_stage = next(stage for stage in thought["stages"] if stage["id"] == "ready_for_cortexdb")

@@ -32,8 +32,6 @@ StageId = Literal[
     "extracted",
     "shaped",
     "enrich",
-    "provenance",
-    "entities_action",
     "deduped",
     "ready_for_cortexdb",
     "cortexdb",
@@ -53,8 +51,6 @@ CANONICAL_STAGES: tuple[str, ...] = (
     "extracted",
     "shaped",
     "enrich",
-    "provenance",
-    "entities_action",
     "deduped",
     "ready_for_cortexdb",
     "cortexdb",
@@ -73,14 +69,6 @@ _STAGE_ALIASES: dict[str, str] = {
     "thought_enrichment": "enrich",
     "thought-enrichment": "enrich",
     "enriched": "enrich",
-    "provenance_chains": "provenance",
-    "provenance-chains": "provenance",
-    "schema_aware_routing": "entities_action",
-    "schema-aware-routing": "entities_action",
-    "entities/action": "entities_action",
-    "entities_action": "entities_action",
-    "entity_action": "entities_action",
-    "entities": "entities_action",
     "ready": "ready_for_cortexdb",
     "ready_to_import": "ready_for_cortexdb",
     "ready-to-import": "ready_for_cortexdb",
@@ -90,33 +78,35 @@ _REMOVED_STAGE_ALIASES: dict[str, str] = {
     # Atomize was removed from Ken's OpenBrain dashboard on 2026-07-05. Keep a
     # compatibility shim so stale snapshots do not crash, but do not expose a
     # visible Atomize column or detail stage.
-    "atomize": "provenance",
-    "atomized": "provenance",
-    "atomizer": "provenance",
+    "atomize": "enrich",
+    "atomized": "enrich",
+    "atomizer": "enrich",
+    # Provenance and Entities/action recipes are retired for captured thoughts.
+    # Map stale stage names back to the last remaining recipe lane instead of
+    # exposing retired columns or pretending Dedupe has run.
+    "provenance": "enrich",
+    "provenance_chains": "enrich",
+    "provenance-chains": "enrich",
+    "schema_aware_routing": "enrich",
+    "schema-aware-routing": "enrich",
+    "entities/action": "enrich",
+    "entities_action": "enrich",
+    "entity_action": "enrich",
+    "entities": "enrich",
 }
 
 _STAGE_LABELS: dict[str, str] = {
     "extracted": "Evidence cards",
     "shaped": "Thought candidates",
     "enrich": "Enrich",
-    "provenance": "Provenance",
-    "entities_action": "Entities/action",
     "deduped": "Deduped",
     "ready_for_cortexdb": "Ready for CortexDB",
     "cortexdb": "CortexDB",
 }
 
-RECIPE_STAGE_IDS: tuple[str, ...] = ("enrich", "provenance", "entities_action")
+RECIPE_STAGE_IDS: tuple[str, ...] = ("enrich",)
 _RECIPE_STAGE_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "enrich": ("thought_enrichment", "thought-enrichment", "enriched"),
-    "provenance": ("provenance_chains", "provenance-chains"),
-    "entities_action": (
-        "schema_aware_routing",
-        "schema-aware-routing",
-        "entities/action",
-        "entities",
-        "entity_action",
-    ),
 }
 
 POLICY_STOP_DEFINITIONS: tuple[dict[str, str], ...] = (
@@ -1015,8 +1005,6 @@ class StageDetail(BaseModel):
     shaped: FormationTrace | None = None
     policy: PolicyDecisionDetail | None = None
     enrich: WorkflowStepDetail | None = None
-    provenance: WorkflowStepDetail | None = None
-    entities_action: WorkflowStepDetail | None = None
     deduped: DedupeEvidenceDetail | None = None
     ready_for_cortexdb: ReadyPackageDetail | None = None
     cortexdb: CortexDBReceipt | None = None
@@ -1032,12 +1020,6 @@ class StageDetail(BaseModel):
                 ("thought_enrichment", "enrich"),
                 ("thought-enrichment", "enrich"),
                 ("enriched", "enrich"),
-                ("provenance_chains", "provenance"),
-                ("provenance-chains", "provenance"),
-                ("schema_aware_routing", "entities_action"),
-                ("schema-aware-routing", "entities_action"),
-                ("entities/action", "entities_action"),
-                ("entities", "entities_action"),
             ):
                 if alias in clean and canonical not in clean:
                     clean[canonical] = clean[alias]
@@ -2150,13 +2132,7 @@ _BOARD_CARD_SEARCH_FIELDS: tuple[str, ...] = (
     "stage_detail.extracted.promotion_note",
     "stage_detail.enrich.note",
     "stage_detail.enrich.evidence_note",
-    "stage_detail.provenance.note",
-    "stage_detail.provenance.evidence_note",
-    "stage_detail.entities_action.note",
-    "stage_detail.entities_action.evidence_note",
     "workflow_status.enrich.status",
-    "workflow_status.provenance.status",
-    "workflow_status.entities_action.status",
     "stage_detail.policy.reason",
     "stage_detail.policy.redacted_text",
     "stage_detail.deduped.merge_note",
