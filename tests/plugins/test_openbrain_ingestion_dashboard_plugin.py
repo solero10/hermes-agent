@@ -265,6 +265,33 @@ def _all_cards(board: dict):
     return [card for row in board["rows"] for cards in row["columns"].values() for card in cards]
 
 
+def test_archive_state_defaults_to_empty(api_module):
+    state = api_module._load_archive_state()
+    assert state["schema_version"] == 1
+    assert state["source_units"] == {}
+
+
+def test_archive_state_atomic_write_preserves_previous_file_on_replace_failure(api_module, hermes_home, monkeypatch):
+    state_path = hermes_home / "openbrain-ingestion-dashboard" / "archive_state.json"
+    state_path.write_text('{"schema_version":1,"updated_at":"old","source_units":{}}\n', encoding="utf-8")
+
+    def fail_replace(src, dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(api_module.os, "replace", fail_replace)
+    with pytest.raises(OSError):
+        api_module._write_archive_state_atomic(
+            {
+                "schema_version": 1,
+                "updated_at": "new",
+                "source_units": {"transcript-a": {"thoughts": {}}},
+            }
+        )
+
+    assert json.loads(state_path.read_text(encoding="utf-8"))["updated_at"] == "old"
+    assert not list(state_path.parent.glob(".archive_state.json.*.tmp"))
+
+
 def test_source_types_prefers_transcripts_default(client):
     response = client.get("/api/plugins/openbrain_ingestion/source-types")
     assert response.status_code == 200
@@ -316,6 +343,49 @@ def test_board_groups_thoughts_by_current_stage_once_and_splits_counts(client):
     for card in _all_cards(payload):
         assert card["source_unit_id"]
         assert card["lineage_id"]
+
+
+def test_board_hides_archived_thoughts_by_default_and_reveals_with_query(client, hermes_home):
+    state_path = hermes_home / "openbrain-ingestion-dashboard" / "archive_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "updated_at": "2026-07-05T23:30:58Z",
+                "source_units": {
+                    "transcript-a": {
+                        "thoughts": {
+                            "lineage_dup_1": {
+                                "source_unit_id": "transcript-a",
+                                "lineage_id": "lineage_dup_1",
+                                "archived_at": "2026-07-05T23:30:58Z",
+                                "archived_by": "dashboard",
+                                "reason": "manual cleanup",
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    default_board = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
+    default_ids = [card["id"] for card in _all_cards(default_board)]
+    assert "lineage_dup_1" not in default_ids
+    assert default_board["include_archived"] is False
+    assert default_board["total_counts"]["archived"] == 1
+    assert default_board["visible_counts"]["archived"] == 0
+
+    with_archived = client.get(
+        "/api/plugins/openbrain_ingestion/board?source_type=transcripts&include_archived=true"
+    ).json()
+    archived = next(card for card in _all_cards(with_archived) if card["id"] == "lineage_dup_1")
+    assert archived["archived"] is True
+    assert archived["archived_by"] == "dashboard"
+    assert archived["archive_reason"] == "manual cleanup"
+    assert with_archived["include_archived"] is True
+    assert with_archived["visible_counts"]["archived"] == 1
 
 
 def test_board_and_detail_expose_generation_technique_without_field_lookup(client):
@@ -758,6 +828,137 @@ def test_not_imported_current_stage_cortexdb_does_not_expose_receipts(client):
     assert thought["disposition"] == "stopped"
     assert "must-not-leak" not in json.dumps(thought)
     assert "cortexdb_receipt" not in thought or thought["cortexdb_receipt"] in ({}, None)
+
+
+def test_archive_endpoint_marks_thought_hidden_without_mutating_snapshot(client, hermes_home):
+    snapshot_path = hermes_home / "openbrain-ingestion-dashboard" / "snapshot.json"
+    before_snapshot = snapshot_path.read_text(encoding="utf-8")
+
+    response = client.post(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_ready_1/archive",
+        json={"reason": "not needed on dashboard"},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["thought"]["archived"] is True
+    assert payload["thought"]["archive_reason"] == "not needed on dashboard"
+
+    assert snapshot_path.read_text(encoding="utf-8") == before_snapshot
+    hidden = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
+    assert "lineage_ready_1" not in [card["id"] for card in _all_cards(hidden)]
+
+    visible = client.get(
+        "/api/plugins/openbrain_ingestion/board?source_type=transcripts&include_archived=true"
+    ).json()
+    assert "lineage_ready_1" in [card["id"] for card in _all_cards(visible)]
+
+
+def test_unarchive_endpoint_restores_thought_to_default_board(client):
+    client.post("/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_ready_1/archive")
+    response = client.post(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_ready_1/unarchive"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["thought"]["archived"] is False
+
+    board = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
+    assert "lineage_ready_1" in [card["id"] for card in _all_cards(board)]
+
+
+def test_bulk_archive_endpoint_archives_and_unarchives_selected_thoughts(client, hermes_home):
+    snapshot_path = hermes_home / "openbrain-ingestion-dashboard" / "snapshot.json"
+    before_snapshot = snapshot_path.read_text(encoding="utf-8")
+    payload = {
+        "archived": True,
+        "reason": "bulk table cleanup",
+        "items": [
+            {"source_unit_id": "transcript-a", "lineage_id": "lineage_ready_1"},
+            {"source_unit_id": "transcript-a", "lineage_id": "lineage_dup_1"},
+        ],
+    }
+
+    response = client.post("/api/plugins/openbrain_ingestion/thoughts/archive", json=payload)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["archived"] is True
+    assert result["count"] == 2
+    assert {thought["lineage_id"] for thought in result["thoughts"]} == {"lineage_ready_1", "lineage_dup_1"}
+    assert all(thought["archived"] is True for thought in result["thoughts"])
+    assert snapshot_path.read_text(encoding="utf-8") == before_snapshot
+
+    hidden = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
+    hidden_ids = [card["id"] for card in _all_cards(hidden)]
+    assert "lineage_ready_1" not in hidden_ids
+    assert "lineage_dup_1" not in hidden_ids
+
+    visible = client.get(
+        "/api/plugins/openbrain_ingestion/board?source_type=transcripts&include_archived=true"
+    ).json()
+    visible_cards = {card["id"]: card for card in _all_cards(visible)}
+    assert visible_cards["lineage_ready_1"]["archived"] is True
+    assert visible_cards["lineage_dup_1"]["archived"] is True
+
+    restore = client.post(
+        "/api/plugins/openbrain_ingestion/thoughts/archive",
+        json={
+            "archived": False,
+            "items": [
+                {"source_unit_id": "transcript-a", "lineage_id": "lineage_ready_1"},
+                {"source_unit_id": "transcript-a", "lineage_id": "lineage_dup_1"},
+            ],
+        },
+    )
+    assert restore.status_code == 200, restore.text
+    assert restore.json()["archived"] is False
+    board = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
+    restored_ids = [card["id"] for card in _all_cards(board)]
+    assert "lineage_ready_1" in restored_ids
+    assert "lineage_dup_1" in restored_ids
+
+
+def test_bulk_archive_endpoint_requires_selection_and_validates_all_items(client):
+    assert client.post(
+        "/api/plugins/openbrain_ingestion/thoughts/archive", json={"archived": True, "items": []}
+    ).status_code == 400
+    response = client.post(
+        "/api/plugins/openbrain_ingestion/thoughts/archive",
+        json={
+            "archived": True,
+            "items": [
+                {"source_unit_id": "transcript-a", "lineage_id": "lineage_ready_1"},
+                {"source_unit_id": "transcript-a", "lineage_id": "missing"},
+            ],
+        },
+    )
+    assert response.status_code == 404
+    board = client.get("/api/plugins/openbrain_ingestion/board?source_type=transcripts").json()
+    assert "lineage_ready_1" in [card["id"] for card in _all_cards(board)]
+
+
+def test_archive_endpoint_returns_404_for_unknown_source_or_thought(client):
+    assert client.post(
+        "/api/plugins/openbrain_ingestion/source-units/missing/thoughts/lineage_ready_1/archive"
+    ).status_code == 404
+    assert client.post(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/missing/archive"
+    ).status_code == 404
+
+
+def test_thought_detail_applies_archive_overlay_for_direct_links(client):
+    client.post(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_dup_1/archive",
+        json={"reason": "hide duplicate"},
+    )
+
+    response = client.get(
+        "/api/plugins/openbrain_ingestion/source-units/transcript-a/thoughts/lineage_dup_1"
+    )
+    assert response.status_code == 200
+    thought = response.json()["thought"]
+    assert thought["archived"] is True
+    assert thought["archive_reason"] == "hide duplicate"
+    assert thought["disposition"] == "stopped"
+    assert thought["current_stage"] == "deduped"
 
 
 def test_unknown_thought_404(client):

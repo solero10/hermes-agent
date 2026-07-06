@@ -12,7 +12,9 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -27,6 +29,8 @@ router = APIRouter()
 
 SNAPSHOT_DIRNAME = "openbrain-ingestion-dashboard"
 SNAPSHOT_FILENAME = "snapshot.json"
+ARCHIVE_STATE_FILENAME = "archive_state.json"
+ARCHIVE_STATE_SCHEMA_VERSION = 1
 
 StageId = Literal[
     "extracted",
@@ -1151,6 +1155,10 @@ class ThoughtRecord(BaseModel):
     related_memories: list[RelatedMemory] = Field(default_factory=list)
     cortexdb_receipt: CortexDBReceipt | None = None
     cortexdb_id: str | None = None
+    archived: bool = False
+    archived_at: str | None = None
+    archived_by: str | None = None
+    archive_reason: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -1340,6 +1348,10 @@ class ThoughtCard(BaseModel):
     dedupe_similarity_score: float | None = None
     dedupe_nearest_similarity_score: float | None = None
     cortexdb_id: str | None = None
+    archived: bool = False
+    archived_at: str | None = None
+    archived_by: str | None = None
+    archive_reason: str | None = None
 
     @field_validator("current_stage", mode="before")
     @classmethod
@@ -1394,6 +1406,10 @@ class ThoughtDetail(BaseModel):
     cortexdb_receipt: CortexDBReceipt | None = None
     cortexdb_id: str | None = None
     database_fields: list[DatabaseFieldRecord] = Field(default_factory=list)
+    archived: bool = False
+    archived_at: str | None = None
+    archived_by: str | None = None
+    archive_reason: str | None = None
 
     @field_validator("current_stage", mode="before")
     @classmethod
@@ -1442,6 +1458,73 @@ class ThoughtDetail(BaseModel):
 
 def _snapshot_path() -> Path:
     return get_hermes_home() / SNAPSHOT_DIRNAME / SNAPSHOT_FILENAME
+
+
+def _archive_state_path() -> Path:
+    return get_hermes_home() / SNAPSHOT_DIRNAME / ARCHIVE_STATE_FILENAME
+
+
+def _empty_archive_state() -> dict[str, Any]:
+    return {"schema_version": ARCHIVE_STATE_SCHEMA_VERSION, "updated_at": None, "source_units": {}}
+
+
+def _load_archive_state() -> dict[str, Any]:
+    path = _archive_state_path()
+    if not path.exists():
+        return _empty_archive_state()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return _empty_archive_state()
+    if not isinstance(payload, dict) or payload.get("schema_version") != ARCHIVE_STATE_SCHEMA_VERSION:
+        return _empty_archive_state()
+    source_units = payload.get("source_units")
+    if not isinstance(source_units, dict):
+        payload["source_units"] = {}
+    return payload
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _fsync_parent_best_effort(path: Path) -> None:
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _write_archive_state_atomic(state: dict[str, Any]) -> None:
+    clean = copy.deepcopy(state)
+    clean["schema_version"] = ARCHIVE_STATE_SCHEMA_VERSION
+    clean.setdefault("source_units", {})
+    payload = json.dumps(clean, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+    path = _archive_state_path()
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = parent / f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    try:
+        with tmp_path.open("x", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        _fsync_parent_best_effort(parent)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _sample_snapshot() -> dict[str, Any]:
@@ -1905,6 +1988,41 @@ def _workflow_statuses(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return statuses
 
 
+def _archive_metadata_for(state: dict[str, Any], source_unit_id: str, lineage_id: str) -> dict[str, Any] | None:
+    source_units = state.get("source_units")
+    if not isinstance(source_units, dict):
+        return None
+    unit = source_units.get(source_unit_id)
+    if not isinstance(unit, dict):
+        return None
+    thoughts = unit.get("thoughts")
+    if not isinstance(thoughts, dict):
+        return None
+    meta = thoughts.get(lineage_id)
+    return meta if isinstance(meta, dict) else None
+
+
+def _safe_archive_text(value: Any) -> str | None:
+    text = _clean_text_or_none(value)
+    if not text:
+        return None
+    return _bound_source_text(_redact_sensitive_text(text), 500)
+
+
+def _apply_archive_overlay(thought: Any, source_unit_id: str, archive_state: dict[str, Any]) -> dict[str, Any]:
+    data = _model_dump(thought)
+    lineage_id = str(data.get("lineage_id") or data.get("id") or "")
+    meta = _archive_metadata_for(archive_state, source_unit_id, lineage_id)
+    if not meta:
+        data.setdefault("archived", False)
+        return data
+    data["archived"] = True
+    data["archived_at"] = _safe_archive_text(meta.get("archived_at"))
+    data["archived_by"] = _safe_archive_text(meta.get("archived_by")) or "dashboard"
+    data["archive_reason"] = _safe_archive_text(meta.get("reason") or meta.get("archive_reason"))
+    return data
+
+
 def _card(thought: Any, source_unit_id: str) -> dict[str, Any]:
     t = _model_dump(thought)
     lineage_id = str(t.get("lineage_id") or t.get("id") or "")
@@ -1928,6 +2046,10 @@ def _card(thought: Any, source_unit_id: str) -> dict[str, Any]:
         "stopped_reason": t.get("stopped_reason"),
         "matched_memory_id": t.get("matched_memory_id"),
         "generation_technique": _generation_technique_from_record(t),
+        "archived": bool(t.get("archived")),
+        "archived_at": t.get("archived_at"),
+        "archived_by": t.get("archived_by"),
+        "archive_reason": t.get("archive_reason"),
     }
     stage_detail_raw = t.get("stage_detail")
     stage_detail: dict[str, Any] = stage_detail_raw if isinstance(stage_detail_raw, dict) else {}
@@ -2011,6 +2133,7 @@ def _blank_counts() -> dict[str, int]:
         "needs_review": 0,
         "in_progress": 0,
         "zero_thoughts": 0,
+        "archived": 0,
     }
     for stage_id in CANONICAL_STAGES:
         counts[stage_id] = 0
@@ -2019,6 +2142,8 @@ def _blank_counts() -> dict[str, int]:
 
 def _count_thought(counts: dict[str, int], thought: dict[str, Any]) -> None:
     counts["thoughts"] += 1
+    if thought.get("archived") is True:
+        counts["archived"] += 1
     stage_id = _normalize_stage(thought.get("current_stage") or "extracted")
     if stage_id in CANONICAL_STAGES:
         counts[stage_id] += 1
@@ -2035,11 +2160,16 @@ def _count_thought(counts: dict[str, int], thought: dict[str, Any]) -> None:
         counts["needs_review"] += 1
 
 
-def _counts_for_units(units: list[SourceUnit]) -> dict[str, int]:
+def _counts_for_units(units: list[SourceUnit], archive_state: dict[str, Any] | None = None) -> dict[str, int]:
     counts = _blank_counts()
     counts["source_units"] = len(units)
     for source_unit in units:
-        thoughts = [_model_dump(thought) for thought in source_unit.thoughts]
+        thoughts = [
+            _apply_archive_overlay(thought, source_unit.id, archive_state)
+            if archive_state is not None
+            else _model_dump(thought)
+            for thought in source_unit.thoughts
+        ]
         if not thoughts:
             counts["zero_thoughts"] += 1
         for thought in thoughts:
@@ -2353,8 +2483,10 @@ def board(
     search: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    include_archived: bool = False,
 ) -> dict[str, Any]:
     snapshot = _load_snapshot()
+    archive_state = _load_archive_state()
     selected_source_type = source_type or _default_source_type(snapshot)
 
     normalized_filter = (filter_value or "all").strip().lower()
@@ -2369,7 +2501,7 @@ def board(
         raise HTTPException(status_code=400, detail="Source date from must be before or equal to source date to")
 
     units = [unit for unit in snapshot.source_units if unit.source_type == selected_source_type]
-    total_counts = _counts_for_units(units)
+    total_counts = _counts_for_units(units, archive_state)
 
     rows: list[dict[str, Any]] = []
     search_query = search.strip() if isinstance(search, str) else None
@@ -2393,14 +2525,16 @@ def board(
             rows.append(row)
             continue
 
-        visible_thoughts: list[ThoughtRecord] = []
+        visible_thoughts: list[dict[str, Any]] = []
         for thought in all_thoughts:
-            thought_dict = thought.model_dump(mode="json", exclude_none=True)
+            thought_dict = _apply_archive_overlay(thought, source_unit.id, archive_state)
+            if thought_dict.get("archived") is True and not include_archived:
+                continue
             if not _matches_filter(thought_dict, normalized_filter):
                 continue
             if not _matches_search(thought_dict, search_query):
                 continue
-            visible_thoughts.append(thought)
+            visible_thoughts.append(thought_dict)
 
         if not visible_thoughts:
             if all_thoughts or normalized_filter != "all" or search_query:
@@ -2434,17 +2568,128 @@ def board(
         "search": search_query or "",
         "date_from": date_from or "",
         "date_to": date_to or "",
+        "include_archived": include_archived,
     }
 
 
-@router.get("/source-units/{source_unit_id}/thoughts/{lineage_id}")
-def thought_detail(source_unit_id: str, lineage_id: str) -> dict[str, Any]:
-    snapshot = _load_snapshot()
+class ArchiveThoughtBody(BaseModel):
+    reason: str | None = None
+
+
+class BulkArchiveThoughtItem(BaseModel):
+    source_unit_id: str
+    lineage_id: str
+
+
+class BulkArchiveThoughtBody(BaseModel):
+    archived: bool
+    items: list[BulkArchiveThoughtItem] = Field(default_factory=list)
+    reason: str | None = None
+
+
+def _find_thought(snapshot: Snapshot, source_unit_id: str, lineage_id: str) -> tuple[SourceUnit, ThoughtRecord]:
     for source_unit in snapshot.source_units:
         if source_unit.id != source_unit_id:
             continue
         for thought in source_unit.thoughts:
             if thought.lineage_id == lineage_id:
-                return {"thought": _thought_detail(thought, source_unit)}
+                return source_unit, thought
         raise HTTPException(status_code=404, detail="Thought not found")
     raise HTTPException(status_code=404, detail="Source unit not found")
+
+
+def _set_archived_entries(
+    entries: list[tuple[str, str]],
+    *,
+    archived: bool,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    state = _load_archive_state()
+    now = _utc_now_iso()
+    state["updated_at"] = now
+    source_units = state.setdefault("source_units", {})
+    for source_unit_id, lineage_id in entries:
+        unit = source_units.setdefault(source_unit_id, {"thoughts": {}})
+        thoughts = unit.setdefault("thoughts", {})
+        if archived:
+            thoughts[lineage_id] = {
+                "source_unit_id": source_unit_id,
+                "lineage_id": lineage_id,
+                "archived_at": now,
+                "archived_by": "dashboard",
+                "reason": _safe_archive_text(reason) or "manual",
+            }
+        else:
+            thoughts.pop(lineage_id, None)
+            if not thoughts:
+                source_units.pop(source_unit_id, None)
+    _write_archive_state_atomic(state)
+    return state
+
+
+def _set_archived_state(
+    source_unit_id: str,
+    lineage_id: str,
+    *,
+    archived: bool,
+    reason: str | None = None,
+) -> dict[str, Any] | None:
+    state = _set_archived_entries([(source_unit_id, lineage_id)], archived=archived, reason=reason)
+    return _archive_metadata_for(state, source_unit_id, lineage_id)
+
+
+@router.post("/thoughts/archive")
+def bulk_archive_thoughts(payload: BulkArchiveThoughtBody) -> dict[str, Any]:
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="No thoughts selected")
+
+    snapshot = _load_snapshot()
+    found: list[tuple[SourceUnit, ThoughtRecord]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in payload.items:
+        key = (item.source_unit_id, item.lineage_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(_find_thought(snapshot, item.source_unit_id, item.lineage_id))
+
+    _set_archived_entries(list(seen), archived=payload.archived, reason=payload.reason)
+    archive_state = _load_archive_state()
+    thoughts = []
+    for source_unit, thought in found:
+        overlaid = ThoughtRecord.model_validate(_apply_archive_overlay(thought, source_unit.id, archive_state))
+        thoughts.append(_thought_detail(overlaid, source_unit))
+    return {"archived": payload.archived, "count": len(thoughts), "thoughts": thoughts}
+
+
+@router.post("/source-units/{source_unit_id}/thoughts/{lineage_id}/archive")
+def archive_thought(
+    source_unit_id: str,
+    lineage_id: str,
+    payload: ArchiveThoughtBody | None = None,
+) -> dict[str, Any]:
+    snapshot = _load_snapshot()
+    source_unit, thought = _find_thought(snapshot, source_unit_id, lineage_id)
+    _set_archived_state(source_unit_id, lineage_id, archived=True, reason=(payload.reason if payload else None))
+    archive_state = _load_archive_state()
+    overlaid = ThoughtRecord.model_validate(_apply_archive_overlay(thought, source_unit.id, archive_state))
+    return {"thought": _thought_detail(overlaid, source_unit)}
+
+
+@router.post("/source-units/{source_unit_id}/thoughts/{lineage_id}/unarchive")
+def unarchive_thought(source_unit_id: str, lineage_id: str) -> dict[str, Any]:
+    snapshot = _load_snapshot()
+    source_unit, thought = _find_thought(snapshot, source_unit_id, lineage_id)
+    _set_archived_state(source_unit_id, lineage_id, archived=False)
+    archive_state = _load_archive_state()
+    overlaid = ThoughtRecord.model_validate(_apply_archive_overlay(thought, source_unit.id, archive_state))
+    return {"thought": _thought_detail(overlaid, source_unit)}
+
+
+@router.get("/source-units/{source_unit_id}/thoughts/{lineage_id}")
+def thought_detail(source_unit_id: str, lineage_id: str) -> dict[str, Any]:
+    snapshot = _load_snapshot()
+    source_unit, thought = _find_thought(snapshot, source_unit_id, lineage_id)
+    archive_state = _load_archive_state()
+    overlaid = ThoughtRecord.model_validate(_apply_archive_overlay(thought, source_unit.id, archive_state))
+    return {"thought": _thought_detail(overlaid, source_unit)}

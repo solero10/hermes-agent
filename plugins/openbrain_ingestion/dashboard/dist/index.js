@@ -35,7 +35,7 @@
     { value: "most_stopped", label: "Most stopped" },
   ];
   const READ_ONLY_TITLE = "Read-only MVP";
-  const READ_ONLY_EXPLANATION = "Read-only MVP: this dashboard mirrors ingestion state only. Source, CortexDB, merge, review, and promotion actions are intentionally disabled placeholders.";
+  const READ_ONLY_EXPLANATION = "Read-only MVP: this dashboard mirrors ingestion state. Archive is the only enabled dashboard-local mutation; source, CortexDB, merge, review, and promotion actions remain disabled placeholders.";
   const DEFAULT_POLICY_STOP_DEFINITIONS = [
     {
       id: "needs_source_validation",
@@ -527,18 +527,49 @@
     return "";
   }
 
-  function boardURL(sourceType, filter, sort, search, dateFrom, dateTo) {
+  function boardURL(sourceType, filter, sort, search, dateFrom, dateTo, includeArchived) {
     return API_BASE + "/board?source_type=" + encodeURIComponent(sourceType || "") +
       "&filter=" + encodeURIComponent(filter || "all") +
       "&sort=" + encodeURIComponent(sort || "newest") +
       "&search=" + encodeURIComponent(search || "") +
       "&date_from=" + encodeURIComponent(sourceDateQueryValue(dateFrom)) +
-      "&date_to=" + encodeURIComponent(sourceDateQueryValue(dateTo));
+      "&date_to=" + encodeURIComponent(sourceDateQueryValue(dateTo)) +
+      "&include_archived=" + encodeURIComponent(includeArchived ? "true" : "false");
   }
 
   function detailURL(sourceUnitId, lineageId) {
     return API_BASE + "/source-units/" + encodeURIComponent(sourceUnitId || "") +
       "/thoughts/" + encodeURIComponent(lineageId || "");
+  }
+
+  function bulkArchiveURL() {
+    return API_BASE + "/thoughts/archive";
+  }
+
+  function thoughtSelectionKey(card) {
+    return String((card && card.source_unit_id) || "") + "::" + String((card && (card.lineage_id || card.id)) || "");
+  }
+
+  function thoughtSelectionItem(card) {
+    return {
+      source_unit_id: (card && card.source_unit_id) || "",
+      lineage_id: (card && (card.lineage_id || card.id)) || "",
+      title: card && card.title,
+      archived: !!(card && card.archived),
+    };
+  }
+
+  function selectedCandidateCards(cards, selectedThoughts) {
+    const selected = selectedThoughts || {};
+    return asArray(cards).filter(function (card) {
+      return !!selected[thoughtSelectionKey(card)];
+    });
+  }
+
+  function actionableArchiveCards(cards, archived) {
+    return asArray(cards).filter(function (card) {
+      return !!card.archived !== !!archived;
+    });
   }
 
   function sourceTypeOptions(sourceTypes) {
@@ -657,6 +688,18 @@
           }, filter.label);
         })
       ),
+      h("label", { className: "ob-field ob-field--checkbox" },
+        h("span", null, "Archived"),
+        h("span", { className: "ob-checkbox-line" },
+          h("input", {
+            type: "checkbox",
+            checked: !!props.showArchived,
+            onChange: function (event) { props.onShowArchivedChange(event.target.checked); },
+            "aria-label": "Show archived thoughts",
+          }),
+          h("span", null, "Show archived thoughts")
+        )
+      ),
       h("label", { className: "ob-field" },
         h("span", null, "Sort"),
         h("select", {
@@ -680,6 +723,7 @@
       { key: "stopped", label: "Stopped" },
       { key: "imported", label: "Imported" },
       { key: "zero_thoughts", label: "Zero thoughts" },
+      { key: "archived", label: "Archived" },
     ];
     return h("section", { className: "ob-metrics", "aria-label": "Board metrics visible/total" },
       h("div", { className: "ob-metric-help" }, "visible/total"),
@@ -745,6 +789,13 @@
               onOpenDetail: props.onOpenDetail,
               policyDefinitions: policyDefinitions(board),
               onPolicyDefinition: props.onPolicyDefinition,
+              showEvidence: !!((props.evidenceVisibility || {})[row.id]),
+              onToggleEvidence: props.onToggleEvidence,
+              selectedThoughts: props.selectedThoughts,
+              bulkArchiveBusy: props.bulkArchiveBusy,
+              onToggleThought: props.onToggleThought,
+              onToggleAllThoughts: props.onToggleAllThoughts,
+              onBulkArchive: props.onBulkArchive,
             });
           })
         )
@@ -758,6 +809,7 @@
     const expanded = props.expanded;
     const sourceDate = sourceDateText(row);
     const candidateCards = candidateCardsForRow(row);
+    const evidenceCards = evidenceCardsForRow(row);
     return h("article", { className: "ob-row" },
       h("header", { className: "ob-row-header" },
         h("button", {
@@ -779,15 +831,28 @@
       ),
       expanded ? h("div", { className: "ob-row-body", id: bodyId },
         h(SourceCompactSummary, { row: row }),
-        h(EvidenceGrid, {
+        h("div", { className: "ob-evidence-toggle-row" },
+          h("button", {
+            type: "button",
+            className: "ob-evidence-toggle",
+            "aria-expanded": !!props.showEvidence,
+            onClick: function () { props.onToggleEvidence(row.id); },
+          }, (props.showEvidence ? "Hide Evidence cards" : "Show Evidence cards") + " (" + evidenceCards.length + ")")
+        ),
+        props.showEvidence ? h(EvidenceGrid, {
           row: row,
-          cards: evidenceCardsForRow(row),
+          cards: evidenceCards,
           onOpenDetail: props.onOpenDetail,
-        }),
+        }) : null,
         countOf(row, "thought_count") === 0 ? h("div", { className: "ob-zero-thoughts" }, "No durable thoughts extracted") :
           h(CandidatePipelineTable, {
             row: row,
             cards: candidateCards,
+            selectedThoughts: props.selectedThoughts,
+            bulkArchiveBusy: props.bulkArchiveBusy,
+            onToggleThought: props.onToggleThought,
+            onToggleAllThoughts: props.onToggleAllThoughts,
+            onBulkArchive: props.onBulkArchive,
             onOpenDetail: props.onOpenDetail,
             policyDefinitions: props.policyDefinitions,
             onPolicyDefinition: props.onPolicyDefinition,
@@ -840,13 +905,18 @@
     });
     return h("button", {
       type: "button",
-      className: cx("ob-evidence-mini-card", "ob-evidence-mini-card--" + stageSlug(card.disposition || "in_progress")),
+      className: cx(
+        "ob-evidence-mini-card",
+        "ob-evidence-mini-card--" + stageSlug(card.disposition || "in_progress"),
+        card.archived ? "ob-evidence-mini-card--archived" : null
+      ),
       onClick: function () { props.onOpenDetail(card, "extracted"); },
       title: evidenceTitle,
       "aria-label": "Open Evidence details for " + evidenceTitle,
       role: "listitem",
     },
       h("strong", { className: "ob-evidence-mini-title" }, evidenceTitle),
+      card.archived ? h("span", { className: "ob-archive-badge" }, "Archived") : null,
       topics.length ? h("span", { className: "ob-topic-list" }, topics.slice(0, 3).map(function (topic, index) {
         return h("span", { key: String(topic) + "-" + index, className: "ob-topic" }, evidenceTopicLabel(topic));
       })) : null
@@ -855,15 +925,46 @@
 
   function CandidatePipelineTable(props) {
     const cards = asArray(props.cards);
+    const selectedCards = selectedCandidateCards(cards, props.selectedThoughts);
+    const selectedCount = selectedCards.length;
+    const selectedUnarchivedCount = actionableArchiveCards(selectedCards, true).length;
+    const selectedArchivedCount = actionableArchiveCards(selectedCards, false).length;
+    const allSelected = cards.length > 0 && selectedCount === cards.length;
     return h("section", { className: "ob-candidate-pipeline", "aria-label": "Candidate memory pipeline" },
-      h("div", { className: "ob-section-heading" },
+      h("div", { className: "ob-section-heading ob-section-heading--bulk" },
         h("h3", null, "Candidate memory table"),
-        h("span", { className: "ob-stage-count" }, cards.length)
+        h("span", { className: "ob-stage-count" }, cards.length),
+        h("div", { className: "ob-bulk-actions", role: "group", "aria-label": "Bulk archive selected thoughts" },
+          h("span", { className: "ob-selection-count", "aria-live": "polite" }, selectedCount + " selected"),
+          h("button", {
+            type: "button",
+            className: "ob-button ob-button--danger",
+            disabled: !selectedUnarchivedCount || props.bulkArchiveBusy,
+            onClick: function () { props.onBulkArchive(selectedCards, true); },
+            title: "Archive selected dashboard thoughts without deleting source, snapshot, or CortexDB memory.",
+          }, "Archive selected"),
+          h("button", {
+            type: "button",
+            className: "ob-button ob-button--secondary",
+            disabled: !selectedArchivedCount || props.bulkArchiveBusy,
+            onClick: function () { props.onBulkArchive(selectedCards, false); },
+          }, "Unarchive selected")
+        )
       ),
       cards.length ? h("div", { className: "ob-candidate-table-wrap" },
         h("table", { className: "ob-candidate-table" },
           h("thead", null,
             h("tr", null,
+              h("th", { scope: "col", className: "ob-select-all-cell" },
+                h("input", {
+                  type: "checkbox",
+                  className: "ob-selection-checkbox",
+                  checked: allSelected,
+                  disabled: props.bulkArchiveBusy,
+                  onChange: function (event) { props.onToggleAllThoughts(cards, event.target.checked); },
+                  "aria-label": "Select all visible candidate thoughts in this source",
+                })
+              ),
               h("th", { scope: "col" }, "Candidate thought"),
               CANDIDATE_TABLE_STAGES.map(function (stage) {
                 return h("th", { key: stage.id, scope: "col" }, stage.label);
@@ -874,6 +975,9 @@
             return h(CandidateTableRow, {
               key: card.id || card.lineage_id,
               card: card,
+              selected: !!((props.selectedThoughts || {})[thoughtSelectionKey(card)]),
+              bulkArchiveBusy: props.bulkArchiveBusy,
+              onToggleThought: props.onToggleThought,
               onOpenDetail: props.onOpenDetail,
               policyDefinitions: props.policyDefinitions,
               onPolicyDefinition: props.onPolicyDefinition,
@@ -890,7 +994,17 @@
     const technique = generationTechniqueFor(card);
     const showCandidateStopTag = card.disposition === "stopped" && effectiveCode && !(effectiveCode === "duplicate" || card.stop_stage_id === "deduped");
     const showCandidateSubline = !!technique || showCandidateStopTag;
-    return h("tr", { className: cx("ob-candidate-row", "ob-candidate-row--" + stageSlug(card.disposition || "in_progress")) },
+    return h("tr", { className: cx("ob-candidate-row", "ob-candidate-row--" + stageSlug(card.disposition || "in_progress"), card.archived ? "ob-candidate-row--archived" : null, props.selected ? "ob-candidate-row--selected" : null) },
+      h("td", { className: "ob-candidate-select-cell" },
+        h("input", {
+          type: "checkbox",
+          className: "ob-selection-checkbox",
+          checked: !!props.selected,
+          disabled: props.bulkArchiveBusy,
+          onChange: function (event) { props.onToggleThought(card, event.target.checked); },
+          "aria-label": "Select thought " + safeText(card.title || card.lineage_id, "candidate"),
+        })
+      ),
       h("th", { scope: "row", className: "ob-candidate-title-cell" },
         h("button", {
           type: "button",
@@ -936,8 +1050,9 @@
           onClick: function () { props.onOpenDetail(card, "tags"); },
           "aria-label": ariaLabel,
         },
-          topics.length || technique ? h("span", { className: "ob-topic-list" }, [
+          topics.length || technique || card.archived ? h("span", { className: "ob-topic-list" }, [
             technique ? h(TechniquePill, { key: "generation-technique", technique: technique }) : null,
+            card.archived ? h("span", { key: "archived", className: "ob-archive-badge" }, "Archived") : null,
           ].concat(topics.slice(0, 3).map(function (topic) {
             return h("span", { key: topic, className: "ob-topic" }, topic);
           }))) : h("span", { className: "ob-badge" }, "No tags")
@@ -995,7 +1110,7 @@
     const cardTopics = asArray(card.topics).filter(function (topic) {
       return !isEvidenceCard || String(topic || "").trim().toLowerCase() !== "extracted evidence";
     });
-    const cardProps = { className: cx("ob-thought-card", "ob-thought-card--" + stageSlug(disposition), stageClass(card.current_stage), isEvidenceCard ? "ob-thought-card--clickable" : null) };
+    const cardProps = { className: cx("ob-thought-card", "ob-thought-card--" + stageSlug(disposition), stageClass(card.current_stage), isEvidenceCard ? "ob-thought-card--clickable" : null, card.archived ? "ob-thought-card--archived" : null) };
     if (isEvidenceCard) {
       cardProps.role = "button";
       cardProps.tabIndex = 0;
@@ -1013,6 +1128,7 @@
         h("h3", null, safeText(card.title || card.summary || card.lineage_id, "Untitled thought")),
         !isEvidenceCard ? h("div", { className: "ob-card-badges" },
           h(TechniquePill, { card: card }),
+          card.archived ? h("span", { className: "ob-archive-badge" }, "Archived") : null,
           h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(disposition)) }, dispositionLabel(disposition)),
           stopCode ? h(PolicyTag, {
             code: effectiveCode,
@@ -1755,6 +1871,7 @@
         !props.loading && !props.error && thought ? h("div", { className: "ob-detail-body" },
           !isOriginalShapedView ? h("div", { className: "ob-detail-summary" },
             h("span", { className: cx("ob-badge", "ob-badge--" + stageSlug(thought.disposition)) }, dispositionLabel(thought.disposition)),
+            thought.archived ? h("span", { className: "ob-archive-badge" }, "Archived") : null,
             h("span", { className: cx("ob-badge", stageClass(thought.current_stage)) }, stageLabel(thought.current_stage)),
             h(TechniquePill, { thought: thought }),
             thought.disposition === "stopped" && detailStopLabel ? h(PolicyTag, {
@@ -1765,6 +1882,11 @@
             thought.current_stage === "ready_for_cortexdb" ? h("span", { className: "ob-ready-label" }, "Ready for CortexDB") : null
           ) : null,
           h(DetailIDs, { thought: thought }),
+          thought.archived ? h(StageKeyValueList, { rows: [
+            { label: "Archived at", value: thought.archived_at && formatDate(thought.archived_at) },
+            { label: "Archived by", value: thought.archived_by },
+            { label: "Archive reason", value: thought.archive_reason },
+          ] }) : null,
           detailSummary ? h("p", { className: "ob-detail-copy" }, detailSummary) : null,
           !isOriginalShapedView && (thought.source_snippet || thought.quote || thought.raw_text) ? h("blockquote", { className: "ob-source-snippet" }, thought.source_snippet || thought.quote || thought.raw_text) : null,
           h(StageSpecificDetailPanel, {
@@ -1812,6 +1934,9 @@
     const dateToState = useState("");
     const dateTo = dateToState[0];
     const setDateTo = dateToState[1];
+    const showArchivedState = useState(false);
+    const showArchived = showArchivedState[0];
+    const setShowArchived = showArchivedState[1];
     const boardState = useState(null);
     const board = boardState[0];
     const setBoard = boardState[1];
@@ -1824,6 +1949,12 @@
     const expandedState = useState({});
     const expandedRows = expandedState[0];
     const setExpandedRows = expandedState[1];
+    const evidenceVisibilityState = useState({});
+    const evidenceVisibility = evidenceVisibilityState[0];
+    const setEvidenceVisibility = evidenceVisibilityState[1];
+    const selectedThoughtsState = useState({});
+    const selectedThoughts = selectedThoughtsState[0];
+    const setSelectedThoughts = selectedThoughtsState[1];
     const detailState = useState(null);
     const detail = detailState[0];
     const setDetail = detailState[1];
@@ -1833,6 +1964,9 @@
     const detailErrorState = useState(null);
     const detailError = detailErrorState[0];
     const setDetailError = detailErrorState[1];
+    const bulkArchiveBusyState = useState(false);
+    const bulkArchiveBusy = bulkArchiveBusyState[0];
+    const setBulkArchiveBusy = bulkArchiveBusyState[1];
     const selectedDetailStageState = useState(null);
     const selectedDetailStage = selectedDetailStageState[0];
     const setSelectedDetailStage = selectedDetailStageState[1];
@@ -1870,9 +2004,10 @@
       async function loadBoard() {
         setLoading(true);
         try {
-          const data = await SDK.fetchJSON(boardURL(sourceType, filter, sort, search, dateFrom, dateTo));
+          const data = await SDK.fetchJSON(boardURL(sourceType, filter, sort, search, dateFrom, dateTo, showArchived));
           if (!alive) return;
           setBoard(data || null);
+          setSelectedThoughts({});
           setError(null);
         } catch (err) {
           if (!alive) return;
@@ -1883,7 +2018,7 @@
       }
       loadBoard();
       return function () { alive = false; };
-    }, [sourceType, filter, sort, search, dateFrom, dateTo]);
+    }, [sourceType, filter, sort, search, dateFrom, dateTo, showArchived]);
 
     const selectedSourceTypes = useMemo(function () {
       return sourceTypeOptions(sourceTypes);
@@ -1895,6 +2030,68 @@
         next[rowId] = next[rowId] === false;
         return next;
       });
+    }
+
+    function toggleEvidenceForSource(rowId) {
+      setEvidenceVisibility(function (current) {
+        const next = Object.assign({}, current || {});
+        next[rowId] = !next[rowId];
+        return next;
+      });
+    }
+
+    function toggleThoughtSelection(card, checked) {
+      const key = thoughtSelectionKey(card);
+      if (!key || key === "::") return;
+      setSelectedThoughts(function (current) {
+        const next = Object.assign({}, current || {});
+        if (checked) next[key] = thoughtSelectionItem(card);
+        else delete next[key];
+        return next;
+      });
+    }
+
+    function toggleAllThoughts(cards, checked) {
+      setSelectedThoughts(function (current) {
+        const next = Object.assign({}, current || {});
+        asArray(cards).forEach(function (card) {
+          const key = thoughtSelectionKey(card);
+          if (!key || key === "::") return;
+          if (checked) next[key] = thoughtSelectionItem(card);
+          else delete next[key];
+        });
+        return next;
+      });
+    }
+
+    async function handleBulkArchiveThoughts(cards, archived) {
+      const actionable = actionableArchiveCards(cards, archived);
+      if (!actionable.length) return;
+      setError(null);
+      setBulkArchiveBusy(true);
+      try {
+        await SDK.fetchJSON(bulkArchiveURL(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            archived: !!archived,
+            reason: archived ? "manual dashboard bulk archive" : "manual dashboard bulk unarchive",
+            items: actionable.map(function (card) {
+              return {
+                source_unit_id: card.source_unit_id,
+                lineage_id: card.lineage_id || card.id,
+              };
+            }),
+          }),
+        });
+        const refreshed = await SDK.fetchJSON(boardURL(sourceType, filter, sort, search, dateFrom, dateTo, showArchived));
+        setBoard(refreshed || null);
+        setSelectedThoughts({});
+      } catch (err) {
+        setError("Unable to " + (archived ? "archive" : "unarchive") + " selected thoughts: " + errorMessage(err));
+      } finally {
+        setBulkArchiveBusy(false);
+      }
     }
 
     async function openDetail(card, detailStage) {
@@ -1937,19 +2134,28 @@
         dateTo: dateTo,
         filter: filter,
         sort: sort,
+        showArchived: showArchived,
         onSourceTypeChange: setSourceType,
         onSearchChange: setSearch,
         onDateFromChange: handleDateFromChange,
         onDateToChange: setDateTo,
         onFilterChange: setFilter,
         onSortChange: setSort,
+        onShowArchivedChange: setShowArchived,
       }),
       h(BoardView, {
         board: board,
         loading: loading,
         error: error,
         expandedRows: expandedRows,
+        evidenceVisibility: evidenceVisibility,
+        selectedThoughts: selectedThoughts,
+        bulkArchiveBusy: bulkArchiveBusy,
         onToggleRow: toggleRow,
+        onToggleEvidence: toggleEvidenceForSource,
+        onToggleThought: toggleThoughtSelection,
+        onToggleAllThoughts: toggleAllThoughts,
+        onBulkArchive: handleBulkArchiveThoughts,
         onOpenDetail: openDetail,
         onPolicyDefinition: setPolicyDefinition,
       }),

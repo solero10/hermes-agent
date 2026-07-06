@@ -1,12 +1,12 @@
 ---
 sidebar_position: 16
 title: "OpenBrain Ingestion Dashboard"
-description: "Read-only dashboard plugin for inspecting OpenBrain ingestion snapshots, source units, thought lineage, stops, and CortexDB receipts"
+description: "Dashboard plugin for inspecting OpenBrain ingestion snapshots, source units, thought lineage, dashboard-local archives, stops, and CortexDB receipts"
 ---
 
 # OpenBrain Ingestion Dashboard
 
-The **OpenBrain** dashboard tab is a read-only view into the latest OpenBrain ingestion snapshot. It is meant for auditing what the ingestion exporter produced before and after import: which source units were processed, which durable thought candidates were extracted, where each candidate currently sits in the lineage, what stopped before import, and which imported thoughts have CortexDB receipts.
+The **OpenBrain** dashboard tab is a mostly read-only view into the latest OpenBrain ingestion snapshot, with one dashboard-local archive action for hiding cards from normal review. It is meant for auditing what the ingestion exporter produced before and after import: which source units were processed, which durable thought candidates were extracted, where each candidate currently sits in the lineage, what stopped before import, which cards Ken archived from the dashboard, and which imported thoughts have CortexDB receipts.
 
 The dashboard is registered as a dashboard plugin named `openbrain_ingestion` and appears at `/openbrain` after the Kanban tab.
 
@@ -15,7 +15,7 @@ The dashboard is registered as a dashboard plugin named `openbrain_ingestion` an
 The board is organized by **source unit**. Each row represents one item from the snapshot, such as a transcript, document, or other source-specific unit. Expanding a row now shows a dense review layout:
 
 - a compact source summary strip;
-- an **Evidence grid** under the transcript/source row;
+- a per-source **Show Evidence cards (N)** control, because Evidence cards are collapsed by default per source row;
 - a sticky **Candidate memory table** for the durable Thought candidates.
 
 The Candidate memory pipeline still uses the canonical ingestion stages as table columns:
@@ -27,9 +27,9 @@ The Candidate memory pipeline still uses the canonical ingestion stages as table
 5. Ready for CortexDB
 6. CortexDB
 
-Evidence cards stay in the Evidence grid as source-grounded nuggets. They are not mixed into the Candidate memory table. Each Evidence card shows the Evidence title and compact tags such as **used**; Thought candidates appear as stable table rows with clickable cells for Tags, **Enrich**, Deduped, Ready for CortexDB, and **CortexDB import** detail. Candidate rows can also show a subtle **via Panning** or **via Meeting** technique pill so the generation recipe or skill is visible without opening database fields.
+Evidence cards stay behind each source row as source-grounded nuggets. They are not shown by default and are not mixed into the Candidate memory table. Click **Show Evidence cards (N)** on a source row to display them for that source; click **Hide Evidence cards** to collapse them again. Each Evidence card shows the Evidence title and compact tags such as **used**; Thought candidates appear as stable table rows with clickable cells for Tags, **Enrich**, Deduped, Ready for CortexDB, and **CortexDB import** detail. Candidate rows can also show a subtle **via Panning** or **via Meeting** technique pill so the generation recipe or skill is visible without opening database fields.
 
-The top metrics show **visible / total** counts for source units, thoughts, review items, stopped items, imported items, and zero-thought sources. Visible counts follow the current filters, source-date range, and search; total counts describe the selected source type in the snapshot.
+The top metrics show **visible / total** counts for source units, thoughts, review items, stopped items, imported items, zero-thought sources, and archived cards. Visible counts follow the current filters, source-date range, search, and **Show archived thoughts** setting; total counts describe the selected source type in the snapshot.
 
 ## Source-type dropdown
 
@@ -42,7 +42,7 @@ Use the **Source type** dropdown to switch between material lanes in the snapsho
 The board itself is loaded from:
 
 ```text
-/api/plugins/openbrain_ingestion/board?source_type=<type>&filter=<filter>&sort=<sort>&search=<query>&date_from=<yyyy-mm-dd>&date_to=<yyyy-mm-dd>
+/api/plugins/openbrain_ingestion/board?source_type=<type>&filter=<filter>&sort=<sort>&search=<query>&date_from=<yyyy-mm-dd>&date_to=<yyyy-mm-dd>&include_archived=<true|false>
 ```
 
 Use the **Source date from** and **Source date to** controls to filter source units by source date. The UI accepts `MM/DD/YYYY`; the API also accepts `YYYY-MM-DD`. When **Source date to** is empty, entering a complete **Source date from** automatically fills **Source date to** with the following day. For transcript sources, source date is the source occurrence/recording date when available and falls back to processed time only when no source occurrence date exists.
@@ -82,7 +82,7 @@ Older thoughts or snapshots without trace data show a clear “No formation trac
 
 ## Ready for CortexDB
 
-**Ready for CortexDB** means the candidate has survived the earlier shaping, policy, and dedupe phases and is ready to become a durable OpenBrain/CortexDB memory. In the read-only MVP, the label is informational: the dashboard does not promote, import, reopen, or mutate records.
+**Ready for CortexDB** means the candidate has survived the earlier shaping, policy, and dedupe phases and is ready to become a durable OpenBrain/CortexDB memory. In this mostly read-only dashboard, the label is informational: the dashboard does not promote, import, reopen, or mutate records outside dashboard-local archive state.
 
 ## Stopped and not-imported cards
 
@@ -112,6 +112,20 @@ Imported cards show a **CortexDB receipt** in the detail dialog, including field
 
 At the bottom of every detail dialog, the dashboard also lists the known `public.thoughts` database fields. Values are filled from the sanitized snapshot, CortexDB receipt, or safe database/upsert defaults when the card has actually been imported. A dash means the snapshot does not contain a value for that field.
 
+## Archived dashboard thoughts
+
+Use the checkbox column in the **Candidate memory table** to select one or more Thought candidates, then click **Archive selected** or **Unarchive selected** above the table. Bulk archive actions write dashboard-local state to:
+
+```text
+~/.hermes/openbrain-ingestion-dashboard/archive_state.json
+```
+
+Archiving hides dashboard cards by default and does not delete source artifacts, snapshot rows, or CortexDB memories. Turn on **Show archived thoughts** to inspect archived cards and use the table checkboxes plus **Unarchive selected** to return them to the default board. Archived cards keep their original stage and disposition plus archive metadata such as archive time, actor, and reason.
+
+## Evidence visibility
+
+Evidence cards are collapsed by default per source row. Click **Show Evidence cards (N)** on a source row to display the **Evidence grid** for that source. Candidate thoughts remain visible in the Candidate memory table by default.
+
 ## Snapshot path
 
 The backend reads the sanitized snapshot from:
@@ -127,15 +141,15 @@ If the file is missing or unreadable, the backend returns a safe sample snapshot
 The exporter boundary is:
 
 ```text
-Panning-for-Gold artifacts -> SnapshotV1 -> dashboard API -> read-only UI
+Panning-for-Gold artifacts -> SnapshotV1 -> dashboard API -> mostly read-only UI + dashboard-local archive overlay
 ```
 
-The Panning exporter converts artifacts such as `source-items.jsonl`, `inventory.jsonl`, `dedupe-receipts.jsonl`, `capture-candidates.jsonl`, `capture-audit.jsonl`, and `summary.json` into a sanitized **SnapshotV1** document. The dashboard backend validates and redacts that snapshot, normalizes stage aliases, surfaces inventory rows that stop before `Ready for CortexDB` as visible stopped cards, records the candidate generation technique, preserves Enrich workflow status, strips retired recipe-stage metadata that is not part of captured-thought dashboard review, and exposes only the source-scoped board/detail API used by the frontend.
+The Panning exporter converts artifacts such as `source-items.jsonl`, `inventory.jsonl`, `dedupe-receipts.jsonl`, `capture-candidates.jsonl`, `capture-audit.jsonl`, and `summary.json` into a sanitized **SnapshotV1** document. The dashboard backend validates and redacts that snapshot, normalizes stage aliases, surfaces inventory rows that stop before `Ready for CortexDB` as visible stopped cards, records the candidate generation technique, preserves Enrich workflow status, strips retired recipe-stage metadata that is not part of captured-thought dashboard review, overlays dashboard-local archive state from `archive_state.json`, and exposes only the source-scoped board/detail API used by the frontend.
 
 The frontend does not read Panning artifacts directly and does not include adapter-specific logic. It only calls the dashboard plugin API through the Hermes plugin SDK.
 
 ## Read-only MVP
 
-This first dashboard release is deliberately **read-only**. Buttons such as **Open source**, **Open CortexDB record**, **Copy final memory**, **Open matched memory**, **Copy merge note**, **Reopen later**, **Promote later**, and **Mark for review later** are disabled placeholders labeled `Read-only MVP`.
+This dashboard release is still deliberately **mostly read-only**. **Archive selected** and **Unarchive selected** are the only enabled dashboard mutations, and they only update `archive_state.json`. Buttons such as **Open source**, **Open CortexDB record**, **Copy final memory**, **Open matched memory**, **Copy merge note**, **Reopen later**, **Promote later**, and **Mark for review later** are disabled placeholders labeled `Read-only MVP`.
 
-No mutation controls are enabled. Use the dashboard to inspect and audit ingestion state; perform source edits, merges, promotions, or imports through the ingestion/export pipeline outside this UI.
+Archiving hides dashboard cards by default and does not delete source artifacts, snapshot rows, or CortexDB memories. Use the dashboard to inspect and audit ingestion state; perform source edits, merges, promotions, or imports through the ingestion/export pipeline outside this UI.

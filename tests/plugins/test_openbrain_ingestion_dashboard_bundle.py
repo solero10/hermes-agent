@@ -27,7 +27,7 @@ def test_manifest_and_plugin_yaml_register_dashboard_plugin():
     assert {k: v for k, v in manifest.items() if k not in {"entry", "css"}} == {
         "name": "openbrain_ingestion",
         "label": "OpenBrain",
-        "description": "Read-only ingestion dashboard for OpenBrain source units, lineage stages, and CortexDB receipts",
+        "description": "OpenBrain ingestion dashboard for source units, lineage stages, dashboard-local archives, and CortexDB receipts",
         "icon": "Database",
         "version": "0.1.0",
         "tab": {"path": "/openbrain", "position": "after:kanban"},
@@ -128,13 +128,80 @@ def test_frontend_calls_expected_plugin_api_routes_with_query_params():
     assert '"&search="' in frontend
     assert '"&date_from="' in frontend
     assert '"&date_to="' in frontend
+    assert '"&include_archived="' in frontend
     assert "sourceDateQueryValue(dateFrom)" in frontend
     assert "sourceDateInputSameDay(value)" in frontend
     assert "onDateFromChange: handleDateFromChange" in frontend
     assert 'API_BASE + "/source-units/"' in frontend
     assert '"/thoughts/"' in frontend
+    assert 'API_BASE + "/thoughts/archive"' in frontend
     assert "source_unit_id" in frontend
     assert "lineage_id" in frontend
+
+
+def test_frontend_show_archived_setting_is_off_by_default_and_queries_api():
+    frontend = _read(FRONTEND_JS_PATH)
+
+    assert "include_archived=" in frontend
+    assert "showArchivedState = useState(false)" in frontend
+    assert "Show archived thoughts" in frontend
+    assert "onShowArchivedChange" in frontend
+    assert "showArchived: showArchived" in frontend
+    assert "include_archived" in frontend[frontend.index("function boardURL"):frontend.index("function detailURL")]
+
+
+def test_frontend_archives_instead_of_deleting_thoughts():
+    frontend = _read(FRONTEND_JS_PATH)
+
+    assert "function bulkArchiveURL" in frontend
+    assert 'API_BASE + "/thoughts/archive"' in frontend
+    assert "Archive selected" in frontend
+    assert "Unarchive selected" in frontend
+    assert "handleBulkArchiveThoughts" in frontend
+    assert "selectedThoughtsState = useState({})" in frontend
+    assert "onToggleAllThoughts" in frontend
+    assert "onToggleThought" in frontend
+    assert "Select all visible candidate thoughts in this source" in frontend
+    assert "Archive thought" not in frontend
+    assert "Unarchive thought" not in frontend
+    assert "handleArchiveThought" not in frontend
+    assert "onArchiveThought" not in frontend
+    assert 'method: "POST"' in frontend
+    assert 'method: "DELETE"' not in frontend
+    assert "without deleting source, snapshot, or CortexDB memory" in frontend
+
+
+def test_candidate_table_bulk_archive_selection_controls_are_wired():
+    frontend = _read(FRONTEND_JS_PATH)
+    css = _read(FRONTEND_CSS_PATH)
+
+    table = frontend[frontend.index("function CandidatePipelineTable"):frontend.index("function CandidateTableRow")]
+    row = frontend[frontend.index("function CandidateTableRow"):frontend.index("function CandidateStageCell")]
+    page = frontend[frontend.index("function OpenBrainIngestionPage"):]
+
+    assert "selectedCandidateCards(cards, props.selectedThoughts)" in table
+    assert "actionableArchiveCards(selectedCards, true)" in table
+    assert "actionableArchiveCards(selectedCards, false)" in table
+    assert "Archive selected" in table
+    assert "Unarchive selected" in table
+    assert "ob-select-all-cell" in table
+    assert "Select all visible candidate thoughts in this source" in table
+    assert "ob-candidate-select-cell" in row
+    assert "ob-selection-checkbox" in row
+    assert "props.onToggleThought(card, event.target.checked);" in row
+    assert "ob-candidate-row--selected" in row
+    assert "handleBulkArchiveThoughts" in page
+    assert "bulkArchiveURL()" in page
+    assert "selectedThoughts: selectedThoughts" in page
+    for selector in (
+        ".ob-bulk-actions",
+        ".ob-selection-count",
+        ".ob-select-all-cell",
+        ".ob-candidate-select-cell",
+        ".ob-selection-checkbox",
+        ".ob-candidate-row--selected",
+    ):
+        assert selector in css
 
 
 def test_toolbar_accessibility_board_labels_and_read_only_placeholders_present():
@@ -151,6 +218,11 @@ def test_toolbar_accessibility_board_labels_and_read_only_placeholders_present()
         "Stopped",
         "Imported",
         "Zero thoughts",
+        "Archived",
+        "Show archived thoughts",
+        "Archive selected",
+        "Unarchive selected",
+        "Bulk archive selected thoughts",
         "Newest first",
         "Oldest first",
         "Most thoughts",
@@ -310,6 +382,42 @@ def test_evidence_cards_keep_tags_without_status_badge_and_open_details_from_car
     assert ".ob-thought-card--clickable:focus-visible" in css
 
 
+def test_evidence_grid_is_hidden_by_default_and_revealed_per_source():
+    frontend = _read(FRONTEND_JS_PATH)
+
+    assert "evidenceVisibilityState = useState({})" in frontend
+    assert "toggleEvidenceForSource" in frontend
+    assert "showEvidence" in frontend
+    assert "Show Evidence cards" in frontend
+    assert "Hide Evidence cards" in frontend
+    source_row = frontend[frontend.index("function SourceRow"):frontend.index("function SourceCompactSummary")]
+    assert "props.showEvidence" in source_row
+    assert "props.onToggleEvidence" in source_row
+    assert "props.showEvidence ? h(EvidenceGrid" in source_row
+
+
+def test_archived_cards_have_badges_and_css():
+    frontend = _read(FRONTEND_JS_PATH)
+    css = _read(FRONTEND_CSS_PATH)
+
+    assert "Archived" in frontend
+    assert "card.archived" in frontend
+    assert "ob-archive-badge" in frontend
+    assert "ob-candidate-row--archived" in frontend
+    assert "ob-evidence-mini-card--archived" in frontend
+    for selector in (
+        ".ob-field--checkbox",
+        ".ob-checkbox-line",
+        ".ob-evidence-toggle-row",
+        ".ob-evidence-toggle",
+        ".ob-archive-badge",
+        ".ob-candidate-row--archived",
+        ".ob-evidence-mini-card--archived",
+        ".ob-thought-card--archived",
+    ):
+        assert selector in css
+
+
 def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
     frontend = _read(FRONTEND_JS_PATH)
     css = _read(FRONTEND_CSS_PATH)
@@ -328,7 +436,8 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
 
     source_row = frontend[frontend.index("function SourceRow"):frontend.index("function SourceCompactSummary")]
     assert "h(SourceCompactSummary" in source_row
-    assert "h(EvidenceGrid" in source_row
+    assert "props.showEvidence ? h(EvidenceGrid" in source_row
+    assert "Show Evidence cards" in source_row
     assert "h(CandidatePipelineTable" in source_row
     assert "ob-stage-grid" not in source_row
 
@@ -365,7 +474,7 @@ def test_source_rows_render_tight_evidence_grid_and_candidate_table_contract():
     assert "isRecipeStage(stageId)" in frontend
     candidate_stage_cell = frontend[frontend.index("function CandidateStageCell"):frontend.index("function StageColumn")]
     assert 'const technique = generationTechniqueFor(card);' in candidate_stage_cell
-    assert 'topics.length || technique ? h("span", { className: "ob-topic-list" }, [' in candidate_stage_cell
+    assert 'topics.length || technique || card.archived ? h("span", { className: "ob-topic-list" }, [' in candidate_stage_cell
     assert 'h(TechniquePill, { key: "generation-technique", technique: technique })' in candidate_stage_cell
     assert 'policyPassedForCard(card)' in frontend
     assert 'topics.includes("policy reviewed")' in frontend
@@ -583,5 +692,11 @@ def test_docs_cover_snapshot_boundary_and_read_only_mvp():
         "Dedupe detail",
         "Ready detail",
         "CortexDB detail",
+        "Archive selected",
+        "Unarchive selected",
+        "Show archived thoughts",
+        "archive_state.json",
+        "Archiving hides dashboard cards by default and does not delete source artifacts, snapshot rows, or CortexDB memories.",
+        "Evidence cards are collapsed by default per source row",
     ):
         assert text in docs

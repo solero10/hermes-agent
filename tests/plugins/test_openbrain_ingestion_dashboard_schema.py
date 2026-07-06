@@ -117,6 +117,31 @@ def test_snapshot_model_rejects_bad_schema_version_disposition_and_stage_status(
         api.Snapshot.model_validate(bad_stage_status)
 
 
+def test_snapshot_model_accepts_archive_overlay_fields_but_keeps_disposition_strict():
+    api = _load_plugin_api()
+    snapshot = _base_snapshot(api)
+    thought = snapshot["source_units"][0]["thoughts"][0]
+    thought.update(
+        {
+            "archived": True,
+            "archived_at": "2026-07-05T23:30:58Z",
+            "archived_by": "dashboard",
+            "archive_reason": "manual cleanup",
+        }
+    )
+
+    clean = api.Snapshot.model_validate(snapshot).model_dump(mode="json", exclude_none=True)
+    clean_thought = clean["source_units"][0]["thoughts"][0]
+    assert clean_thought["disposition"] == "in_progress"
+    assert clean_thought["archived"] is True
+    assert clean_thought["archived_by"] == "dashboard"
+
+    bad = _base_snapshot(api)
+    bad["source_units"][0]["thoughts"][0]["disposition"] = "archived"
+    with pytest.raises(Exception):
+        api.Snapshot.model_validate(bad)
+
+
 def test_producer_info_is_bounded_forbids_extras_and_artifacts_are_basenames():
     api = _load_plugin_api()
     producer = api.ProducerInfo.model_validate(

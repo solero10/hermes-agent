@@ -109,7 +109,7 @@
 
 .ob-toolbar {
   display: grid;
-  grid-template-columns: minmax(11rem, 0.8fr) minmax(14rem, 1fr) repeat(2, minmax(9rem, 0.55fr)) minmax(18rem, 1.4fr) minmax(11rem, 0.7fr);
+  grid-template-columns: minmax(11rem, 0.8fr) minmax(14rem, 1fr) repeat(2, minmax(9rem, 0.55fr)) minmax(18rem, 1.3fr) minmax(10rem, 0.55fr) minmax(11rem, 0.7fr);
   gap: 0.75rem;
   align-items: end;
   border: 1px solid var(--ob-border);
@@ -129,6 +129,22 @@
 
 .ob-field--search {
   min-width: 14rem;
+}
+
+.ob-field--checkbox {
+  align-content: end;
+}
+
+.ob-checkbox-line {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.35rem;
+}
+
+.ob-checkbox-line input {
+  width: auto;
+  min-height: auto;
 }
 
 .ob-field select,
@@ -204,9 +220,30 @@
   line-height: 1.45;
 }
 
+.ob-button--danger {
+  border-color: color-mix(in srgb, var(--ob-danger) 62%, var(--ob-border));
+  color: color-mix(in srgb, var(--ob-danger) 82%, var(--ob-text));
+}
+
+.ob-button--secondary {
+  border-color: color-mix(in srgb, var(--ob-accent) 52%, var(--ob-border));
+}
+
+.ob-archive-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--ob-muted) 40%, var(--ob-border));
+  border-radius: 999px;
+  color: var(--ob-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.14rem 0.42rem;
+  text-transform: uppercase;
+}
+
 .ob-metrics {
   display: grid;
-  grid-template-columns: auto repeat(6, minmax(0, 1fr));
+  grid-template-columns: auto repeat(7, minmax(0, 1fr));
   gap: 0.65rem;
   align-items: stretch;
 }
@@ -374,6 +411,26 @@
   padding: 0.2rem 0.4rem;
 }
 
+.ob-evidence-toggle-row {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.ob-evidence-toggle {
+  border: 1px solid var(--ob-border);
+  border-radius: 999px;
+  background: var(--ob-bg-strong);
+  color: var(--ob-text);
+  cursor: pointer;
+  padding: 0.45rem 0.75rem;
+}
+
+.ob-evidence-toggle:hover,
+.ob-evidence-toggle:focus-visible {
+  border-color: color-mix(in srgb, var(--ob-accent) 70%, var(--ob-border));
+  background: color-mix(in srgb, var(--ob-accent) 12%, var(--ob-bg-strong));
+}
+
 .ob-evidence-section,
 .ob-candidate-pipeline {
   display: grid;
@@ -412,6 +469,12 @@
   background: color-mix(in srgb, var(--ob-bg-strong) 72%, #000);
 }
 
+.ob-candidate-row--archived,
+.ob-evidence-mini-card--archived,
+.ob-thought-card--archived {
+  opacity: 0.68;
+}
+
 .ob-evidence-mini-card:focus-visible,
 .ob-candidate-title-button:focus-visible,
 .ob-candidate-cell-button:focus-visible {
@@ -441,7 +504,7 @@
 
 .ob-candidate-table {
   width: 100%;
-  min-width: 56rem;
+  min-width: 60rem;
   border-collapse: separate;
   border-spacing: 0;
   background: color-mix(in srgb, var(--ob-bg) 74%, transparent);
@@ -465,6 +528,24 @@
   font-size: 0.68rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.ob-select-all-cell,
+.ob-candidate-select-cell {
+  width: 2.4rem;
+  min-width: 2.4rem;
+  text-align: center;
+}
+
+.ob-selection-checkbox {
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+  accent-color: color-mix(in srgb, var(--ob-accent) 75%, var(--ob-text));
+}
+
+.ob-candidate-row--selected {
+  background: color-mix(in srgb, var(--ob-accent) 10%, transparent);
 }
 
 .ob-candidate-title-cell {
@@ -923,6 +1004,23 @@
 
 .ob-section-heading h3 {
   font-size: 1rem;
+}
+
+.ob-section-heading--bulk {
+  justify-content: start;
+}
+
+.ob-bulk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+  margin-left: auto;
+}
+
+.ob-selection-count {
+  color: var(--ob-muted);
+  font-size: 0.76rem;
 }
 
 .ob-id-strip {
