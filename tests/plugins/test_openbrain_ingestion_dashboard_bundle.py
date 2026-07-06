@@ -102,6 +102,7 @@ def test_frontend_declares_all_required_components_before_registration():
         "ShapedFormationPanel",
         "PolicyDecisionPanel",
         "WorkflowStagePanel",
+        "WorkflowMonitorPanel",
         "DedupeEvidencePanel",
         "ReadyPackagePanel",
         "CortexDBReceiptPanel",
@@ -135,6 +136,10 @@ def test_frontend_calls_expected_plugin_api_routes_with_query_params():
     assert 'API_BASE + "/source-units/"' in frontend
     assert '"/thoughts/"' in frontend
     assert 'API_BASE + "/thoughts/archive"' in frontend
+    assert 'API_BASE + "/workflow-runs"' in frontend
+    assert 'API_BASE + "/workflow-events"' in frontend
+    assert "workflowRunsURL" in frontend
+    assert "workflowWsURL" in frontend
     assert "source_unit_id" in frontend
     assert "lineage_id" in frontend
 

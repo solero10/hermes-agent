@@ -5970,20 +5970,36 @@ ipcMain.handle('hermes:connection:revalidate', async () => {
   }
 
   const base = conn.baseUrl.replace(/\/+$/, '')
-  try {
+  const timeoutMs = Math.max(DEFAULT_FETCH_TIMEOUT_MS, 15_000)
+  const probeRemote = async () => {
     if (conn.authMode === 'oauth') {
-      await fetchPublicJson(`${base}/api/status`, { timeoutMs: 2_500 })
-    } else {
-      await fetchJson(`${base}/api/status`, conn.token, { timeoutMs: 2_500 })
+      await fetchPublicJson(`${base}/api/status`, { timeoutMs })
+      return
     }
+    // Token-mode /api/status is public enough to false-pass and can be slower on
+    // remote tailnet clients. Probe a small authenticated endpoint instead so
+    // stale tokens are caught, but don't tear down a good connection on the old
+    // 2.5s hiccup path.
+    await fetchJson(`${base}/api/profiles/active`, conn.token, { timeoutMs })
+  }
+
+  try {
+    await probeRemote()
     return { ok: true, rebuilt: false }
   } catch {
-    // Unreachable or unauthorized remote: drop the stale cache so the renderer's next reconnect
-    // tick rebuilds a fresh, reachable descriptor. resetHermesConnection only
-    // nulls connectionPromise for a remote (no child to SIGTERM).
-    rememberLog('Cached remote Hermes backend failed liveness probe; dropping stale connection.')
-    resetHermesConnection()
-    return { ok: true, rebuilt: true }
+    await new Promise(resolve => setTimeout(resolve, 750))
+    try {
+      await probeRemote()
+      return { ok: true, rebuilt: false }
+    } catch (retryError) {
+      // Unreachable or unauthorized remote: drop the stale cache so the renderer's next reconnect
+      // tick rebuilds a fresh, reachable descriptor. resetHermesConnection only
+      // nulls connectionPromise for a remote (no child to SIGTERM).
+      const reason = retryError instanceof Error ? retryError.message : String(retryError)
+      rememberLog(`Cached remote Hermes backend failed liveness probe after retry; dropping stale connection. ${reason}`)
+      resetHermesConnection()
+      return { ok: true, rebuilt: true }
+    }
   }
 })
 ipcMain.handle('hermes:backend:touch', async (_event, profile) => {

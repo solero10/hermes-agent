@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
 import time
 from dataclasses import asdict
@@ -153,12 +154,74 @@ BOARD_COLUMNS: list[str] = [
 
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
+_WORKFLOW_RUN_RE = re.compile(r"workflow_run_id:\s*([A-Za-z0-9_.-]+)|obwf=([A-Za-z0-9_.-]+)")
+
+
+def _workflow_run_id_from_text(*values: object) -> Optional[str]:
+    for value in values:
+        if not value:
+            continue
+        match = _WORKFLOW_RUN_RE.search(str(value))
+        if match:
+            return match.group(1) or match.group(2)
+    return None
+
+
+def _latest_heartbeat_map(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, dict[str, Any]]:
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"""
+        SELECT id, task_id, payload, created_at
+        FROM task_events
+        WHERE kind = 'heartbeat' AND task_id IN ({placeholders})
+        ORDER BY id ASC
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        note = None
+        try:
+            payload = json.loads(row["payload"]) if row["payload"] else None
+            if isinstance(payload, dict):
+                note = payload.get("note")
+        except Exception:
+            note = None
+        out[row["task_id"]] = {"note": note, "created_at": row["created_at"]}
+    return out
+
+
+def _active_run_elapsed_map(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, int]:
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" for _ in task_ids)
+    now = int(time.time())
+    rows = conn.execute(
+        f"""
+        SELECT task_id, started_at
+        FROM task_runs
+        WHERE ended_at IS NULL AND task_id IN ({placeholders})
+        ORDER BY id ASC
+        """,
+        tuple(task_ids),
+    ).fetchall()
+    return {row["task_id"]: max(0, now - int(row["started_at"])) for row in rows if row["started_at"] is not None}
+
+
+def _workflow_task_context(conn: sqlite3.Connection, task_ids: list[str]) -> dict[str, dict[str, Any]]:
+    heartbeats = _latest_heartbeat_map(conn, task_ids)
+    elapsed = _active_run_elapsed_map(conn, task_ids)
+    return {task_id: {"heartbeat": heartbeats.get(task_id), "elapsed": elapsed.get(task_id)} for task_id in task_ids}
 
 
 def _task_dict(
     task: kanban_db.Task,
     *,
     latest_summary: Optional[str] = None,
+    latest_heartbeat_note: Optional[str] = None,
+    active_run_elapsed_seconds: Optional[int] = None,
 ) -> dict[str, Any]:
     d = asdict(task)
     # Add derived age metrics so the UI can colour stale cards without
@@ -172,6 +235,16 @@ def _task_dict(
     # ``task_runs.summary`` (the kanban-worker pattern) instead of
     # ``tasks.result``. ``None`` when no run has produced a summary yet.
     d["latest_summary"] = latest_summary
+    if task.workflow_template_id or task.current_step_key:
+        d["workflow"] = {
+            "template_id": task.workflow_template_id,
+            "step_key": task.current_step_key,
+            "run_id": _workflow_run_id_from_text(task.body, latest_summary, task.result),
+        }
+    if latest_heartbeat_note:
+        d["latest_heartbeat_note"] = latest_heartbeat_note
+    if active_run_elapsed_seconds is not None:
+        d["active_run_elapsed_seconds"] = active_run_elapsed_seconds
     # Keep body short on list endpoints; full body comes from /tasks/:id.
     return d
 
@@ -458,13 +531,21 @@ def get_board(
         # for boards with hundreds of tasks). Truncated to a card-size
         # preview here — the full text is available via /tasks/:id.
         summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
+        workflow_context = _workflow_task_context(conn, [t.id for t in tasks])
 
         for t in tasks:
             full = summary_map.get(t.id)
             preview = (
                 full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None
             )
-            d = _task_dict(t, latest_summary=preview)
+            ctx = workflow_context.get(t.id, {})
+            heartbeat = ctx.get("heartbeat") or {}
+            d = _task_dict(
+                t,
+                latest_summary=preview,
+                latest_heartbeat_note=heartbeat.get("note"),
+                active_run_elapsed_seconds=ctx.get("elapsed"),
+            )
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
@@ -545,7 +626,14 @@ def get_task(
         # operators can read the complete worker handoff without making
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
-        task_d = _task_dict(task, latest_summary=full_summary)
+        ctx = _workflow_task_context(conn, [task_id]).get(task_id, {})
+        heartbeat = ctx.get("heartbeat") or {}
+        task_d = _task_dict(
+            task,
+            latest_summary=full_summary,
+            latest_heartbeat_note=heartbeat.get("note"),
+            active_run_elapsed_seconds=ctx.get("elapsed"),
+        )
         # Attach diagnostics so the drawer's Diagnostics section can
         # render recovery actions without a second round-trip.
         diags = _compute_task_diagnostics(conn, task_ids=[task_id])
@@ -588,6 +676,8 @@ class CreateTaskBody(BaseModel):
     parents: list[str] = Field(default_factory=list)
     triage: bool = False
     idempotency_key: Optional[str] = None
+    workflow_template_id: Optional[str] = None
+    current_step_key: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
     skills: Optional[list[str]] = None
     goal_mode: bool = False
@@ -612,6 +702,8 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             parents=payload.parents,
             triage=payload.triage,
             idempotency_key=payload.idempotency_key,
+            workflow_template_id=payload.workflow_template_id,
+            current_step_key=payload.current_step_key,
             max_runtime_seconds=payload.max_runtime_seconds,
             skills=payload.skills,
             goal_mode=payload.goal_mode,

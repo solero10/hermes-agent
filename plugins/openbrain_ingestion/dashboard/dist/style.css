@@ -118,6 +118,111 @@
   padding: 0.8rem;
 }
 
+.ob-workflow-monitor {
+  border: 1px solid var(--ob-border);
+  border-radius: calc(var(--ob-radius) * 0.75);
+  background: color-mix(in srgb, var(--ob-bg) 82%, transparent);
+  padding: 0.85rem;
+}
+
+.ob-workflow-monitor-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  margin-bottom: 0.7rem;
+}
+
+.ob-workflow-monitor h2 {
+  margin: 0.1rem 0 0;
+  font-size: 1rem;
+}
+
+.ob-workflow-live {
+  border: 1px solid var(--ob-border);
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  color: var(--ob-muted);
+  background: color-mix(in srgb, var(--ob-bg-strong) 72%, transparent);
+  font-size: 0.75rem;
+}
+
+.ob-workflow-live--live {
+  color: var(--ob-success);
+  border-color: color-mix(in srgb, var(--ob-success) 50%, var(--ob-border));
+}
+
+.ob-workflow-live--polling {
+  color: var(--ob-warning);
+  border-color: color-mix(in srgb, var(--ob-warning) 50%, var(--ob-border));
+}
+
+.ob-workflow-empty {
+  margin: 0;
+  color: var(--ob-muted);
+}
+
+.ob-workflow-list {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.ob-workflow-card {
+  border: 1px solid color-mix(in srgb, var(--ob-border) 78%, transparent);
+  border-radius: calc(var(--ob-radius) * 0.55);
+  padding: 0.75rem;
+  background: color-mix(in srgb, var(--ob-bg-strong) 60%, transparent);
+}
+
+.ob-workflow-card--stale,
+.ob-workflow-card--failed,
+.ob-workflow-card--blocked {
+  border-color: color-mix(in srgb, var(--ob-danger) 55%, var(--ob-border));
+}
+
+.ob-workflow-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+  font-weight: 700;
+}
+
+.ob-workflow-card-title code,
+.ob-workflow-grid dd {
+  overflow-wrap: anywhere;
+}
+
+.ob-workflow-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.4rem 0.75rem;
+  margin: 0;
+}
+
+.ob-workflow-grid div {
+  min-width: 0;
+}
+
+.ob-workflow-grid dt {
+  color: var(--ob-muted);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.ob-workflow-grid dd {
+  margin: 0.1rem 0 0;
+  font-size: 0.82rem;
+}
+
+.ob-workflow-error,
+.ob-workflow-stale {
+  margin: 0.55rem 0 0;
+  color: var(--ob-danger);
+}
+
 .ob-field {
   display: grid;
   gap: 0.32rem;

@@ -8,6 +8,7 @@ canonical stage IDs.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status as http_status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from hermes_constants import get_hermes_home
@@ -2458,8 +2459,103 @@ def _matches_source_date_filter(
 
 
 # ---------------------------------------------------------------------------
+# Workflow monitor helpers
+# ---------------------------------------------------------------------------
+
+_WORKFLOW_POLL_SECONDS = 1.0
+
+
+def _snapshot_revision() -> str:
+    path = _snapshot_path()
+    try:
+        st = path.stat()
+    except OSError:
+        return "snapshot:0:0"
+    return f"snapshot:{int(st.st_mtime_ns)}:{int(st.st_size)}"
+
+
+def _workflow_dashboard_response(since_revision: str | None = None) -> dict[str, Any]:
+    from hermes_cli.openbrain_workflow_artifacts import dashboard_response
+
+    return dashboard_response(since_revision=since_revision)
+
+
+def _workflow_detail_payload(workflow_run_id: str) -> dict[str, Any]:
+    from hermes_cli.openbrain_workflow_artifacts import validate_workflow_run_id, workflow_detail
+
+    try:
+        validate_workflow_run_id(workflow_run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid workflow_run_id") from exc
+    try:
+        return workflow_detail(workflow_run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Workflow run not found") from exc
+
+
+def _workflow_events_payload(workflow_run_id: str, after: int = 0) -> dict[str, Any]:
+    from hermes_cli.openbrain_workflow_artifacts import read_events, validate_workflow_run_id, workflow_revision
+
+    try:
+        validate_workflow_run_id(workflow_run_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid workflow_run_id") from exc
+    return {"workflow_run_id": workflow_run_id, "events": read_events(workflow_run_id, after=max(0, int(after))), "revision": workflow_revision()}
+
+
+def _ws_upgrade_authorized(ws: WebSocket) -> bool:
+    try:
+        from hermes_cli import web_server as _ws
+    except Exception:
+        return True
+    return bool(_ws._ws_auth_ok(ws))
+
+
+# ---------------------------------------------------------------------------
 # API routes
 # ---------------------------------------------------------------------------
+
+
+@router.get("/workflow-runs")
+def workflow_runs(since_revision: str | None = None) -> dict[str, Any]:
+    """Return sanitized OpenBrain workflow run summaries for the live monitor."""
+
+    return _workflow_dashboard_response(since_revision=since_revision)
+
+
+@router.get("/workflow-runs/{workflow_run_id}")
+def workflow_run_detail(workflow_run_id: str) -> dict[str, Any]:
+    return _workflow_detail_payload(workflow_run_id)
+
+
+@router.get("/workflow-runs/{workflow_run_id}/events")
+def workflow_run_events(workflow_run_id: str, after: int = 0) -> dict[str, Any]:
+    return _workflow_events_payload(workflow_run_id, after=after)
+
+
+@router.websocket("/workflow-events")
+async def stream_workflow_events(ws: WebSocket):
+    if not _ws_upgrade_authorized(ws):
+        await ws.close(code=http_status.WS_1008_POLICY_VIOLATION)
+        return
+    await ws.accept()
+    since_revision = ws.query_params.get("revision") or ws.query_params.get("since_revision")
+    try:
+        while True:
+            payload = await asyncio.to_thread(_workflow_dashboard_response, since_revision)
+            if payload.get("changed"):
+                since_revision = payload.get("revision")
+                await ws.send_json({"type": "workflow_events", **payload})
+            await asyncio.sleep(_WORKFLOW_POLL_SECONDS)
+    except WebSocketDisconnect:
+        return
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 @router.get("/source-types")
@@ -2556,6 +2652,7 @@ def board(
         "schema_version": snapshot.schema_version,
         "generated_at": snapshot.generated_at,
         "ingestion_run_id": snapshot.ingestion_run_id,
+        "revision": _snapshot_revision(),
         "source_type": selected_source_type,
         "columns": columns,
         "rows": rows,

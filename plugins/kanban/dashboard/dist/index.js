@@ -2620,6 +2620,19 @@
           ),
           h("div", { className: "hermes-kanban-card-title" },
             t.title || tx(i18n, "untitled", "(untitled)")),
+          (t.workflow || t.latest_heartbeat_note || t.active_run_elapsed_seconds != null)
+            ? h("div", { className: "hermes-kanban-card-row hermes-kanban-workflow-row" },
+                t.workflow && t.workflow.step_key
+                  ? h("span", { className: "hermes-kanban-workflow-step", title: "Workflow step" }, t.workflow.step_key)
+                  : null,
+                t.active_run_elapsed_seconds != null
+                  ? h("span", { className: "hermes-kanban-workflow-elapsed", title: "Active run elapsed" }, `${Math.round(t.active_run_elapsed_seconds / 60)}m`)
+                  : null,
+                t.latest_heartbeat_note
+                  ? h("span", { className: "hermes-kanban-heartbeat-note", title: t.latest_heartbeat_note }, t.latest_heartbeat_note)
+                  : null,
+              )
+            : null,
           h("div", { className: "hermes-kanban-card-row hermes-kanban-card-meta" },
             t.assignee
               ? h("span", { className: "hermes-kanban-assignee",
@@ -3274,6 +3287,16 @@
         }) : null,
         t.created_by ? h(MetaRow, { label: tx(i18n, "createdBy", "Created by"), value: t.created_by }) : null,
       ),
+      (t.workflow || t.latest_heartbeat_note || t.active_run_elapsed_seconds != null)
+        ? h("div", { className: "hermes-kanban-section hermes-kanban-workflow-detail" },
+            h("div", { className: "hermes-kanban-section-head" }, "Workflow"),
+            t.workflow && t.workflow.template_id ? h(MetaRow, { label: "Template", value: t.workflow.template_id }) : null,
+            t.workflow && t.workflow.run_id ? h(MetaRow, { label: "Run", value: t.workflow.run_id }) : null,
+            t.workflow && t.workflow.step_key ? h(MetaRow, { label: "Step", value: t.workflow.step_key }) : null,
+            t.active_run_elapsed_seconds != null ? h(MetaRow, { label: "Elapsed", value: `${Math.round(t.active_run_elapsed_seconds / 60)}m` }) : null,
+            t.latest_heartbeat_note ? h(MetaRow, { label: "Latest heartbeat", value: t.latest_heartbeat_note }) : null,
+          )
+        : null,
       h(StatusActions, {
         task: t,
         onPatch: props.onPatch,

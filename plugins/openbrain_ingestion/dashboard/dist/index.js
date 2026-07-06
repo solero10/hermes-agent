@@ -9,6 +9,7 @@
   const hooks = SDK.hooks || React;
   const useEffect = hooks.useEffect || React.useEffect;
   const useMemo = hooks.useMemo || React.useMemo;
+  const useRef = hooks.useRef || React.useRef;
   const useState = hooks.useState || React.useState;
 
   const API_BASE = "/api/plugins/openbrain_ingestion";
@@ -544,6 +545,78 @@
 
   function bulkArchiveURL() {
     return API_BASE + "/thoughts/archive";
+  }
+
+  function workflowRunsURL(sinceRevision) {
+    return API_BASE + "/workflow-runs" + (sinceRevision ? "?since_revision=" + encodeURIComponent(sinceRevision) : "");
+  }
+
+  function workflowEventsURL(workflowRunId, afterEventId) {
+    return API_BASE + "/workflow-runs/" + encodeURIComponent(workflowRunId || "") +
+      "/events?after=" + encodeURIComponent(afterEventId || 0);
+  }
+
+  function workflowWsURL(revision) {
+    const path = API_BASE + "/workflow-events" + (revision ? "?revision=" + encodeURIComponent(revision) : "");
+    if (SDK.buildWsUrl) return SDK.buildWsUrl(path);
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return proto + "//" + window.location.host + path;
+  }
+
+  function refreshBoardIfRevisionChanged(ctx, nextRevision) {
+    if (!ctx || !ctx.sourceType) return Promise.resolve(null);
+    if (nextRevision && ctx.board && ctx.board.revision === nextRevision) return Promise.resolve(ctx.board);
+    return SDK.fetchJSON(boardURL(ctx.sourceType, ctx.filter, ctx.sort, ctx.search, ctx.dateFrom, ctx.dateTo, ctx.showArchived))
+      .then(function (data) {
+        if (ctx.setBoard) ctx.setBoard(data || null);
+        return data || null;
+      });
+  }
+
+  function refreshDetailIfSelectedCandidateChanged(ctx, events) {
+    if (!ctx || !ctx.detail || !ctx.setDetail || !ctx.setDetailError) return Promise.resolve(null);
+    const thought = ctx.detail;
+    const sourceUnitId = thought.source_unit_id || (thought.source_unit && thought.source_unit.id);
+    const lineageId = thought.lineage_id || thought.id;
+    const relevant = asArray(events).some(function (event) {
+      return (!event.source_unit_id || event.source_unit_id === sourceUnitId) &&
+        (!event.candidate_id || event.candidate_id === thought.candidate_id || event.candidate_id === lineageId);
+    });
+    if (!relevant || !sourceUnitId || !lineageId) return Promise.resolve(null);
+    return SDK.fetchJSON(detailURL(sourceUnitId, lineageId))
+      .then(function (data) {
+        ctx.setDetail((data && data.thought) || data || null);
+        return data || null;
+      })
+      .catch(function (err) { ctx.setDetailError(errorMessage(err)); });
+  }
+
+  function startWorkflowLiveUpdates(ctx) {
+    let stopped = false;
+    let ws = null;
+    function applyPayload(data) {
+      if (!data || stopped) return;
+      if (data.runs) ctx.setWorkflowRuns(data.runs || []);
+      if (data.revision) ctx.setWorkflowRevision(data.revision);
+      ctx.setWorkflowLiveState("live");
+      refreshBoardIfRevisionChanged(ctx, null).catch(function () {});
+      refreshDetailIfSelectedCandidateChanged(ctx, data.events || []).catch(function () {});
+    }
+    try {
+      ws = new WebSocket(workflowWsURL(ctx.workflowRevision));
+      ws.onopen = function () { if (!stopped) ctx.setWorkflowLiveState("live"); };
+      ws.onmessage = function (event) {
+        try { applyPayload(JSON.parse(event.data)); } catch (err) { /* ignore malformed frame */ }
+      };
+      ws.onerror = function () { if (!stopped) ctx.setWorkflowLiveState("offline"); };
+      ws.onclose = function () { if (!stopped) ctx.setWorkflowLiveState("polling"); };
+    } catch (err) {
+      ctx.setWorkflowLiveState("polling");
+    }
+    return function () {
+      stopped = true;
+      if (ws) ws.close();
+    };
   }
 
   function thoughtSelectionKey(card) {
@@ -1909,6 +1982,44 @@
     );
   }
 
+  function WorkflowMonitorPanel(props) {
+    const runs = asArray(props.runs);
+    const liveState = props.liveState || "offline";
+    return h("section", { className: "ob-workflow-monitor", "aria-label": "OpenBrain workflow monitor" },
+      h("div", { className: "ob-workflow-monitor-head" },
+        h("div", null,
+          h("div", { className: "ob-kicker" }, "Workflow monitor"),
+          h("h2", null, "OpenBrain workflow runs")
+        ),
+        h("span", { className: "ob-workflow-live ob-workflow-live--" + liveState },
+          liveState === "live" ? "Live" : liveState === "polling" ? "Polling" : "Offline")
+      ),
+      runs.length === 0
+        ? h("p", { className: "ob-workflow-empty" }, "No active OpenBrain workflow runs yet.")
+        : h("div", { className: "ob-workflow-list" }, runs.map(function (run) {
+            const progress = run.total_candidates ? `${run.completed_candidates || 0}/${run.total_candidates}` : "—";
+            return h("article", { key: run.workflow_run_id, className: "ob-workflow-card ob-workflow-card--" + (run.status || "unknown") },
+              h("div", { className: "ob-workflow-card-title" },
+                h("span", null, run.source_title || run.source_unit_id || "Source"),
+                h("code", null, run.workflow_run_id)
+              ),
+              h("dl", { className: "ob-workflow-grid" },
+                h("div", null, h("dt", null, "Status"), h("dd", null, safeText(run.status))),
+                h("div", null, h("dt", null, "Step"), h("dd", null, safeText(run.active_step))),
+                h("div", null, h("dt", null, "Task"), h("dd", null, safeText(run.active_task_id))),
+                h("div", null, h("dt", null, "Phase"), h("dd", null, safeText(run.current_phase))),
+                h("div", null, h("dt", null, "Candidate"), h("dd", null, safeText(run.current_candidate_id))),
+                h("div", null, h("dt", null, "Progress"), h("dd", null, progress)),
+                h("div", null, h("dt", null, "Heartbeat"), h("dd", null, formatDate(run.last_heartbeat_at))),
+                h("div", null, h("dt", null, "Receipt"), h("dd", null, safeText(run.latest_receipt_path))),
+              ),
+              run.blocked_or_error ? h("p", { className: "ob-workflow-error" }, run.blocked_or_error) : null,
+              run.stale ? h("p", { className: "ob-workflow-stale" }, "Stale heartbeat") : null
+            );
+          }))
+    );
+  }
+
   function OpenBrainIngestionPage() {
     const sourceTypesState = useState([]);
     const sourceTypes = sourceTypesState[0];
@@ -1973,6 +2084,26 @@
     const policyDefinitionState = useState(null);
     const policyDefinition = policyDefinitionState[0];
     const setPolicyDefinition = policyDefinitionState[1];
+    const workflowRunsState = useState([]);
+    const workflowRuns = workflowRunsState[0];
+    const setWorkflowRuns = workflowRunsState[1];
+    const workflowRevisionState = useState(null);
+    const workflowRevision = workflowRevisionState[0];
+    const setWorkflowRevision = workflowRevisionState[1];
+    const workflowLiveStateState = useState("polling");
+    const workflowLiveState = workflowLiveStateState[0];
+    const setWorkflowLiveState = workflowLiveStateState[1];
+    const workflowRevisionRef = useRef(null);
+
+    function updateWorkflowPayload(data) {
+      if (!data) return;
+      if (Array.isArray(data.runs)) setWorkflowRuns(data.runs);
+      if (data.revision) {
+        workflowRevisionRef.current = data.revision;
+        setWorkflowRevision(data.revision);
+      }
+      setWorkflowLiveState(data.changed === false ? "polling" : "live");
+    }
 
     useEffect(function () {
       let alive = true;
@@ -2019,6 +2150,64 @@
       loadBoard();
       return function () { alive = false; };
     }, [sourceType, filter, sort, search, dateFrom, dateTo, showArchived]);
+
+    useEffect(function () {
+      let alive = true;
+      let timer = null;
+      async function loadWorkflowRuns() {
+        try {
+          const data = await SDK.fetchJSON(workflowRunsURL(workflowRevisionRef.current));
+          if (!alive) return;
+          updateWorkflowPayload(data);
+          if (data && data.changed && sourceType) {
+            refreshBoardIfRevisionChanged({
+              board: board,
+              sourceType: sourceType,
+              filter: filter,
+              sort: sort,
+              search: search,
+              dateFrom: dateFrom,
+              dateTo: dateTo,
+              showArchived: showArchived,
+              setBoard: setBoard,
+            }, null).catch(function () {});
+          }
+        } catch (err) {
+          if (alive) setWorkflowLiveState("offline");
+        }
+      }
+      loadWorkflowRuns();
+      timer = setInterval(loadWorkflowRuns, 5000);
+      return function () {
+        alive = false;
+        if (timer) clearInterval(timer);
+      };
+    }, [sourceType, filter, sort, search, dateFrom, dateTo, showArchived]);
+
+    useEffect(function () {
+      const stop = startWorkflowLiveUpdates({
+        workflowRevision: workflowRevision,
+        setWorkflowRuns: setWorkflowRuns,
+        setWorkflowRevision: function (revision) {
+          workflowRevisionRef.current = revision;
+          setWorkflowRevision(revision);
+        },
+        setWorkflowLiveState: setWorkflowLiveState,
+        board: board,
+        sourceType: sourceType,
+        filter: filter,
+        sort: sort,
+        search: search,
+        dateFrom: dateFrom,
+        dateTo: dateTo,
+        showArchived: showArchived,
+        setBoard: setBoard,
+        detail: detail,
+        setDetail: setDetail,
+        setDetailError: setDetailError,
+      });
+      return stop;
+    }, [sourceType, filter, sort, search, dateFrom, dateTo, showArchived, workflowRevision, detail]);
 
     const selectedSourceTypes = useMemo(function () {
       return sourceTypeOptions(sourceTypes);
@@ -2143,6 +2332,7 @@
         onSortChange: setSort,
         onShowArchivedChange: setShowArchived,
       }),
+      h(WorkflowMonitorPanel, { runs: workflowRuns, liveState: workflowLiveState }),
       h(BoardView, {
         board: board,
         loading: loading,

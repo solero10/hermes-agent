@@ -302,6 +302,36 @@
   margin-left: auto;
 }
 
+.hermes-kanban-workflow-row {
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+
+.hermes-kanban-workflow-step,
+.hermes-kanban-workflow-elapsed,
+.hermes-kanban-heartbeat-note {
+  max-width: 100%;
+  border: 1px solid color-mix(in srgb, var(--color-ring) 38%, var(--color-border));
+  border-radius: 999px;
+  padding: 0.08rem 0.45rem;
+  color: var(--color-foreground);
+  background: color-mix(in srgb, var(--color-ring) 10%, transparent);
+  font-size: 0.68rem;
+  line-height: 1.2;
+}
+
+.hermes-kanban-heartbeat-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-muted-foreground);
+}
+
+.hermes-kanban-workflow-detail .hermes-kanban-meta-value {
+  overflow-wrap: anywhere;
+}
+
 /* ---- Inline create --------------------------------------------------- */
 
 .hermes-kanban-inline-create {

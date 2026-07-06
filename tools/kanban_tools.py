@@ -791,6 +791,8 @@ def _handle_create(args: dict, **kw) -> str:
     if bool_error:
         return tool_error(bool_error)
     idempotency_key = args.get("idempotency_key")
+    workflow_template_id = args.get("workflow_template_id")
+    current_step_key = args.get("current_step_key")
     max_runtime_seconds = args.get("max_runtime_seconds")
     initial_status = args.get("initial_status") or "running"
     skills = args.get("skills")
@@ -841,6 +843,8 @@ def _handle_create(args: dict, **kw) -> str:
                 project_id=project_id,
                 triage=triage,
                 idempotency_key=idempotency_key,
+                workflow_template_id=workflow_template_id,
+                current_step_key=current_step_key,
                 max_runtime_seconds=(
                     int(max_runtime_seconds)
                     if max_runtime_seconds is not None else None
@@ -859,6 +863,8 @@ def _handle_create(args: dict, **kw) -> str:
             return _ok(
                 task_id=new_tid,
                 status=new_task.status if new_task else None,
+                workflow_template_id=new_task.workflow_template_id if new_task else None,
+                current_step_key=new_task.current_step_key if new_task else None,
                 subscribed=subscribed,
             )
         finally:
@@ -1403,6 +1409,14 @@ KANBAN_CREATE_SCHEMA = {
                     "exists, return that task's id instead of creating "
                     "a duplicate. Useful for retry-safe automation."
                 ),
+            },
+            "workflow_template_id": {
+                "type": "string",
+                "description": "Workflow template id for DAG/dashboard grouping.",
+            },
+            "current_step_key": {
+                "type": "string",
+                "description": "Current workflow step key for DAG/dashboard grouping.",
             },
             "max_runtime_seconds": {
                 "type": "integer",

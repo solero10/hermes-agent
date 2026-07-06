@@ -11588,7 +11588,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "config", "cron", "curator", "dashboard", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
-        "model", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
+        "model", "openbrain-workflow", "pairing", "pets", "plugins", "portal", "postinstall", "profile",
         "project", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
@@ -12340,6 +12340,13 @@ def main():
 
     kanban_parser = _build_kanban_parser(subparsers)
     kanban_parser.set_defaults(func=cmd_kanban)
+
+    # =========================================================================
+    # openbrain-workflow command — OpenBrain Kanban DAG orchestration
+    # =========================================================================
+    from hermes_cli.subcommands.openbrain_workflow import build_openbrain_workflow_parser as _build_openbrain_workflow_parser
+
+    _build_openbrain_workflow_parser(subparsers)
 
     # =========================================================================
     # project command — named, multi-folder workspaces

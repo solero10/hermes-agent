@@ -1063,3 +1063,58 @@ def test_snapshot_redacts_sensitive_fields_and_paths_in_api(client, hermes_home)
     for leaked in ("super-secret-value", "SECRET123", "hunter2", "urlsecret", "tok123"):
         assert leaked not in rendered
     assert "source-items.jsonl" in rendered or board["total_counts"]["source_units"] == 3
+
+
+def test_workflow_monitor_routes_surface_status_events_and_revision(client, hermes_home):
+    from hermes_cli.openbrain_workflow_artifacts import append_event, write_status
+    from hermes_cli.openbrain_workflow_contracts import WorkflowEvent, WorkflowStatus
+
+    status = WorkflowStatus.model_validate(
+        {
+            "workflow_run_id": "obwf_plugin",
+            "source_unit_id": "transcript-a",
+            "source_title": "Demo transcript",
+            "active_step": "thought_enrichment",
+            "active_task_id": "t_demo",
+            "status": "running",
+            "started_at": "2026-07-06T10:00:00Z",
+            "updated_at": "2026-07-06T10:02:00Z",
+            "last_heartbeat_at": "2026-07-06T10:02:00Z",
+            "current_phase": "enriching",
+            "current_candidate_id": "cand_1",
+            "completed_candidates": 1,
+            "total_candidates": 3,
+        }
+    )
+    write_status(status)
+    append_event(
+        WorkflowEvent(
+            workflow_run_id="obwf_plugin",
+            source_unit_id="transcript-a",
+            step_key="thought_enrichment",
+            task_id="t_demo",
+            event_type="candidate_completed",
+            candidate_id="cand_1",
+            created_at="2026-07-06T10:02:00Z",
+        )
+    )
+
+    runs = client.get("/api/plugins/openbrain_ingestion/workflow-runs").json()
+    assert runs["changed"] is True
+    assert runs["runs"][0]["workflow_run_id"] == "obwf_plugin"
+    assert runs["runs"][0]["active_step"] == "thought_enrichment"
+    assert runs["runs"][0]["completed_candidates"] == 1
+
+    unchanged = client.get(
+        "/api/plugins/openbrain_ingestion/workflow-runs",
+        params={"since_revision": runs["revision"]},
+    ).json()
+    assert unchanged["changed"] is False
+    assert unchanged["runs"] == []
+
+    detail = client.get("/api/plugins/openbrain_ingestion/workflow-runs/obwf_plugin").json()
+    assert detail["status"]["source_unit_id"] == "transcript-a"
+    assert detail["events"][0]["event_type"] == "candidate_completed"
+
+    events = client.get("/api/plugins/openbrain_ingestion/workflow-runs/obwf_plugin/events").json()
+    assert events["events"][0]["candidate_id"] == "cand_1"

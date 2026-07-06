@@ -326,6 +326,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_create.add_argument("--idempotency-key", default=None,
                           help="Dedup key. If a non-archived task with this key exists, "
                                "its id is returned instead of creating a duplicate.")
+    p_create.add_argument("--workflow-template-id", default=None,
+                          help="Workflow template id for DAG/dashboard grouping")
+    p_create.add_argument("--current-step-key", default=None,
+                          help="Current workflow step key for DAG/dashboard grouping")
     p_create.add_argument("--max-runtime", default=None,
                           help="Per-task runtime cap. Accepts seconds (300) or "
                                "durations (90s, 30m, 2h, 1d). When exceeded, "
@@ -1341,6 +1345,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
             parents=tuple(args.parent or ()),
             triage=bool(getattr(args, "triage", False)),
             idempotency_key=getattr(args, "idempotency_key", None),
+            workflow_template_id=getattr(args, "workflow_template_id", None),
+            current_step_key=getattr(args, "current_step_key", None),
             max_runtime_seconds=max_runtime,
             skills=getattr(args, "skills", None) or None,
             max_retries=max_retries,

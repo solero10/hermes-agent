@@ -2282,3 +2282,51 @@ def test_dashboard_failed_card_highlight_class_exists():
     assert "hermes-kanban-card--failed" in js
     assert "hermes-kanban-card--failed" in css
     assert "failedIds" in js
+
+
+def test_workflow_fields_surface_on_board_and_detail(client, kanban_home):
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "OpenBrain enrichment step",
+            "body": "workflow_run_id: obwf_dashboard\nstep_key: thought_enrichment",
+            "assignee": "default",
+            "workflow_template_id": "openbrain-source-v1",
+            "current_step_key": "thought_enrichment",
+        },
+    ).json()["task"]
+
+    with kb.connect() as conn:
+        claimed = kb.claim_task(conn, created["id"])
+        assert claimed is not None
+        assert kb.heartbeat_worker(
+            conn,
+            created["id"],
+            note="obwf=obwf_dashboard step=thought_enrichment source=transcript-a elapsed=00:01:02 progress=1/3",
+        )
+
+    board = client.get("/api/plugins/kanban/board").json()
+    cards = [task for col in board["columns"] for task in col["tasks"]]
+    card = next(task for task in cards if task["id"] == created["id"])
+    assert card["workflow"] == {
+        "template_id": "openbrain-source-v1",
+        "step_key": "thought_enrichment",
+        "run_id": "obwf_dashboard",
+    }
+    assert card["latest_heartbeat_note"].startswith("obwf=obwf_dashboard")
+    assert card["active_run_elapsed_seconds"] >= 0
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{created['id']}").json()["task"]
+    assert detail["workflow"]["step_key"] == "thought_enrichment"
+    assert "progress=1/3" in detail["latest_heartbeat_note"]
+
+
+def test_kanban_dashboard_bundle_contains_workflow_ui_hooks():
+    repo_root = Path(__file__).resolve().parents[2]
+    js = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    css = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css").read_text()
+
+    assert "hermes-kanban-workflow-row" in js
+    assert "Latest heartbeat" in js
+    assert "hermes-kanban-workflow-row" in css
+    assert "hermes-kanban-heartbeat-note" in css
