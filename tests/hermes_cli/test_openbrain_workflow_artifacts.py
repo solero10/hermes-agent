@@ -17,7 +17,7 @@ from hermes_cli.openbrain_workflow_artifacts import (
     write_dashboard_summary,
     write_status,
 )
-from hermes_cli.openbrain_workflow_contracts import WorkflowEvent, WorkflowStatus
+from hermes_cli.openbrain_workflow_contracts import StepStatus, WorkflowEvent, WorkflowStatus
 
 
 @pytest.fixture
@@ -89,9 +89,25 @@ def test_summarize_staleness_only_marks_running_old_heartbeats(hermes_home):
 
 
 def test_dashboard_response_uses_revision_change(hermes_home):
-    write_status(_status())
+    write_status(_status(
+        active_step="thought_enrichment",
+        receipt_path="/tmp/workflow/receipt.md",
+        steps={"thought_enrichment": StepStatus(status="running", receipt_path="/tmp/workflow/step-receipt.md")},
+    ))
+    append_event(WorkflowEvent(
+        workflow_run_id="obwf_test",
+        source_unit_id="source-a",
+        step_key="thought_enrichment",
+        event_type="heartbeat_sent",
+        created_at="2026-07-06T10:01:00Z",
+        message="heartbeat ok",
+    ))
     first = dashboard_response()
     same = dashboard_response(since_revision=first["revision"])
     assert first["changed"] is True
+    assert first["runs"][0]["kanban_task_state"] == "running"
+    assert first["runs"][0]["latest_receipt_path"] == "/tmp/workflow/receipt.md"
+    assert first["events"][0]["event_type"] == "heartbeat_sent"
     assert same["changed"] is False
     assert same["runs"] == []
+    assert same["events"] == []

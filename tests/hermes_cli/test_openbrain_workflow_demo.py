@@ -39,7 +39,7 @@ def test_video_manifest_requires_secret_review_and_writes_manifest(hermes_home, 
     with pytest.raises(ValueError):
         build_video_manifest_entry(
             path=str(tmp_path / "demo.mp4"),
-            duration_seconds=3.5,
+            duration_seconds=12.5,
             shows_real_surface=True,
             annotations_visible=True,
             secrets_reviewed=False,
@@ -47,7 +47,7 @@ def test_video_manifest_requires_secret_review_and_writes_manifest(hermes_home, 
 
     entry = build_video_manifest_entry(
         path=str(tmp_path / "demo.mp4"),
-        duration_seconds=3.5,
+        duration_seconds=12.5,
         shows_real_surface=True,
         annotations_visible=True,
         secrets_reviewed=True,

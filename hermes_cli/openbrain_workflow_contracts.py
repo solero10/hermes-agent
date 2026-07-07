@@ -136,10 +136,17 @@ class StepStatus(BaseModel):
     completed_at: str | None = None
     blocked_or_error: str | None = Field(default=None, max_length=500)
 
-    @field_validator("blocked_or_error", "receipt_path")
+    @field_validator("blocked_or_error")
     @classmethod
-    def _redact_strings(cls, value: str | None) -> str | None:
+    def _redact_error(cls, value: str | None) -> str | None:
         return redact_workflow_text(value, max_length=500) if value else value
+
+    @field_validator("receipt_path")
+    @classmethod
+    def _preserve_receipt_path(cls, value: str | None) -> str | None:
+        # Receipt paths are proof pointers in the private dashboard/status contract.
+        # They must not be collapsed to ``[path]`` like heartbeat text.
+        return clamp_text(value, max_length=500) if value else value
 
 
 class WorkflowStatus(BaseModel):
@@ -169,10 +176,17 @@ class WorkflowStatus(BaseModel):
     blocked_or_error: str | None = Field(default=None, max_length=500)
     steps: dict[str, StepStatus] = Field(default_factory=dict)
 
-    @field_validator("source_title", "source_folder", "current_candidate_title_sanitized", "receipt_path", "blocked_or_error")
+    @field_validator("source_title", "current_candidate_title_sanitized", "blocked_or_error")
     @classmethod
     def _sanitize_text_fields(cls, value: str | None) -> str | None:
         return redact_workflow_text(value, max_length=500) if value else value
+
+    @field_validator("source_folder", "receipt_path")
+    @classmethod
+    def _preserve_private_pointer_fields(cls, value: str | None) -> str | None:
+        # These fields are private proof/source pointers, not public heartbeat text.
+        # Preserve the usable path while still bounding the payload size.
+        return clamp_text(value, max_length=500) if value else value
 
     @model_validator(mode="after")
     def _progress_is_sane(self) -> "WorkflowStatus":
@@ -276,6 +290,7 @@ class WorkflowDashboardResponse(BaseModel):
     revision: str
     changed: bool = True
     runs: list[WorkflowDashboardRun] = Field(default_factory=list)
+    events: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class VideoManifestEntry(BaseModel):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_cli.openbrain_workflow_contracts import WorkflowEvent, WorkflowStatus, build_heartbeat_note
+from hermes_cli.openbrain_workflow_contracts import StepStatus, WorkflowEvent, WorkflowStatus, build_heartbeat_note
 
 
 def test_status_contract_accepts_minimal_running_payload():
@@ -44,3 +44,20 @@ def test_heartbeat_note_redacts_private_values():
     assert "/mnt/d/private" not in note
     assert "progress=7/18" in note
     assert "elapsed=00:05:17" in note
+
+
+def test_receipt_and_source_paths_remain_usable_private_pointers():
+    status = WorkflowStatus.model_validate({
+        "workflow_run_id": "obwf_x",
+        "source_unit_id": "source-a",
+        "source_folder": "/tmp/source-a/full-path",
+        "receipt_path": "/tmp/source-a/receipt.md",
+        "active_step": "thought_enrichment",
+        "status": "running",
+        "started_at": "2026-07-06T10:12:05Z",
+        "updated_at": "2026-07-06T10:17:05Z",
+    })
+    step = StepStatus(status="done", receipt_path="/tmp/source-a/step-receipt.md")
+    assert status.source_folder == "/tmp/source-a/full-path"
+    assert status.receipt_path == "/tmp/source-a/receipt.md"
+    assert step.receipt_path == "/tmp/source-a/step-receipt.md"

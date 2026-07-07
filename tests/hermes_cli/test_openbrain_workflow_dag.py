@@ -53,12 +53,33 @@ def test_create_openbrain_workflow_cards_links_parallel_producers(kanban_home):
         parents = set(kb.parent_ids(conn, enrichment))
         assert parents == {created.step_task_ids["panning_for_gold"], created.step_task_ids["meeting_synthesis"]}
         panning = kb.get_task(conn, created.step_task_ids["panning_for_gold"])
+        assert panning is not None
         assert panning.workflow_template_id == "openbrain-source-v1"
         assert panning.current_step_key == "panning_for_gold"
+        assert "source_folder_path: /tmp/source-a" in (panning.body or "")
+        root = kb.get_task(conn, created.root_task_id)
+        assert root is not None
+        assert "source_folder_path: /tmp/source-a" in (root.body or "")
+        conn.execute(
+            "UPDATE tasks SET status = 'done' WHERE id IN (?, ?, ?)",
+            (
+                created.step_task_ids["panning_for_gold"],
+                created.step_task_ids["meeting_synthesis"],
+                created.step_task_ids["dedupe"],
+            ),
+        )
+        kb.recompute_ready(conn)
+        review = kb.get_task(conn, created.step_task_ids["human_review"])
+        assert review is not None
+        assert review.status == "blocked"
 
     status = read_status("obwf_test")
     assert status is not None
     assert status.active_step in {"panning_for_gold", "meeting_synthesis"}
+    assert status.source_folder == "/tmp/source-a"
+    assert status.steps["panning_for_gold"].status == "running"
+    assert status.steps["meeting_synthesis"].status == "ready"
+    assert status.steps["thought_enrichment"].status == "pending"
     events = read_events("obwf_test")
     assert events[0]["event_type"] == "workflow_started"
     assert [event["event_type"] for event in events].count("task_created") >= 3

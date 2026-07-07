@@ -202,6 +202,12 @@ def summarize_staleness(
 
 def summarize_status_for_dashboard(status: WorkflowStatus, *, now: datetime | None = None) -> dict[str, Any]:
     stale_info = summarize_staleness(status, now=now)
+    active_step_state = None
+    if status.active_step and status.active_step in status.steps:
+        active_step_state = status.steps[status.active_step].status
+    latest_receipt_path = status.receipt_path
+    if not latest_receipt_path and status.active_step and status.active_step in status.steps:
+        latest_receipt_path = status.steps[status.active_step].receipt_path
     run = WorkflowDashboardRun(
         workflow_run_id=status.workflow_run_id,
         source_unit_id=status.source_unit_id,
@@ -209,7 +215,7 @@ def summarize_status_for_dashboard(status: WorkflowStatus, *, now: datetime | No
         status="stale" if stale_info.get("stale") and status.status == "running" else status.status,
         active_step=status.active_step,
         active_task_id=status.active_task_id,
-        kanban_task_state=None,
+        kanban_task_state=active_step_state,
         elapsed_seconds=status.elapsed_seconds,
         last_heartbeat_at=status.last_heartbeat_at,
         stale=bool(stale_info.get("stale")),
@@ -218,7 +224,7 @@ def summarize_status_for_dashboard(status: WorkflowStatus, *, now: datetime | No
         current_candidate_title_sanitized=status.current_candidate_title_sanitized,
         completed_candidates=status.completed_candidates,
         total_candidates=status.total_candidates,
-        latest_receipt_path=status.receipt_path,
+        latest_receipt_path=latest_receipt_path,
         blocked_or_error=redact_workflow_text(status.blocked_or_error, max_length=500) if status.blocked_or_error else None,
         updated_at=status.updated_at,
     )
@@ -268,14 +274,20 @@ def workflow_revision() -> str:
 def dashboard_response(*, since_revision: str | None = None) -> dict[str, Any]:
     revision = workflow_revision()
     changed = since_revision != revision
-    runs = [] if not changed and since_revision else [
-        summarize_status_for_dashboard(status) for status in list_statuses()
-    ]
+    statuses = [] if not changed and since_revision else list_statuses()
+    runs = [summarize_status_for_dashboard(status) for status in statuses]
+    events: list[dict[str, Any]] = []
+    if changed or not since_revision:
+        for status in statuses:
+            events.extend(read_events(status.workflow_run_id, after=0, limit=50))
+        events.sort(key=lambda event: (event.get("created_at") or "", int(event.get("event_id") or 0)), reverse=True)
+        events = events[:200]
     return WorkflowDashboardResponse(
         generated_at=utc_now_iso(),
         revision=revision,
         changed=changed,
         runs=runs,
+        events=events,
     ).model_dump(mode="json", exclude_none=True)
 
 

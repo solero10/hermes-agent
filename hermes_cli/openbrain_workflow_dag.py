@@ -144,13 +144,15 @@ def format_step_body(
     prior_receipt_path: str | None = None,
 ) -> str:
     safe_folder = redact_workflow_text(Path(source_folder).name or source_folder, max_length=200)
+    source_folder_path = str(source_folder)
     status = status_path(workflow_run_id)
     events = events_path(workflow_run_id)
     return f"""# OpenBrain workflow step: {spec.label}
 
 workflow_run_id: {workflow_run_id}
 source_unit_id: {source_unit_id}
-source_folder: {safe_folder}
+source_folder_display: {safe_folder}
+source_folder_path: {source_folder_path}
 step_key: {spec.key}
 producer_steps: {','.join(producer_steps)}
 input_candidate_ids: {','.join(candidate_ids)}
@@ -200,7 +202,8 @@ def create_openbrain_workflow_cards(
             f"# OpenBrain workflow root\n\n"
             f"workflow_run_id: {workflow_run_id}\n"
             f"source_unit_id: {source_unit_id}\n"
-            f"source_folder: {redact_workflow_text(Path(source_folder).name or source_folder, max_length=200)}\n"
+            f"source_folder_display: {redact_workflow_text(Path(source_folder).name or source_folder, max_length=200)}\n"
+            f"source_folder_path: {source_folder}\n"
             f"mode: {mode}\n"
             f"status_artifact: {status_path(workflow_run_id)}\n"
             f"workflow_events: {events_path(workflow_run_id)}\n"
@@ -226,7 +229,8 @@ def create_openbrain_workflow_cards(
             )
 
         step_task_ids: dict[str, str] = {}
-        for spec in build_source_workflow_steps(mode, approval_gate=approval_gate):
+        steps = build_source_workflow_steps(mode, approval_gate=approval_gate)
+        for spec in steps:
             parent_keys = spec.parents or ("root",)
             parents = [root_task_id if key == "root" else step_task_ids[key] for key in parent_keys]
             initial_status = "blocked" if spec.key == "human_review" else "running"
@@ -250,15 +254,32 @@ def create_openbrain_workflow_cards(
                 initial_status=initial_status,
                 board=board,
             )
+            if spec.key == "human_review":
+                # ``initial_status='blocked'`` parks the card, but recompute_ready()
+                # only treats an explicit ``blocked`` event as a sticky human gate.
+                # Add that event at creation so the review gate cannot auto-promote
+                # when dedupe completes; a human/unblock action must clear it.
+                kb._append_event(  # type: ignore[attr-defined]
+                    conn,
+                    task_id,
+                    "blocked",
+                    {"reason": "review-required: approve before CortexDB import", "kind": "needs_input"},
+                )
             step_task_ids[spec.key] = task_id
 
         now = utc_now_iso()
-        first_step_key = next(iter(step_task_ids), None)
+        root_ready_keys = [spec.key for spec in steps if not spec.parents]
+        first_step_key = root_ready_keys[0] if root_ready_keys else next(iter(step_task_ids), None)
         first_task_id = step_task_ids.get(first_step_key) if first_step_key else None
         step_statuses = {
             key: StepStatus(
                 task_id=task_id,
-                status="blocked" if key == "human_review" else ("ready" if key == first_step_key else "pending"),
+                status=(
+                    "blocked" if key == "human_review"
+                    else "running" if key == first_step_key
+                    else "ready" if key in root_ready_keys
+                    else "pending"
+                ),
             )
             for key, task_id in step_task_ids.items()
         }
@@ -266,7 +287,7 @@ def create_openbrain_workflow_cards(
             workflow_run_id=workflow_run_id,
             source_unit_id=source_unit_id,
             source_title=source_title,
-            source_folder=Path(source_folder).name or source_folder,
+            source_folder=source_folder,
             branch_mode=mode,
             active_step=first_step_key,
             active_task_id=first_task_id,
