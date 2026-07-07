@@ -22,6 +22,10 @@ DASHBOARD_POLL_INTERVAL_SECONDS = 10
 COLLECTOR_INTERVAL_SECONDS = 15
 STALE_AFTER_SECONDS = 60
 RESET_CREDITS_INTERVAL_SECONDS = 30 * 60
+LONG_HISTORY_REFRESH_SECONDS = 5 * 60
+HISTORY_RECENT_SECONDS = 5 * 60
+HISTORY_RECENT_MAX_ROWS = 500
+HISTORY_PRUNE_INTERVAL_SECONDS = 60 * 60
 
 
 class CacheLockTimeout(TimeoutError):
@@ -42,6 +46,14 @@ def latest_with_history_path() -> Path:
 
 def collector_status_path() -> Path:
     return cache_dir() / "collector_status.json"
+
+
+def reset_credits_path() -> Path:
+    return cache_dir() / "reset_credits.json"
+
+
+def history_maintenance_path() -> Path:
+    return cache_dir() / "history_maintenance.json"
 
 
 def history_path() -> Path:

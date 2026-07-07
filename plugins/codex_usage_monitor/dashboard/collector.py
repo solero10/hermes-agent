@@ -245,6 +245,72 @@ def _status(
     }
 
 
+def _parse_cache_generated_at(payload: dict[str, Any] | None) -> datetime | None:
+    if not isinstance(payload, dict):
+        return None
+    generated = payload.get("fetched_at") or payload.get("generated_at")
+    return _parse_dt(generated)
+
+
+def _reset_cache_fresh(payload: dict[str, Any] | None, *, now: datetime) -> bool:
+    fetched = _parse_cache_generated_at(payload)
+    if fetched is None:
+        return False
+    age = (now.astimezone(timezone.utc) - fetched).total_seconds()
+    return 0 <= age < cache_helpers.RESET_CREDITS_INTERVAL_SECONDS
+
+
+def _read_reset_credits_cache(now: datetime) -> tuple[Any | None, dict[str, Any]]:
+    cached = cache_helpers.read_json_file(cache_helpers.reset_credits_path())
+    if not isinstance(cached, dict):
+        return None, {"command": None, "available": False, "last_error": "reset-credit cache missing"}
+    raw = cached.get("raw_reset_credits")
+    source_raw = cached.get("source")
+    source: dict[str, Any] = dict(source_raw) if isinstance(source_raw, dict) else {}
+    source["cached"] = True
+    source["cache_age_seconds"] = round(
+        max(0.0, (now - (_parse_cache_generated_at(cached) or now)).total_seconds()),
+        3,
+    )
+    return raw, source
+
+
+def _write_reset_credits_cache(*, raw_reset_credits: Any, reset_source: dict[str, Any], now: datetime) -> None:
+    cache_helpers.write_json_atomic(
+        cache_helpers.reset_credits_path(),
+        {
+            "schema_version": cache_helpers.SCHEMA_VERSION,
+            "fetched_at": _iso(now),
+            "raw_reset_credits": raw_reset_credits,
+            "source": reset_source,
+        },
+    )
+
+
+def _resolve_reset_credits(
+    *,
+    deps: CollectorDeps,
+    now: datetime,
+    force: bool,
+) -> tuple[Any | None, dict[str, Any]]:
+    cached = cache_helpers.read_json_file(cache_helpers.reset_credits_path())
+    if not force and _reset_cache_fresh(cached, now=now):
+        return _read_reset_credits_cache(now)
+
+    reset_raw, reset_source = deps["run_reset_credits_command"]()
+    if reset_raw is not None:
+        reset_source = reset_source if isinstance(reset_source, dict) else {}
+        _write_reset_credits_cache(raw_reset_credits=reset_raw, reset_source=reset_source, now=now)
+        return reset_raw, reset_source
+
+    cached_raw, cached_source = _read_reset_credits_cache(now)
+    if cached_raw is not None:
+        cached_source["last_error"] = (reset_source or {}).get("last_error")
+        cached_source["snapshot_source"] = "previous_reset_credits_cache"
+        return cached_raw, cached_source
+    return reset_raw, reset_source if isinstance(reset_source, dict) else {}
+
+
 def build_latest_artifacts(
     *,
     raw_usage: Any,
@@ -255,7 +321,8 @@ def build_latest_artifacts(
     now: datetime,
     deps: CollectorDeps,
     previous_snapshot: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+    include_long_history: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     normalize_snapshot = deps["normalize_snapshot"]
     merge_reset_credits = deps["merge_reset_credits"]
     sanitize = deps["sanitize"]
@@ -293,6 +360,8 @@ def build_latest_artifacts(
             "command": reset_source.get("command"),
             "available": bool(reset_source.get("available", False)),
             "last_error": reset_source.get("last_error"),
+            "cached": bool(reset_source.get("cached", False)),
+            "cache_age_seconds": reset_source.get("cache_age_seconds"),
         },
         "accounts": accounts if isinstance(accounts, list) else [],
     }
@@ -309,8 +378,10 @@ def build_latest_artifacts(
             history_rows,
             now=now,
         )
-    latest_with_history = attach_long_history_to_snapshot(copy.deepcopy(latest), history_rows, now=now)
-    return latest, latest_with_history
+    if include_long_history:
+        latest_with_history = attach_long_history_to_snapshot(copy.deepcopy(latest), history_rows, now=now)
+        return latest, latest_with_history
+    return latest, None
 
 
 def collect_once(
@@ -318,15 +389,18 @@ def collect_once(
     deps: CollectorDeps,
     now: datetime | None = None,
     lock_timeout_seconds: float = 10.0,
+    force_reset_credits: bool = False,
 ) -> dict[str, Any]:
     """Run one collector pass and update cache artifacts."""
     now_dt = now or datetime.now(timezone.utc)
     sanitize = deps["sanitize"]
     with cache_helpers.collector_lock(timeout_seconds=lock_timeout_seconds):
         run_usage_command = deps["run_usage_command"]
-        run_reset_credits_command = deps["run_reset_credits_command"]
-        append_history_snapshot = deps["append_history_snapshot"]
         load_history_rows = deps["load_history_rows"]
+        load_recent_history_rows = deps.get("load_recent_history_rows") or load_history_rows
+        append_history_row = deps.get("append_history_row") or deps.get("append_history_snapshot")
+        history_prune_due = deps.get("history_prune_due")
+        mark_history_pruned = deps.get("mark_history_pruned")
 
         raw_usage, usage_source = run_usage_command()
         if raw_usage is None:
@@ -355,9 +429,15 @@ def collect_once(
             cache_helpers.write_json_atomic(cache_helpers.latest_with_history_path(), warming)
             return warming
 
-        reset_raw, reset_source = run_reset_credits_command()
-        previous_history_rows = load_history_rows(now=now_dt, prune=False)
-        previous_snapshot = previous_history_rows[-1] if previous_history_rows else None
+        reset_raw, reset_source = _resolve_reset_credits(
+            deps=deps,
+            now=now_dt,
+            force=force_reset_credits,
+        )
+        previous_recent_rows = load_recent_history_rows(now=now_dt)
+        if not isinstance(previous_recent_rows, list):
+            previous_recent_rows = []
+        previous_snapshot = previous_recent_rows[-1] if previous_recent_rows else None
         normalized_for_history = deps["normalize_snapshot"](
             raw_usage,
             now=now_dt,
@@ -367,27 +447,52 @@ def collect_once(
             normalized_for_history["accounts"] = deps["merge_reset_credits"](
                 normalized_for_history["accounts"], reset_raw
             )
-        history_rows = append_history_snapshot(normalized_for_history, now=now_dt)
-        if not isinstance(history_rows, list):
-            history_rows = load_history_rows(now=now_dt, prune=False)
+        if callable(append_history_row):
+            new_row_or_rows = append_history_row(normalized_for_history, now=now_dt)
+        else:
+            new_row_or_rows = load_history_rows(now=now_dt, prune=False)
+        if isinstance(new_row_or_rows, list):
+            recent_rows = new_row_or_rows
+        elif isinstance(new_row_or_rows, dict):
+            recent_rows = [*previous_recent_rows, new_row_or_rows]
+        else:
+            recent_rows = previous_recent_rows
 
-        latest, latest_with_history = build_latest_artifacts(
+        latest, _unused = build_latest_artifacts(
             raw_usage=raw_usage,
             raw_reset_credits=reset_raw,
             usage_source=usage_source if isinstance(usage_source, dict) else {},
             reset_source=reset_source if isinstance(reset_source, dict) else {},
-            history_rows=history_rows,
+            history_rows=recent_rows,
             now=now_dt,
             deps=deps,
             previous_snapshot=previous_snapshot,
+            include_long_history=False,
         )
         status = _status(state="fresh", now=now_dt, last_success_at=latest["generated_at"])
         latest.update(status)
-        latest_with_history.update(status)
         cache_helpers.write_json_atomic(cache_helpers.latest_path(), latest)
-        cache_helpers.write_json_atomic(cache_helpers.latest_with_history_path(), latest_with_history)
+
+        long_history_due = force_reset_credits
+        long_history_existing = cache_helpers.read_json_file(cache_helpers.latest_with_history_path())
+        long_generated = _parse_dt((long_history_existing or {}).get("generated_at"))
+        if long_generated is None:
+            long_history_due = True
+        elif (now_dt - long_generated).total_seconds() >= cache_helpers.LONG_HISTORY_REFRESH_SECONDS:
+            long_history_due = True
+
+        latest_with_history: dict[str, Any] | None = None
+        if long_history_due:
+            prune = bool(history_prune_due(now_dt)) if callable(history_prune_due) else False
+            full_history_rows = load_history_rows(now=now_dt, prune=prune)
+            if prune and callable(mark_history_pruned):
+                mark_history_pruned(now_dt, rows=len(full_history_rows))
+            latest_with_history = attach_long_history_to_snapshot(copy.deepcopy(latest), full_history_rows, now=now_dt)
+            latest_with_history.update(status)
+            cache_helpers.write_json_atomic(cache_helpers.latest_with_history_path(), latest_with_history)
+
         cache_helpers.write_json_atomic(cache_helpers.collector_status_path(), status)
-        return latest_with_history
+        return latest_with_history or latest
 
 
 def _deps_from_plugin_api() -> CollectorDeps:
@@ -400,7 +505,11 @@ def _deps_from_plugin_api() -> CollectorDeps:
         "run_usage_command": plugin_api.run_usage_command,
         "run_reset_credits_command": plugin_api.run_reset_credits_command,
         "append_history_snapshot": plugin_api.append_history_snapshot,
+        "append_history_row": plugin_api.append_history_row,
         "load_history_rows": plugin_api.load_history_rows,
+        "load_recent_history_rows": plugin_api.load_recent_history_rows,
+        "history_prune_due": plugin_api.history_prune_due,
+        "mark_history_pruned": plugin_api.mark_history_pruned,
         "attach_history_to_accounts": plugin_api._attach_history_to_accounts,
     }
 

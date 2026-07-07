@@ -211,6 +211,15 @@ def test_cache_helpers_are_profile_safe_and_atomic(plugin_api, tmp_path):
     assert plugin_api.cache_helpers.read_json_file(cache_path) == {"ok": True, "schema_version": 1}
 
 
+def test_cache_helpers_include_reset_and_maintenance_paths(plugin_api, tmp_path):
+    assert str(plugin_api.cache_helpers.reset_credits_path()).startswith(str(tmp_path / ".hermes"))
+    assert str(plugin_api.cache_helpers.reset_credits_path()).endswith("codex-usage-monitor/reset_credits.json")
+    assert str(plugin_api.cache_helpers.history_maintenance_path()).endswith("codex-usage-monitor/history_maintenance.json")
+    assert plugin_api.cache_helpers.RESET_CREDITS_INTERVAL_SECONDS == 30 * 60
+    assert plugin_api.cache_helpers.LONG_HISTORY_REFRESH_SECONDS == 5 * 60
+    assert plugin_api.cache_helpers.HISTORY_RECENT_SECONDS == 5 * 60
+
+
 def test_collector_main_skips_overlapping_runs_without_failing(plugin_api, monkeypatch, capsys):
     def locked_collect_once(*_args, **_kwargs):
         raise plugin_api.cache_helpers.CacheLockTimeout("already running")
@@ -765,7 +774,7 @@ def test_run_usage_command_available_semantics_and_sanitized_errors(plugin_api, 
 
     assert raw is None
     assert source["available"] is True
-    assert source["command"] == "husage usage --json"
+    assert source["command"] in {"husage --json usage --no-log", "husage usage --json --no-log"}
     assert "rawsecretbearer" not in source["last_error"]
     assert "raw-secret-value" not in source["last_error"]
     assert "[REDACTED]" in source["last_error"]
@@ -783,10 +792,66 @@ def test_run_usage_command_available_semantics_and_sanitized_errors(plugin_api, 
 
     assert raw is None
     assert source["available"] is True
-    assert source["command"] == "husage usage --json"
+    assert source["command"] in {"husage --json usage --no-log", "husage usage --json --no-log"}
     assert "raw-invalid-token" not in source["last_error"]
     assert "sk-abc...mnop" not in source["last_error"]
     assert "[REDACTED]" in source["last_error"]
+
+
+def test_run_usage_command_requests_background_no_log_mode(plugin_api, monkeypatch):
+    monkeypatch.setattr(
+        plugin_api.shutil,
+        "which",
+        lambda binary: f"/usr/bin/{binary}" if binary == "husage" else None,
+    )
+    seen: dict[str, Any] = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        seen["env"] = kwargs.get("env") or {}
+        return plugin_api.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"ok": true, "accounts": []}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(plugin_api.subprocess, "run", fake_run)
+
+    raw, source = plugin_api.run_usage_command()
+
+    assert raw == {"ok": True, "accounts": []}
+    assert source["available"] is True
+    assert seen["env"].get("CODEX_USAGE_APPEND_LOG") == "0"
+    assert seen["command"] == ["husage", "--json", "usage", "--no-log"]
+
+
+def test_run_reset_credits_command_requests_background_no_log_mode(plugin_api, monkeypatch):
+    monkeypatch.setattr(
+        plugin_api.shutil,
+        "which",
+        lambda binary: f"/usr/bin/{binary}" if binary == "husage" else None,
+    )
+    seen: dict[str, Any] = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        seen["env"] = kwargs.get("env") or {}
+        return plugin_api.subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"ok": true, "accounts": []}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(plugin_api.subprocess, "run", fake_run)
+
+    raw, source = plugin_api.run_reset_credits_command()
+
+    assert raw == {"ok": True, "accounts": []}
+    assert source["available"] is True
+    assert seen["env"].get("CODEX_USAGE_APPEND_LOG") == "0"
+    assert seen["command"] == ["husage", "--json", "resets", "--no-log"]
 
 
 def test_route_mounts_in_bare_fastapi_testclient_and_returns_json(plugin_api, monkeypatch):
@@ -856,6 +921,8 @@ def test_refresh_endpoint_collects_and_writes_cached_normalized_accounts(plugin_
         "command": "husage --json resets",
         "available": True,
         "last_error": None,
+        "cached": False,
+        "cache_age_seconds": None,
     }
     account = data["accounts"][0]
     assert account["id"] == "acct-one"
@@ -910,6 +977,186 @@ def test_normal_snapshot_uses_cache_and_does_not_shell_out(plugin_api, monkeypat
     assert second["accounts"][0]["id"] == "acct-one"
     assert second["accounts"][0]["reset_credits"]["available_count"] == 2
     assert second["history_contract"]["presets"]["weekly"][-1] == "all"
+
+
+def test_collector_reuses_reset_credits_cache_between_fast_usage_samples(plugin_api):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    calls = {"usage": 0, "resets": 0}
+
+    def fake_run_usage_command():
+        calls["usage"] += 1
+        raw = _raw_snapshot(start + timedelta(seconds=15 * calls["usage"]))
+        raw["accounts"][0]["windows"][0]["used_percent"] = 30 + calls["usage"]
+        return raw, {"command": "husage --json usage --no-log", "available": True}
+
+    def fake_run_reset_credits_command():
+        calls["resets"] += 1
+        return _raw_reset_snapshot(start), {"command": "husage --json resets --no-log", "available": True}
+
+    deps = {
+        "normalize_snapshot": plugin_api.normalize_snapshot,
+        "merge_reset_credits": plugin_api.merge_reset_credits,
+        "sanitize": plugin_api.sanitize,
+        "run_usage_command": fake_run_usage_command,
+        "run_reset_credits_command": fake_run_reset_credits_command,
+        "append_history_row": plugin_api.append_history_row,
+        "load_recent_history_rows": plugin_api.load_recent_history_rows,
+        "load_history_rows": plugin_api.load_history_rows,
+        "history_prune_due": plugin_api.history_prune_due,
+        "mark_history_pruned": plugin_api.mark_history_pruned,
+        "attach_history_to_accounts": plugin_api._attach_history_to_accounts,
+    }
+
+    first = plugin_api.collector_core.collect_once(deps=deps, now=start)
+    second = plugin_api.collector_core.collect_once(deps=deps, now=start + timedelta(seconds=15))
+
+    assert calls == {"usage": 2, "resets": 1}
+    assert first["accounts"][0]["reset_credits"]["available_count"] == 2
+    assert second["accounts"][0]["reset_credits"]["available_count"] == 2
+    assert second["reset_credits_source"].get("cached") is True
+
+
+def test_collector_force_refresh_updates_reset_credits(plugin_api):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    calls = {"usage": 0, "resets": 0}
+
+    def fake_run_usage_command():
+        calls["usage"] += 1
+        return _raw_snapshot(start), {"command": "husage --json usage --no-log", "available": True}
+
+    def fake_run_reset_credits_command():
+        calls["resets"] += 1
+        raw = _raw_reset_snapshot(start)
+        raw["accounts"][0]["available_count"] = calls["resets"]
+        return raw, {"command": "husage --json resets --no-log", "available": True}
+
+    deps = {
+        "normalize_snapshot": plugin_api.normalize_snapshot,
+        "merge_reset_credits": plugin_api.merge_reset_credits,
+        "sanitize": plugin_api.sanitize,
+        "run_usage_command": fake_run_usage_command,
+        "run_reset_credits_command": fake_run_reset_credits_command,
+        "append_history_row": plugin_api.append_history_row,
+        "load_recent_history_rows": plugin_api.load_recent_history_rows,
+        "load_history_rows": plugin_api.load_history_rows,
+        "history_prune_due": plugin_api.history_prune_due,
+        "mark_history_pruned": plugin_api.mark_history_pruned,
+        "attach_history_to_accounts": plugin_api._attach_history_to_accounts,
+    }
+
+    plugin_api.collector_core.collect_once(deps=deps, now=start)
+    forced = plugin_api.collector_core.collect_once(
+        deps=deps,
+        now=start + timedelta(seconds=15),
+        force_reset_credits=True,
+    )
+
+    assert calls == {"usage": 2, "resets": 2}
+    assert forced["accounts"][0]["reset_credits"]["available_count"] == 2
+
+
+def test_append_history_row_does_not_prune_full_history(plugin_api):
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    snapshot = plugin_api.normalize_snapshot(_raw_snapshot(now), now=now)
+
+    row = plugin_api.append_history_row(snapshot, now=now)
+    rows = plugin_api.load_recent_history_rows(now=now + timedelta(seconds=1), seconds=60)
+
+    assert row["generated_at"] == "2026-01-01T00:00:00Z"
+    assert len(rows) == 1
+    assert rows[0]["generated_at"] == "2026-01-01T00:00:00Z"
+
+
+def test_load_recent_history_rows_only_keeps_recent_tail(plugin_api):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for idx in range(20):
+        sample_at = start + timedelta(seconds=15 * idx)
+        raw = _raw_snapshot(sample_at)
+        raw["accounts"][0]["windows"][0]["used_percent"] = 30 + idx
+        plugin_api.append_history_row(
+            plugin_api.normalize_snapshot(raw, now=sample_at),
+            now=sample_at,
+        )
+
+    rows = plugin_api.load_recent_history_rows(
+        now=start + timedelta(seconds=15 * 19),
+        seconds=60,
+        limit=10,
+    )
+
+    assert 1 <= len(rows) <= 10
+    assert rows[-1]["generated_at"] == "2026-01-01T00:04:45Z"
+    assert all(plugin_api.parse_dt(row["generated_at"]) >= start + timedelta(seconds=15 * 15) for row in rows)
+
+
+def test_collector_writes_latest_each_tick_but_long_history_only_when_due(plugin_api):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    calls = {"usage": 0, "full_history": 0}
+
+    def fake_run_usage_command():
+        calls["usage"] += 1
+        raw = _raw_snapshot(start + timedelta(seconds=15 * calls["usage"]))
+        raw["accounts"][0]["windows"][0]["used_percent"] = 30 + calls["usage"]
+        return raw, {"command": "husage --json usage --no-log", "available": True}
+
+    def fake_run_reset_credits_command():
+        return _raw_reset_snapshot(start), {"command": "husage --json resets --no-log", "available": True}
+
+    original_load_history_rows = plugin_api.load_history_rows
+
+    def counted_load_history_rows(*args, **kwargs):
+        calls["full_history"] += 1
+        return original_load_history_rows(*args, **kwargs)
+
+    deps = {
+        "normalize_snapshot": plugin_api.normalize_snapshot,
+        "merge_reset_credits": plugin_api.merge_reset_credits,
+        "sanitize": plugin_api.sanitize,
+        "run_usage_command": fake_run_usage_command,
+        "run_reset_credits_command": fake_run_reset_credits_command,
+        "append_history_row": plugin_api.append_history_row,
+        "load_recent_history_rows": plugin_api.load_recent_history_rows,
+        "load_history_rows": counted_load_history_rows,
+        "history_prune_due": plugin_api.history_prune_due,
+        "mark_history_pruned": plugin_api.mark_history_pruned,
+        "attach_history_to_accounts": plugin_api._attach_history_to_accounts,
+    }
+
+    first = plugin_api.collector_core.collect_once(deps=deps, now=start)
+    second = plugin_api.collector_core.collect_once(deps=deps, now=start + timedelta(seconds=15))
+
+    assert calls["usage"] == 2
+    assert calls["full_history"] == 1
+    assert first["generated_at"] != second["generated_at"]
+    assert plugin_api.cache_helpers.latest_path().exists()
+    assert plugin_api.cache_helpers.latest_with_history_path().exists()
+
+
+def test_build_snapshot_uses_current_latest_and_cached_long_history(plugin_api):
+    old_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    new_time = old_time + timedelta(seconds=45)
+
+    old_snapshot = plugin_api.normalize_snapshot(_raw_snapshot(old_time), now=old_time)
+    old_with_history = plugin_api.attach_long_history_to_snapshot(
+        old_snapshot,
+        [plugin_api._history_row_from_snapshot(old_snapshot)],
+        now=old_time,
+    )
+    plugin_api.cache_helpers.write_json_atomic(plugin_api.cache_helpers.latest_with_history_path(), old_with_history)
+
+    new_raw = _raw_snapshot(new_time)
+    new_raw["accounts"][0]["windows"][0]["used_percent"] = 45
+    current_latest = plugin_api.normalize_snapshot(new_raw, now=new_time, previous=old_snapshot)
+    current_latest["collector_status"] = "fresh"
+    plugin_api.cache_helpers.write_json_atomic(plugin_api.cache_helpers.latest_path(), current_latest)
+
+    plugin_api._SNAPSHOT_CACHE = None
+    snapshot = plugin_api.build_snapshot(history_points=20)
+
+    assert snapshot["generated_at"] == current_latest["generated_at"]
+    assert snapshot["accounts"][0]["windows"]["five_hour"]["remaining_percent"] == 55.0
+    assert "long_history" in snapshot["accounts"][0]["windows"]["five_hour"]
+    assert snapshot["history_contract"]
 
 
 def test_history_writes_sanitized_jsonl_and_downsampling_keeps_first_last(plugin_api, tmp_path):

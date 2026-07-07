@@ -17,12 +17,14 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -1074,6 +1076,107 @@ def _rewrite_history(path: Path, rows: list[dict[str, Any]]) -> None:
     tmp_path.replace(path)
 
 
+def append_history_row(
+    snapshot: dict[str, Any],
+    path: Path | None = None,
+    *,
+    now: Any = None,
+) -> dict[str, Any]:
+    """Append one compact sanitized history row without pruning the full file."""
+    path = path or history_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = _history_row_from_snapshot(snapshot)
+    row_dt = parse_dt(row.get("generated_at")) or parse_dt(now) or _utcnow()
+    row["generated_at"] = _iso(row_dt)
+    row = sanitize(row)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    return row
+
+
+def load_recent_history_rows(
+    path: Path | None = None,
+    *,
+    now: Any = None,
+    seconds: int = cache_helpers.HISTORY_RECENT_SECONDS,
+    limit: int = cache_helpers.HISTORY_RECENT_MAX_ROWS,
+) -> list[dict[str, Any]]:
+    """Read a bounded recent tail from JSONL history for active-account detection.
+
+    This deliberately reads only the end of the JSONL file.  The collector calls
+    it every 15 seconds, so scanning a multi-megabyte history file would recreate
+    the CPU problem this fast path is meant to avoid.
+    """
+    path = path or history_path()
+    now_dt = parse_dt(now) or _utcnow()
+    cutoff = now_dt - timedelta(seconds=max(0, int(seconds)))
+    max_rows = max(1, int(limit))
+    tail: deque[dict[str, Any]] = deque(maxlen=max_rows)
+    if not path.exists():
+        return []
+
+    tail_bytes = max(256 * 1024, min(4 * 1024 * 1024, max_rows * 4096))
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            start = max(0, size - tail_bytes)
+            handle.seek(start)
+            data = handle.read()
+    except OSError:
+        return []
+
+    text = data.decode("utf-8", errors="ignore")
+    lines = text.splitlines()
+    if start > 0 and lines:
+        # Drop the first fragment because the seek may have landed mid-row.
+        lines = lines[1:]
+
+    for line in lines:
+        text_line = line.strip()
+        if not text_line:
+            continue
+        try:
+            row = sanitize(json.loads(text_line))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        row_dt = parse_dt(row.get("generated_at"))
+        if row_dt is None or row_dt < cutoff:
+            continue
+        row["generated_at"] = _iso(row_dt)
+        tail.append(row)
+
+    rows = list(tail)
+    rows.sort(key=lambda item: parse_dt(item.get("generated_at")) or datetime.min.replace(tzinfo=timezone.utc))
+    return rows
+
+
+def history_maintenance_status() -> dict[str, Any]:
+    return cache_helpers.read_json_file(cache_helpers.history_maintenance_path()) or {}
+
+
+def history_prune_due(now: Any = None) -> bool:
+    now_dt = parse_dt(now) or _utcnow()
+    status = history_maintenance_status()
+    last = parse_dt(status.get("last_pruned_at"))
+    if last is None:
+        return True
+    return (now_dt - last).total_seconds() >= cache_helpers.HISTORY_PRUNE_INTERVAL_SECONDS
+
+
+def mark_history_pruned(now: Any = None, *, rows: int | None = None) -> None:
+    now_dt = parse_dt(now) or _utcnow()
+    payload: dict[str, Any] = {
+        "schema_version": cache_helpers.SCHEMA_VERSION,
+        "last_pruned_at": _iso(now_dt),
+    }
+    if rows is not None:
+        payload["last_pruned_rows"] = rows
+    cache_helpers.write_json_atomic(cache_helpers.history_maintenance_path(), payload)
+
+
 def append_history_snapshot(
     snapshot: dict[str, Any],
     path: Path | None = None,
@@ -1082,10 +1185,7 @@ def append_history_snapshot(
 ) -> list[dict[str, Any]]:
     """Append one compact sanitized snapshot row and return pruned history."""
     path = path or history_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    row = _history_row_from_snapshot(snapshot)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    append_history_row(snapshot, path=path, now=now)
     return load_history_rows(path, now=now, prune=True)
 
 
@@ -1394,7 +1494,12 @@ def _short_error(text: str, limit: int = 700) -> str:
     return clean
 
 
-def run_wrapper_json_command(subcommand: str, noun: str) -> tuple[Any | None, dict[str, Any]]:
+def run_wrapper_json_command(
+    subcommand: str,
+    noun: str,
+    *,
+    background_no_log: bool = True,
+) -> tuple[Any | None, dict[str, Any]]:
     """Invoke the first available husage/hermes-codex-accounts JSON command."""
     binaries = ("husage", "hermes-codex-accounts")
     arg_orders = (["--json", subcommand], [subcommand, "--json"])
@@ -1410,7 +1515,13 @@ def run_wrapper_json_command(subcommand: str, noun: str) -> tuple[Any | None, di
         found_binary = True
         for args in arg_orders:
             command = [binary, *args]
-            last_command = _command_string(binary, args)
+            if background_no_log:
+                command.append("--no-log")
+            last_command = _command_string(binary, command[1:])
+            env = None
+            if background_no_log:
+                env = dict(os.environ)
+                env["CODEX_USAGE_APPEND_LOG"] = "0"
             try:
                 completed = subprocess.run(
                     command,
@@ -1418,6 +1529,7 @@ def run_wrapper_json_command(subcommand: str, noun: str) -> tuple[Any | None, di
                     text=True,
                     timeout=COMMAND_TIMEOUT_SECONDS,
                     check=False,
+                    env=env,
                 )
             except FileNotFoundError:
                 missing.append(binary)
@@ -1455,12 +1567,12 @@ def run_wrapper_json_command(subcommand: str, noun: str) -> tuple[Any | None, di
 
 def run_usage_command() -> tuple[Any | None, dict[str, Any]]:
     """Invoke the first available Codex OAuth usage wrapper."""
-    return run_wrapper_json_command("usage", "usage")
+    return run_wrapper_json_command("usage", "usage", background_no_log=True)
 
 
 def run_reset_credits_command() -> tuple[Any | None, dict[str, Any]]:
     """Invoke the first available Codex reset-credit wrapper command."""
-    return run_wrapper_json_command("resets", "reset credits")
+    return run_wrapper_json_command("resets", "reset credits", background_no_log=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1517,6 +1629,45 @@ def _with_runtime_fields(
     return sanitize(snapshot)
 
 
+def _merge_cached_long_history(
+    current_snapshot: dict[str, Any],
+    long_history_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Attach older long-history/chart fields to the current fast-path snapshot."""
+    if not isinstance(long_history_snapshot, dict):
+        return current_snapshot
+    merged = copy.deepcopy(current_snapshot)
+    if long_history_snapshot.get("history_contract"):
+        merged["history_contract"] = copy.deepcopy(long_history_snapshot.get("history_contract"))
+
+    raw_current_accounts = merged.get("accounts")
+    current_accounts = raw_current_accounts if isinstance(raw_current_accounts, list) else []
+    raw_old_accounts = long_history_snapshot.get("accounts")
+    old_accounts = raw_old_accounts if isinstance(raw_old_accounts, list) else []
+    old_by_id = {str(account.get("id") or ""): account for account in old_accounts if isinstance(account, dict)}
+
+    for account in current_accounts:
+        if not isinstance(account, dict):
+            continue
+        old_account = old_by_id.get(str(account.get("id") or ""))
+        if not isinstance(old_account, dict):
+            continue
+        raw_windows = account.get("windows")
+        windows = raw_windows if isinstance(raw_windows, dict) else {}
+        raw_old_windows = old_account.get("windows")
+        old_windows = raw_old_windows if isinstance(raw_old_windows, dict) else {}
+        for key, window in windows.items():
+            if not isinstance(window, dict):
+                continue
+            old_window = old_windows.get(key)
+            if not isinstance(old_window, dict):
+                continue
+            for history_key in ("long_history", "history"):
+                if history_key in old_window and history_key not in window:
+                    window[history_key] = copy.deepcopy(old_window[history_key])
+    return merged
+
+
 def _collector_deps() -> dict[str, Any]:
     return {
         "normalize_snapshot": normalize_snapshot,
@@ -1525,7 +1676,11 @@ def _collector_deps() -> dict[str, Any]:
         "run_usage_command": run_usage_command,
         "run_reset_credits_command": run_reset_credits_command,
         "append_history_snapshot": append_history_snapshot,
+        "append_history_row": append_history_row,
         "load_history_rows": load_history_rows,
+        "load_recent_history_rows": load_recent_history_rows,
+        "history_prune_due": history_prune_due,
+        "mark_history_pruned": mark_history_pruned,
         "attach_history_to_accounts": _attach_history_to_accounts,
     }
 
@@ -1588,7 +1743,11 @@ def build_snapshot(history_points: int = 240, force: bool = False) -> dict[str, 
     global _SNAPSHOT_CACHE
     with _CACHE_LOCK:
         if force:
-            base_snapshot = collector_core.collect_once(deps=_collector_deps(), now=now_dt)
+            base_snapshot = collector_core.collect_once(
+                deps=_collector_deps(),
+                now=now_dt,
+                force_reset_credits=True,
+            )
             _SNAPSHOT_CACHE = {
                 "monotonic": monotonic_now,
                 "snapshot": copy.deepcopy(base_snapshot),
@@ -1613,11 +1772,16 @@ def build_snapshot(history_points: int = 240, force: bool = False) -> dict[str, 
                 history_rows=None,
             )
 
-        base_snapshot = cache_helpers.read_json_file(cache_helpers.latest_with_history_path())
-        if not base_snapshot:
-            base_snapshot = _warming_snapshot(now_dt)
+        current_snapshot = cache_helpers.read_json_file(cache_helpers.latest_path())
+        long_history_snapshot = cache_helpers.read_json_file(cache_helpers.latest_with_history_path())
+        if current_snapshot:
+            base_snapshot = _merge_cached_long_history(current_snapshot, long_history_snapshot)
+            base_snapshot.update(_collector_metadata(now_dt, current_snapshot))
+        elif long_history_snapshot:
+            base_snapshot = long_history_snapshot
+            base_snapshot.update(_collector_metadata(now_dt, long_history_snapshot))
         else:
-            base_snapshot.update(_collector_metadata(now_dt, base_snapshot))
+            base_snapshot = _warming_snapshot(now_dt)
 
         _SNAPSHOT_CACHE = {
             "monotonic": monotonic_now,
@@ -1634,7 +1798,11 @@ def build_snapshot(history_points: int = 240, force: bool = False) -> dict[str, 
 
 def refresh_snapshot() -> dict[str, Any]:
     now_dt = _utcnow()
-    base_snapshot = collector_core.collect_once(deps=_collector_deps(), now=now_dt)
+    base_snapshot = collector_core.collect_once(
+        deps=_collector_deps(),
+        now=now_dt,
+        force_reset_credits=True,
+    )
     global _SNAPSHOT_CACHE
     _SNAPSHOT_CACHE = {"monotonic": time.monotonic(), "snapshot": copy.deepcopy(base_snapshot)}
     return _with_runtime_fields(
