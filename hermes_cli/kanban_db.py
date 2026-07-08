@@ -6870,6 +6870,7 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    openbrain_runner_factory=None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -6904,6 +6905,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            openbrain_runner_factory=openbrain_runner_factory,
         )
     with _dispatch_tick_lock(db_path) as held:
         if not held:
@@ -6920,6 +6922,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            openbrain_runner_factory=openbrain_runner_factory,
         )
 
 
@@ -6936,6 +6939,7 @@ def _dispatch_once_locked(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    openbrain_runner_factory=None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -7010,7 +7014,7 @@ def _dispatch_once_locked(
         )
 
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT * FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -7112,6 +7116,28 @@ def _dispatch_once_locked(
             else:
                 result.skipped_unassigned.append(row["id"])
                 continue
+        # OpenBrain workflow cards are special: plan-only cards must never fall
+        # through to a generic Hermes worker, and executable cards are handled by
+        # WorkflowStepSupervisor after claim. This keeps live imports/model work
+        # behind explicit execute modes.
+        _openbrain_row_task = Task.from_row(row)
+        _openbrain_execute_mode = None
+        try:
+            from hermes_cli.openbrain_workflow_supervisor import execute_mode_for_task, is_openbrain_workflow_task
+            if is_openbrain_workflow_task(_openbrain_row_task):
+                _openbrain_execute_mode = execute_mode_for_task(_openbrain_row_task)
+                if _openbrain_execute_mode == "plan-only":
+                    result.respawn_guarded.append((row["id"], "openbrain_plan_only"))
+                    if not dry_run:
+                        with write_txn(conn):
+                            _append_event(
+                                conn, row["id"], "respawn_guarded",
+                                {"reason": "openbrain_plan_only"},
+                            )
+                    continue
+        except Exception:
+            _openbrain_execute_mode = None
+
         # Skip ready tasks whose assignee is not a real Hermes profile.
         # `_default_spawn` invokes ``hermes -p <assignee>`` which fails
         # with "Profile 'X' does not exist" when the assignee names a
@@ -7126,7 +7152,11 @@ def _dispatch_once_locked(
             from hermes_cli.profiles import profile_exists  # local import: avoids cycle
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row_assignee):
+        if (
+            profile_exists is not None
+            and not profile_exists(row_assignee)
+            and _openbrain_execute_mode != "dry-run-execute"
+        ):
             # Bucket separately from skipped_unassigned: the operator
             # cannot fix this by assigning a profile (the assignee IS the
             # intended owner — a terminal lane). Health telemetry uses
@@ -7202,6 +7232,33 @@ def _dispatch_once_locked(
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        try:
+            from hermes_cli.openbrain_workflow_supervisor import execute_mode_for_task, is_openbrain_workflow_task, run_openbrain_step_task
+            if is_openbrain_workflow_task(claimed):
+                _mode = _openbrain_execute_mode or execute_mode_for_task(claimed)  # type: ignore[name-defined]
+                if _mode in {"dry-run-execute", "production-execute", "production-import"}:
+                    run_openbrain_step_task(
+                        conn,
+                        claimed,
+                        board=board,
+                        runner_factory=openbrain_runner_factory,
+                        execute_mode=_mode,
+                    )
+                    result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
+                    spawned += 1
+                    if _per_profile_cap is not None and claimed.assignee:
+                        _per_profile_running[claimed.assignee] = (
+                            _per_profile_running.get(claimed.assignee, 0) + 1
+                        )
+                    continue
+        except Exception as exc:
+            auto = _record_spawn_failure(
+                conn, claimed.id, f"openbrain supervisor: {str(exc)[:500]}",
+                failure_limit=failure_limit,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
+            continue
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only

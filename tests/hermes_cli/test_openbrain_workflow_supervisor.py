@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
 from hermes_cli.openbrain_workflow_supervisor import (
+    ChildRunResult,
+    StepAdapter,
     WorkflowStepSupervisor,
     build_fresh_session_adapter,
     parse_step_handoff,
@@ -91,3 +94,58 @@ def test_supervisor_blocks_missing_entrypoint(hermes_home):
     ).run()
     assert result.status == "blocked"
     assert "entrypoint not configured" in (result.block_reason or "")
+
+
+class MismatchedInputRunner:
+    def run(
+        self,
+        adapter: StepAdapter,
+        *,
+        timeout_seconds: float | None = None,
+        heartbeat_callback: Callable[[str], None] | None = None,
+        heartbeat_interval_seconds: float = 0,
+        poll_interval_seconds: float = 0,
+    ) -> ChildRunResult:
+        pointer = Path(adapter.receipt_pointer_path)
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        receipt_target = pointer.parent / "receipt.json"
+        receipt_target.write_text("{}", encoding="utf-8")
+        pointer.write_text(json.dumps({
+            "workflow_run_id": adapter.workflow_run_id,
+            "step_key": adapter.step_key,
+            "source_unit_id": adapter.source_unit_id,
+            "input_candidate_ids": ["wrong-input"],
+            "candidate_ids": ["output-1"],
+            "receipt_path": str(receipt_target),
+            "dashboard_verification": {"ok": True},
+        }), encoding="utf-8")
+        return ChildRunResult(exit_code=0, stdout="{}", stderr="", timed_out=False)
+
+
+def test_supervisor_blocks_receipt_input_candidate_mismatch(hermes_home):
+    root = hermes_home / "openbrain-workflow-runs" / "obwf_test" / "steps" / "thought_enrichment"
+    root.mkdir(parents=True)
+    adapter = StepAdapter(
+        step_key="thought_enrichment",
+        command=[],
+        prompt_path=str(root / "prompt.md"),
+        status_path=str(root.parent.parent / "status.json"),
+        events_path=str(root.parent.parent / "events.jsonl"),
+        receipt_pointer_path=str(root / "receipt-pointer.json"),
+        workflow_run_id="obwf_test",
+        source_unit_id="source-a",
+        input_candidate_ids=["expected-input"],
+    )
+
+    result = WorkflowStepSupervisor(
+        workflow_run_id="obwf_test",
+        step_key="thought_enrichment",
+        task_id="t1",
+        adapter=adapter,
+        runner=MismatchedInputRunner(),
+        source_unit_id="source-a",
+    ).run()
+
+    assert result.status == "blocked"
+    assert "candidate" in (result.block_reason or "")
+    assert "mismatch" in (result.block_reason or "")

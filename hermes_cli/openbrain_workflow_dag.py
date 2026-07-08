@@ -13,6 +13,7 @@ from hermes_cli.openbrain_workflow_artifacts import (
     append_event,
     dashboard_summary_path,
     events_path,
+    read_status,
     status_path,
     validate_workflow_run_id,
     write_dashboard_summary,
@@ -20,6 +21,7 @@ from hermes_cli.openbrain_workflow_artifacts import (
 )
 from hermes_cli.openbrain_workflow_contracts import (
     BranchMode,
+    ExecuteMode,
     StepStatus,
     WorkflowEvent,
     WorkflowStatus,
@@ -133,12 +135,21 @@ def generate_workflow_run_id(source_unit_id: str, *, now: datetime | None = None
     return f"obwf_{timestamp}_{slug}_{digest}"
 
 
+def _existing_task_id(conn, idempotency_key: str) -> str | None:
+    row = conn.execute(
+        "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' ORDER BY created_at DESC LIMIT 1",
+        (idempotency_key,),
+    ).fetchone()
+    return row["id"] if row else None
+
+
 def format_step_body(
     spec: WorkflowStepSpec,
     *,
     workflow_run_id: str,
     source_unit_id: str,
     source_folder: str,
+    execute_mode: ExecuteMode = "plan-only",
     producer_steps: tuple[str, ...] = (),
     candidate_ids: tuple[str, ...] = (),
     prior_receipt_path: str | None = None,
@@ -153,6 +164,7 @@ workflow_run_id: {workflow_run_id}
 source_unit_id: {source_unit_id}
 source_folder_display: {safe_folder}
 source_folder_path: {source_folder_path}
+execute_mode: {execute_mode}
 step_key: {spec.key}
 producer_steps: {','.join(producer_steps)}
 input_candidate_ids: {','.join(candidate_ids)}
@@ -182,6 +194,7 @@ def create_openbrain_workflow_cards(
     board: str | None = None,
     source_title: str | None = None,
     approval_gate: bool = True,
+    execute_mode: ExecuteMode = "plan-only",
     tenant: str = "openbrain",
     conn=None,
 ) -> CreatedWorkflowCards:
@@ -204,17 +217,20 @@ def create_openbrain_workflow_cards(
             f"source_unit_id: {source_unit_id}\n"
             f"source_folder_display: {redact_workflow_text(Path(source_folder).name or source_folder, max_length=200)}\n"
             f"source_folder_path: {source_folder}\n"
+            f"execute_mode: {execute_mode}\n"
             f"mode: {mode}\n"
             f"status_artifact: {status_path(workflow_run_id)}\n"
             f"workflow_events: {events_path(workflow_run_id)}\n"
         )
+        root_key = f"openbrain:{workflow_run_id}:root"
+        root_existing = _existing_task_id(conn, root_key)
         root_task_id = kb.create_task(
             conn,
             title=f"OpenBrain workflow: {source_title or source_unit_id}",
             body=root_body,
             assignee=assignee,
             tenant=tenant,
-            idempotency_key=f"openbrain:{workflow_run_id}:root",
+            idempotency_key=root_key,
             workflow_template_id=WORKFLOW_TEMPLATE_ID,
             current_step_key="root",
             board=board,
@@ -229,11 +245,14 @@ def create_openbrain_workflow_cards(
             )
 
         step_task_ids: dict[str, str] = {}
+        step_created_new: dict[str, bool] = {}
         steps = build_source_workflow_steps(mode, approval_gate=approval_gate)
         for spec in steps:
             parent_keys = spec.parents or ("root",)
             parents = [root_task_id if key == "root" else step_task_ids[key] for key in parent_keys]
             initial_status = "blocked" if spec.key == "human_review" else "running"
+            step_key_idem = f"openbrain:{workflow_run_id}:{spec.key}"
+            step_existing = _existing_task_id(conn, step_key_idem)
             task_id = kb.create_task(
                 conn,
                 title=f"OpenBrain {spec.label}: {source_title or source_unit_id}",
@@ -242,19 +261,20 @@ def create_openbrain_workflow_cards(
                     workflow_run_id=workflow_run_id,
                     source_unit_id=source_unit_id,
                     source_folder=source_folder,
+                    execute_mode=execute_mode,
                     producer_steps=tuple(spec.parents),
                 ),
                 assignee=assignee,
                 parents=parents,
                 tenant=tenant,
-                idempotency_key=f"openbrain:{workflow_run_id}:{spec.key}",
+                idempotency_key=step_key_idem,
                 workflow_template_id=WORKFLOW_TEMPLATE_ID,
                 current_step_key=spec.key,
                 skills=[spec.required_skill] if spec.required_skill else None,
                 initial_status=initial_status,
                 board=board,
             )
-            if spec.key == "human_review":
+            if spec.key == "human_review" and step_existing is None:
                 # ``initial_status='blocked'`` parks the card, but recompute_ready()
                 # only treats an explicit ``blocked`` event as a sticky human gate.
                 # Add that event at creation so the review gate cannot auto-promote
@@ -266,6 +286,7 @@ def create_openbrain_workflow_cards(
                     {"reason": "review-required: approve before CortexDB import", "kind": "needs_input"},
                 )
             step_task_ids[spec.key] = task_id
+            step_created_new[spec.key] = step_existing is None
 
         now = utc_now_iso()
         root_ready_keys = [spec.key for spec in steps if not spec.parents]
@@ -283,44 +304,50 @@ def create_openbrain_workflow_cards(
             )
             for key, task_id in step_task_ids.items()
         }
-        workflow_status = WorkflowStatus(
-            workflow_run_id=workflow_run_id,
-            source_unit_id=source_unit_id,
-            source_title=source_title,
-            source_folder=source_folder,
-            branch_mode=mode,
-            active_step=first_step_key,
-            active_task_id=first_task_id,
-            status="running",
-            started_at=now,
-            updated_at=now,
-            last_heartbeat_at=now,
-            steps=step_statuses,
-        )
-        write_status(workflow_status)
-        write_dashboard_summary(workflow_status)
-        append_event(
-            WorkflowEvent(
+        existing_status = read_status(workflow_run_id)
+        if existing_status is None:
+            workflow_status = WorkflowStatus(
                 workflow_run_id=workflow_run_id,
                 source_unit_id=source_unit_id,
-                event_type="workflow_started",
-                created_at=now,
-                task_id=root_task_id,
-                message=f"OpenBrain workflow started in {mode} mode.",
+                source_title=source_title,
+                source_folder=source_folder,
+                branch_mode=mode,
+                execute_mode=execute_mode,
+                active_step=first_step_key,
+                active_task_id=first_task_id,
+                status="running",
+                started_at=now,
+                updated_at=now,
+                last_heartbeat_at=now,
+                steps=step_statuses,
             )
-        )
-        append_event(
-            WorkflowEvent(
-                workflow_run_id=workflow_run_id,
-                source_unit_id=source_unit_id,
-                event_type="task_created",
-                created_at=now,
-                step_key="root",
-                task_id=root_task_id,
-                message="Root workflow card created.",
+            write_status(workflow_status)
+            write_dashboard_summary(workflow_status)
+            append_event(
+                WorkflowEvent(
+                    workflow_run_id=workflow_run_id,
+                    source_unit_id=source_unit_id,
+                    event_type="workflow_started",
+                    created_at=now,
+                    task_id=root_task_id,
+                    message=f"OpenBrain workflow started in {mode} mode.",
+                )
             )
-        )
+        if root_existing is None:
+            append_event(
+                WorkflowEvent(
+                    workflow_run_id=workflow_run_id,
+                    source_unit_id=source_unit_id,
+                    event_type="task_created",
+                    created_at=now,
+                    step_key="root",
+                    task_id=root_task_id,
+                    message="Root workflow card created.",
+                )
+            )
         for step_key, task_id in step_task_ids.items():
+            if not step_created_new.get(step_key):
+                continue
             append_event(
                 WorkflowEvent(
                     workflow_run_id=workflow_run_id,

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 WorkflowStatusName = Literal["planned", "running", "blocked", "failed", "done", "stale"]
 StepRuntimeStatus = Literal["pending", "ready", "planned", "running", "blocked", "failed", "done", "stale"]
+ExecuteMode = Literal["plan-only", "dry-run-execute", "production-execute", "production-import"]
 WorkflowEventType = Literal[
     "workflow_started",
     "task_created",
@@ -43,6 +44,8 @@ _WIN_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s\"'<>]+")
 _POSIX_PRIVATE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_])/(?:mnt|home|Users|private|var|tmp)/(?:[^\s\"'<>]+)"
 )
+_FIXTURE_SENTINEL_RE = re.compile(r"\b[A-Z0-9_]*SECRET[A-Z0-9_]*\b")
+_TRANSCRIPT_SENTINEL_RE = re.compile(r"(?i)\b(fake transcript paragraph|raw transcript|transcript paragraph)\b[^.!?]*(?:[.!?]|$)")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
@@ -77,6 +80,8 @@ def redact_workflow_text(value: Any, *, max_length: int = 500) -> str:
     text = _BEARER_RE.sub("Bearer [redacted]", text)
     text = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}=[redacted]", text)
     text = _OPENAI_KEY_RE.sub("[redacted-key]", text)
+    text = _FIXTURE_SENTINEL_RE.sub("[redacted-secret]", text)
+    text = _TRANSCRIPT_SENTINEL_RE.sub("[redacted-transcript]", text)
     text = _URL_RE.sub("[url]", text)
     text = _UNC_RE.sub("[path]", text)
     text = _WIN_PATH_RE.sub("[path]", text)
@@ -158,6 +163,7 @@ class WorkflowStatus(BaseModel):
     source_title: str | None = Field(default=None, max_length=160)
     source_folder: str | None = Field(default=None, max_length=260)
     branch_mode: BranchMode | None = None
+    execute_mode: ExecuteMode = "plan-only"
     active_step: str | None = None
     active_task_id: str | None = None
     worker_session_id: str | None = None
