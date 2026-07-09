@@ -157,6 +157,33 @@ _CARD_SUMMARY_PREVIEW_CHARS = 200
 _WORKFLOW_RUN_RE = re.compile(r"workflow_run_id:\s*([A-Za-z0-9_.-]+)|obwf=([A-Za-z0-9_.-]+)")
 
 
+def _redact_openbrain_workflow_text(value: Any, *, max_length: int = 500) -> str:
+    """Sanitize OpenBrain workflow strings before they reach dashboard payloads."""
+
+    try:
+        from hermes_cli.openbrain_workflow_contracts import redact_workflow_text
+    except Exception:
+        text = str(value or "")
+        return text[:max_length]
+    return redact_workflow_text(value, max_length=max_length)
+
+
+def _sanitize_openbrain_workflow_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_openbrain_workflow_text(value)
+    if isinstance(value, list):
+        return [_sanitize_openbrain_workflow_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_openbrain_workflow_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_openbrain_workflow_payload(item) for key, item in value.items()}
+    return value
+
+
+def _is_openbrain_workflow_task(task: kanban_db.Task) -> bool:
+    return bool(task.workflow_template_id or task.current_step_key)
+
+
 def _workflow_run_id_from_text(*values: object) -> Optional[str]:
     for value in values:
         if not value:
@@ -224,6 +251,7 @@ def _task_dict(
     active_run_elapsed_seconds: Optional[int] = None,
 ) -> dict[str, Any]:
     d = asdict(task)
+    is_workflow_task = _is_openbrain_workflow_task(task)
     # Add derived age metrics so the UI can colour stale cards without
     # computing deltas client-side.
     try:
@@ -234,7 +262,15 @@ def _task_dict(
     # blank cards/drawers for tasks where the worker handed off via
     # ``task_runs.summary`` (the kanban-worker pattern) instead of
     # ``tasks.result``. ``None`` when no run has produced a summary yet.
-    d["latest_summary"] = latest_summary
+    d["latest_summary"] = (
+        _redact_openbrain_workflow_text(latest_summary, max_length=1200)
+        if is_workflow_task and latest_summary is not None
+        else latest_summary
+    )
+    if is_workflow_task:
+        for key in ("body", "result", "block_reason", "last_failure_error"):
+            if d.get(key):
+                d[key] = _redact_openbrain_workflow_text(d[key], max_length=2000)
     if task.workflow_template_id or task.current_step_key:
         d["workflow"] = {
             "template_id": task.workflow_template_id,
@@ -242,19 +278,26 @@ def _task_dict(
             "run_id": _workflow_run_id_from_text(task.body, latest_summary, task.result),
         }
     if latest_heartbeat_note:
-        d["latest_heartbeat_note"] = latest_heartbeat_note
+        d["latest_heartbeat_note"] = (
+            _redact_openbrain_workflow_text(latest_heartbeat_note, max_length=500)
+            if is_workflow_task
+            else latest_heartbeat_note
+        )
     if active_run_elapsed_seconds is not None:
         d["active_run_elapsed_seconds"] = active_run_elapsed_seconds
     # Keep body short on list endpoints; full body comes from /tasks/:id.
     return d
 
 
-def _event_dict(event: kanban_db.Event) -> dict[str, Any]:
+def _event_dict(event: kanban_db.Event, *, sanitize_workflow: bool = False) -> dict[str, Any]:
+    payload = event.payload
+    if sanitize_workflow:
+        payload = _sanitize_openbrain_workflow_payload(payload)
     return {
         "id": event.id,
         "task_id": event.task_id,
         "kind": event.kind,
-        "payload": event.payload,
+        "payload": payload,
         "created_at": event.created_at,
         "run_id": event.run_id,
     }
@@ -285,8 +328,15 @@ def _attachment_dict(a: kanban_db.Attachment) -> dict[str, Any]:
     }
 
 
-def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
+def _run_dict(r: kanban_db.Run, *, sanitize_workflow: bool = False) -> dict[str, Any]:
     """Serialise a Run for the drawer's Run history section."""
+    summary = r.summary
+    metadata = r.metadata
+    error = r.error
+    if sanitize_workflow:
+        summary = _sanitize_openbrain_workflow_payload(summary)
+        metadata = _sanitize_openbrain_workflow_payload(metadata)
+        error = _sanitize_openbrain_workflow_payload(error)
     return {
         "id": r.id,
         "task_id": r.task_id,
@@ -301,9 +351,9 @@ def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
         "started_at": r.started_at,
         "ended_at": r.ended_at,
         "outcome": r.outcome,
-        "summary": r.summary,
-        "metadata": r.metadata,
-        "error": r.error,
+        "summary": summary,
+        "metadata": metadata,
+        "error": error,
     }
 
 
@@ -641,14 +691,18 @@ def get_task(
         if diag_list:
             task_d["diagnostics"] = diag_list
             task_d["warnings"] = _warnings_summary_from_diagnostics(diag_list)
+        is_workflow_task = _is_openbrain_workflow_task(task)
         return {
             "task": task_d,
             "comments": [_comment_dict(c) for c in kanban_db.list_comments(conn, task_id)],
-            "events": [_event_dict(e) for e in kanban_db.list_events(conn, task_id)],
+            "events": [
+                _event_dict(e, sanitize_workflow=is_workflow_task)
+                for e in kanban_db.list_events(conn, task_id)
+            ],
             "attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)],
             "links": _links_for(conn, task_id),
             "runs": [
-                _run_dict(r)
+                _run_dict(r, sanitize_workflow=is_workflow_task)
                 for r in kanban_db.list_runs(
                     conn,
                     task_id,
@@ -2504,6 +2558,23 @@ async def stream_events(ws: WebSocket):
                     "FROM task_events WHERE id > ? ORDER BY id ASC LIMIT 200",
                     (cursor_val,),
                 ).fetchall()
+                workflow_task_ids: set[str] = set()
+                task_ids = sorted({str(r["task_id"]) for r in rows if r["task_id"]})
+                if task_ids:
+                    placeholders = ",".join("?" for _ in task_ids)
+                    task_rows = conn.execute(
+                        f"""
+                        SELECT id, workflow_template_id, current_step_key
+                        FROM tasks
+                        WHERE id IN ({placeholders})
+                        """,
+                        tuple(task_ids),
+                    ).fetchall()
+                    workflow_task_ids = {
+                        str(t["id"])
+                        for t in task_rows
+                        if t["workflow_template_id"] or t["current_step_key"]
+                    }
                 out: list[dict] = []
                 new_cursor = cursor_val
                 for r in rows:
@@ -2511,6 +2582,8 @@ async def stream_events(ws: WebSocket):
                         payload = json.loads(r["payload"]) if r["payload"] else None
                     except Exception:
                         payload = None
+                    if r["task_id"] in workflow_task_ids:
+                        payload = _sanitize_openbrain_workflow_payload(payload)
                     out.append({
                         "id": r["id"],
                         "task_id": r["task_id"],

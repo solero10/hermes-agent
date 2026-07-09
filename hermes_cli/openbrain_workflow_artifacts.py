@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -123,25 +124,41 @@ def append_event(event: WorkflowEvent) -> Path:
     return path
 
 
-def read_events(workflow_run_id: str, *, after: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+def read_events(
+    workflow_run_id: str,
+    *,
+    after: int = 0,
+    limit: int = 200,
+    newest: bool = False,
+) -> list[dict[str, Any]]:
     path = events_path(workflow_run_id)
+    if limit <= 0:
+        return []
     out: list[dict[str, Any]] = []
+    recent: deque[dict[str, Any]] = deque(maxlen=limit)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        handle = path.open("r", encoding="utf-8")
     except OSError:
-        return out
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            payload = json.loads(line)
-            event = WorkflowEvent.model_validate(payload)
-        except Exception:
-            continue
-        if event.event_id and event.event_id > after:
-            out.append(event.model_dump(mode="json", exclude_none=True))
-            if len(out) >= limit:
-                break
+        return []
+    with handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+                event = WorkflowEvent.model_validate(payload)
+            except Exception:
+                continue
+            if event.event_id and event.event_id > after:
+                event_payload = event.model_dump(mode="json", exclude_none=True)
+                if newest:
+                    recent.append(event_payload)
+                else:
+                    out.append(event_payload)
+                    if len(out) >= limit:
+                        break
+    if newest:
+        return list(recent)
     return out
 
 
@@ -279,7 +296,7 @@ def dashboard_response(*, since_revision: str | None = None) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
     if changed or not since_revision:
         for status in statuses:
-            events.extend(read_events(status.workflow_run_id, after=0, limit=50))
+            events.extend(read_events(status.workflow_run_id, after=0, limit=50, newest=True))
         events.sort(key=lambda event: (event.get("created_at") or "", int(event.get("event_id") or 0)), reverse=True)
         events = events[:200]
     return WorkflowDashboardResponse(

@@ -8,6 +8,7 @@ REST surface without spinning up the whole dashboard.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -911,6 +912,65 @@ def test_ws_events_board_query_param_default_overrides_current_board_pointer(tmp
     task_ids = {event["task_id"] for event in payload["events"]}
     assert default_task in task_ids
     assert other_task not in task_ids
+
+
+def test_ws_events_sanitizes_openbrain_workflow_payloads(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+
+    unsafe = (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value"
+    )
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="OpenBrain websocket step",
+            body="workflow_run_id: obwf_ws_privacy\nstep_key: panning_for_gold",
+            assignee="default",
+            workflow_template_id="openbrain-source-v1",
+            current_step_key="panning_for_gold",
+        )
+        assert kb.claim_task(conn, task_id) is not None
+        assert kb.heartbeat_worker(
+            conn,
+            task_id,
+            note=f"obwf=obwf_ws_privacy step=panning_for_gold {unsafe}",
+        )
+    finally:
+        conn.close()
+
+    import hermes_cli
+    import types
+
+    stub = types.SimpleNamespace(
+        _SESSION_TOKEN="secret-xyz",
+        _ws_auth_ok=lambda ws: ws.query_params.get("token", "") == "secret-xyz",
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", stub)
+    monkeypatch.setattr(hermes_cli, "web_server", stub, raising=False)
+
+    app = FastAPI()
+    app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
+    c = TestClient(app)
+
+    with c.websocket_connect("/api/plugins/kanban/events?token=secret-xyz&since=0") as ws:
+        payload = ws.receive_json()
+
+    events = [event for event in payload["events"] if event["task_id"] == task_id]
+    heartbeat = next(event for event in events if event["kind"] == "heartbeat")
+    assert heartbeat["payload"]["note"].startswith("obwf=obwf_ws_privacy")
+    assert "[redacted-secret]" in heartbeat["payload"]["note"]
+
+    payload_text = json.dumps(payload, sort_keys=True)
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+    assert "raw transcript paragraph" not in payload_text
+    assert "/mnt/d/private" not in payload_text
+    assert "super-secret-value" not in payload_text
 
 
 def test_ws_events_swallows_cancellation_on_shutdown(tmp_path, monkeypatch):
@@ -2319,6 +2379,74 @@ def test_workflow_fields_surface_on_board_and_detail(client, kanban_home):
     detail = client.get(f"/api/plugins/kanban/tasks/{created['id']}").json()["task"]
     assert detail["workflow"]["step_key"] == "thought_enrichment"
     assert "progress=1/3" in detail["latest_heartbeat_note"]
+
+
+def test_openbrain_workflow_payloads_sanitize_heartbeat_block_events_and_runs(client, kanban_home):
+    unsafe = (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value"
+    )
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "OpenBrain stale step",
+            "body": "workflow_run_id: obwf_dashboard_privacy\nstep_key: panning_for_gold",
+            "assignee": "default",
+            "workflow_template_id": "openbrain-source-v1",
+            "current_step_key": "panning_for_gold",
+        },
+    ).json()["task"]
+
+    with kb.connect() as conn:
+        claimed = kb.claim_task(conn, created["id"])
+        assert claimed is not None
+        assert kb.heartbeat_worker(
+            conn,
+            created["id"],
+            note=f"obwf=obwf_dashboard_privacy step=panning_for_gold {unsafe}",
+        )
+        kb.block_task(conn, created["id"], reason=f"blocked after child crash {unsafe}", kind="transient")
+        conn.execute(
+            "UPDATE tasks SET result=?, last_failure_error=? WHERE id=?",
+            (f"blocked result {unsafe}", f"worker failed with {unsafe}", created["id"]),
+        )
+        conn.execute(
+            """
+            UPDATE task_runs
+            SET summary=?, error=?, metadata=?
+            WHERE task_id=?
+            """,
+            (
+                f"run summary {unsafe}",
+                f"run error {unsafe}",
+                json.dumps({"note": unsafe, "nested": {"path": "/mnt/d/private/OpenBrain/source.txt"}}),
+                created["id"],
+            ),
+        )
+
+    board = client.get("/api/plugins/kanban/board").json()
+    cards = [task for col in board["columns"] for task in col["tasks"]]
+    card = next(task for task in cards if task["id"] == created["id"])
+    assert card["workflow"] == {
+        "template_id": "openbrain-source-v1",
+        "step_key": "panning_for_gold",
+        "run_id": "obwf_dashboard_privacy",
+    }
+    assert "[redacted-secret]" in card["latest_heartbeat_note"]
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{created['id']}").json()
+    detail_task = detail["task"]
+    assert detail_task["status"] == "blocked"
+    assert detail_task["workflow"]["run_id"] == "obwf_dashboard_privacy"
+    assert "[redacted-secret]" in detail_task["result"]
+    assert "[redacted-secret]" in detail_task["last_failure_error"]
+
+    for payload in (board, detail):
+        payload_text = json.dumps(payload, sort_keys=True)
+        assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+        assert "raw transcript paragraph" not in payload_text
+        assert "/mnt/d/private" not in payload_text
+        assert "super-secret-value" not in payload_text
 
 
 def test_kanban_dashboard_bundle_contains_workflow_ui_hooks():

@@ -514,6 +514,36 @@ def evaluate_step_gate(
     return ReceiptGateResult(True, None, payload)
 
 
+def expected_input_candidate_ids_for_step(workflow_run_id: str, step_key: str) -> list[str]:
+    """Return upstream candidate IDs this step must acknowledge in its receipt.
+
+    The dispatcher path derives this from workflow artifacts, not live
+    OpenBrain/CortexDB state, so dry-run and production execution share the
+    same receipt-gate semantics.
+    """
+
+    status = read_status(workflow_run_id)
+    if status is None:
+        return []
+    upstream_steps = {
+        "thought_enrichment": ("panning_for_gold", "meeting_synthesis"),
+        "dedupe": ("thought_enrichment",),
+        "ready_cortexdb_import": ("dedupe",),
+    }.get(step_key, ())
+    candidate_ids: list[str] = []
+    seen: set[str] = set()
+    for upstream_key in upstream_steps:
+        step = status.steps.get(upstream_key)
+        if not step:
+            continue
+        for candidate_id in step.candidate_ids:
+            value = str(candidate_id)
+            if value and value not in seen:
+                seen.add(value)
+                candidate_ids.append(value)
+    return candidate_ids
+
+
 def _status_artifacts(workflow_run_id: str) -> StatusArtifacts:
     return StatusArtifacts(
         status_json=str(status_path(workflow_run_id)),
@@ -617,7 +647,14 @@ def _write_step_state(
         "completed_at": now if step_status == "done" else prev.completed_at,
         "blocked_or_error": blocked_or_error,
     })
-    workflow_state = "blocked" if step_status == "blocked" else "running"
+    if step_status == "blocked":
+        workflow_state = "blocked"
+    elif step_status == "failed":
+        workflow_state = "failed"
+    elif step_status == "stale":
+        workflow_state = "stale"
+    else:
+        workflow_state = "running"
     updated = status.model_copy(update={
         "execute_mode": execute_mode,
         "active_step": step_key,
@@ -626,7 +663,7 @@ def _write_step_state(
         "updated_at": now,
         "last_heartbeat_at": now if step_status == "running" else status.last_heartbeat_at,
         "receipt_path": receipt_path_value or status.receipt_path,
-        "blocked_or_error": blocked_or_error if step_status == "blocked" else None,
+        "blocked_or_error": blocked_or_error if step_status in {"blocked", "failed", "stale"} else None,
         "steps": steps,
     })
     write_status(updated)
@@ -779,6 +816,8 @@ class WorkflowStepSupervisor:
                 return self._block(gate.reason or "review-required", kind="needs_input")
         if self.step_key == "ready_cortexdb_import" and self.execute_mode != "production-import":
             return self._block("ready/import requires production-import mode and review approval", kind="needs_input")
+        if self.step_key == "ready_cortexdb_import" and not review_approved(self.workflow_run_id):
+            return self._block("ready/import requires review approval", kind="needs_input")
         if self.runner is None:
             return self._block(f"plan-only: {self.step_key} execution is disabled", kind="capability")
         if isinstance(self.runner, SubprocessChildRunner) and not self.adapter.command:
@@ -848,6 +887,52 @@ class WorkflowStepSupervisor:
         )
 
 
+def mark_interrupted_openbrain_task(
+    task: Any,
+    *,
+    step_status: str,
+    reason: str,
+) -> bool:
+    """Mirror Kanban reclaim/crash outcomes into OpenBrain workflow artifacts.
+
+    Generic Kanban reclaim/crash paths are still the source of truth for task
+    state. This helper only updates sanitized workflow artifacts so dashboards
+    do not show a reclaimed OpenBrain step as still running.
+    """
+
+    if not is_openbrain_workflow_task(task):
+        return False
+    if step_status not in {"stale", "failed", "blocked"}:
+        return False
+    workflow_run_id = extract_workflow_field(getattr(task, "body", None), "workflow_run_id") or ""
+    source_unit_id = extract_workflow_field(getattr(task, "body", None), "source_unit_id") or "unknown"
+    source_folder = extract_workflow_field(getattr(task, "body", None), "source_folder_path") or extract_workflow_field(getattr(task, "body", None), "source_folder")
+    step_key = getattr(task, "current_step_key", None) or extract_workflow_field(getattr(task, "body", None), "step_key") or ""
+    if not workflow_run_id or not step_key:
+        return False
+    safe_reason = redact_workflow_text(reason, max_length=500)
+    _write_step_state(
+        workflow_run_id=workflow_run_id,
+        step_key=step_key,
+        task_id=getattr(task, "id", ""),
+        source_unit_id=source_unit_id,
+        source_folder=source_folder,
+        execute_mode=execute_mode_for_task(task),
+        step_status=step_status,
+        blocked_or_error=safe_reason,
+    )
+    append_event(WorkflowEvent(
+        workflow_run_id=validate_workflow_run_id(workflow_run_id),
+        source_unit_id=source_unit_id,
+        step_key=step_key,
+        task_id=getattr(task, "id", None),
+        event_type="task_blocked",
+        created_at=utc_now_iso(),
+        message=safe_reason,
+    ))
+    return True
+
+
 def run_openbrain_step_task(
     conn: Any,
     task: Any,
@@ -879,6 +964,7 @@ def run_openbrain_step_task(
             workflow_run_id=workflow_run_id,
             source_unit_id=source_unit_id,
             source_folder=source_folder or "",
+            input_candidate_ids=expected_input_candidate_ids_for_step(workflow_run_id, step_key),
             assignee=getattr(task, "assignee", None),
             workspace=getattr(task, "workspace_path", None),
             execute_mode=mode,

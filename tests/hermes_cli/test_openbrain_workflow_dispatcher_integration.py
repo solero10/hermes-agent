@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli.openbrain_workflow_artifacts import read_events, read_status
 from hermes_cli.openbrain_workflow_dag import create_openbrain_workflow_cards
-from hermes_cli.openbrain_workflow_supervisor import ChildRunResult, StepAdapter
+from hermes_cli.openbrain_workflow_supervisor import ChildRunResult, StepAdapter, review_approval_path
 
 
 @pytest.fixture
@@ -26,6 +27,7 @@ class FakeRunner:
     def __init__(self, *, mode: str = "success") -> None:
         self.mode = mode
         self.calls: list[str] = []
+        self.adapters: list[StepAdapter] = []
 
     def run(
         self,
@@ -37,6 +39,7 @@ class FakeRunner:
         poll_interval_seconds=0,
     ) -> ChildRunResult:
         self.calls.append(adapter.step_key)
+        self.adapters.append(adapter)
         receipt = Path(adapter.receipt_pointer_path)
         receipt.parent.mkdir(parents=True, exist_ok=True)
         if heartbeat_callback:
@@ -50,17 +53,23 @@ class FakeRunner:
         if self.mode == "malformed_receipt":
             receipt.write_text("{not json", encoding="utf-8")
             return ChildRunResult(exit_code=0, stdout="{}", stderr="", timed_out=False)
-        receipt.write_text(
-            "{"
-            f'"workflow_run_id":"obwf_dispatch",'
-            f'"step_key":"{adapter.step_key}",'
-            '"source_unit_id":"source-a",'
-            f'"candidate_ids":["{adapter.step_key}-cand"],'
-            f'"receipt_path":"{receipt.parent / "receipt.json"}",'
-            '"dashboard_verification":{"ok":true,"visible_candidate_count":1}'
-            "}",
-            encoding="utf-8",
-        )
+        payload = {
+            "workflow_run_id": adapter.workflow_run_id,
+            "step_key": adapter.step_key,
+            "source_unit_id": "source-a",
+            "candidate_ids": [f"{adapter.step_key}-cand"],
+            "receipt_path": str(receipt.parent / "receipt.json"),
+            "dashboard_verification": {"ok": True, "visible_candidate_count": 1},
+        }
+        if adapter.input_candidate_ids:
+            payload["input_candidate_ids"] = ["wrong-input"] if self.mode == "wrong_input" else list(adapter.input_candidate_ids)
+        if self.mode in {"import_success", "missing_dashboard_verification"}:
+            import_receipt = receipt.parent / "import-receipt.json"
+            import_receipt.write_text(json.dumps({"imported": False, "synthetic": True}), encoding="utf-8")
+            payload["import_receipt_path"] = str(import_receipt)
+        if self.mode == "missing_dashboard_verification":
+            payload["dashboard_verification"] = {"ok": False}
+        receipt.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         (receipt.parent / "receipt.json").write_text("{}", encoding="utf-8")
         return ChildRunResult(exit_code=0, stdout="{}", stderr="", timed_out=False)
 
@@ -86,6 +95,41 @@ def _artifact_text(run_id: str) -> str:
     return "\n".join(pieces)
 
 
+def _complete_through_dedupe(conn, created):
+    runner = FakeRunner()
+    for _ in range(4):
+        kb.dispatch_once(
+            conn,
+            max_spawn=1,
+            openbrain_runner_factory=lambda task, execute_mode: runner,
+        )
+    panning = kb.get_task(conn, created.step_task_ids["panning_for_gold"])
+    enrichment = kb.get_task(conn, created.step_task_ids["thought_enrichment"])
+    dedupe = kb.get_task(conn, created.step_task_ids["dedupe"])
+    assert panning is not None
+    assert enrichment is not None
+    assert dedupe is not None
+    assert panning.status == "done"
+    assert enrichment.status == "done"
+    assert dedupe.status == "done"
+    return runner
+
+
+def _make_ready_import_dispatchable(conn, created, *, approved: bool) -> None:
+    if approved:
+        path = review_approval_path("obwf_dispatch")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"approved": True, "synthetic": True}), encoding="utf-8")
+    conn.execute(
+        "UPDATE tasks SET status = 'done' WHERE id = ?",
+        (created.step_task_ids["human_review"],),
+    )
+    kb.recompute_ready(conn)
+    ready_task = kb.get_task(conn, created.step_task_ids["ready_cortexdb_import"])
+    assert ready_task is not None
+    assert ready_task.status == "ready"
+
+
 def test_dispatcher_routes_openbrain_step_through_supervisor_fake_runner(kanban_home):
     runner = FakeRunner()
     with kb.connect() as conn:
@@ -108,6 +152,63 @@ def test_dispatcher_routes_openbrain_step_through_supervisor_fake_runner(kanban_
         assert status.steps["panning_for_gold"].status == "done"
         assert status.steps["panning_for_gold"].candidate_ids == ["panning_for_gold-cand"]
         assert any(event["event_type"] == "task_completed" for event in read_events("obwf_dispatch"))
+
+
+def test_dispatcher_threads_parent_candidate_ids_into_enrichment_adapter(kanban_home):
+    runner = FakeRunner()
+    with kb.connect() as conn:
+        created = _create(conn)
+
+        kb.dispatch_once(
+            conn,
+            max_spawn=1,
+            openbrain_runner_factory=lambda task, execute_mode: runner,
+        )
+        kb.dispatch_once(
+            conn,
+            max_spawn=1,
+            openbrain_runner_factory=lambda task, execute_mode: runner,
+        )
+
+        assert runner.calls == ["panning_for_gold", "thought_enrichment"]
+        assert runner.adapters[1].step_key == "thought_enrichment"
+        assert runner.adapters[1].input_candidate_ids == ["panning_for_gold-cand"]
+        task = kb.get_task(conn, created.step_task_ids["thought_enrichment"])
+        assert task is not None
+        assert task.status == "done"
+        status = read_status("obwf_dispatch")
+        assert status is not None
+        assert status.steps["thought_enrichment"].candidate_ids == ["thought_enrichment-cand"]
+
+
+def test_dispatcher_blocks_enrichment_receipt_with_mismatched_input_candidates(kanban_home):
+    first_runner = FakeRunner()
+    second_runner = FakeRunner(mode="wrong_input")
+    with kb.connect() as conn:
+        created = _create(conn)
+
+        kb.dispatch_once(
+            conn,
+            max_spawn=1,
+            openbrain_runner_factory=lambda task, execute_mode: first_runner,
+        )
+        kb.dispatch_once(
+            conn,
+            max_spawn=1,
+            openbrain_runner_factory=lambda task, execute_mode: second_runner,
+        )
+
+        assert second_runner.calls == ["thought_enrichment"]
+        assert second_runner.adapters[0].input_candidate_ids == ["panning_for_gold-cand"]
+        task = kb.get_task(conn, created.step_task_ids["thought_enrichment"])
+        assert task is not None
+        assert task.status == "blocked"
+        text = _artifact_text("obwf_dispatch")
+        assert "candidate mismatch" in text
+        downstream = kb.get_task(conn, created.step_task_ids["dedupe"])
+        assert downstream is not None
+        assert downstream.status == "todo"
+        assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in _artifact_text("obwf_dispatch")
 
 
 def test_dispatcher_blocks_missing_and_malformed_receipts(kanban_home):
@@ -201,6 +302,81 @@ def test_retry_after_transient_block_is_idempotent_and_can_complete(kanban_home)
         assert len([e for e in events if e["event_type"] == "task_completed" and e.get("step_key") == "panning_for_gold"]) == 1
 
 
+def test_stale_claim_reclaim_marks_openbrain_artifacts_and_retry_stays_idempotent(kanban_home):
+    with kb.connect() as conn:
+        created = _create(conn)
+        panning_id = created.step_task_ids["panning_for_gold"]
+        host = kb._claimer_id().split(":", 1)[0]
+        claimed = kb.claim_task(conn, panning_id, claimer=f"{host}:stale-openbrain")
+        assert claimed is not None
+        now = int(time.time())
+        conn.execute(
+            "UPDATE tasks SET claim_expires = ?, last_heartbeat_at = ? WHERE id = ?",
+            (
+                now - 60,
+                now - kb.DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS - 60,
+                panning_id,
+            ),
+        )
+
+        before_task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        before_link_count = conn.execute("SELECT COUNT(*) FROM task_links").fetchone()[0]
+        reclaimed = kb.release_stale_claims(conn, signal_fn=lambda _pid, _sig: None)
+
+        assert reclaimed == 1
+        task = kb.get_task(conn, panning_id)
+        assert task is not None
+        assert task.status == "ready"
+        status = read_status("obwf_dispatch")
+        assert status is not None
+        assert status.status == "stale"
+        assert status.steps["panning_for_gold"].status == "stale"
+        assert "stale" in (status.steps["panning_for_gold"].blocked_or_error or "")
+        assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in _artifact_text("obwf_dispatch")
+
+        runner = FakeRunner()
+        kb.dispatch_once(
+            conn,
+            max_spawn=1,
+            openbrain_runner_factory=lambda task, execute_mode: runner,
+        )
+
+        task = kb.get_task(conn, panning_id)
+        assert task is not None
+        assert task.status == "done"
+        assert runner.calls == ["panning_for_gold"]
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before_task_count
+        assert conn.execute("SELECT COUNT(*) FROM task_links").fetchone()[0] == before_link_count
+        events = read_events("obwf_dispatch")
+        assert len([e for e in events if e["event_type"] == "task_created"]) == 6
+        assert len([e for e in events if e["event_type"] == "task_completed" and e.get("step_key") == "panning_for_gold"]) == 1
+
+
+def test_detect_crashed_openbrain_worker_marks_artifacts_failed(kanban_home, monkeypatch):
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(kb, "_resolve_crash_grace_seconds", lambda: 0)
+    with kb.connect() as conn:
+        created = _create(conn, run_id="obwf_crash_reclaim")
+        panning_id = created.step_task_ids["panning_for_gold"]
+        host = kb._claimer_id().split(":", 1)[0]
+        claimed = kb.claim_task(conn, panning_id, claimer=f"{host}:crashed-openbrain")
+        assert claimed is not None
+        kb._set_worker_pid(conn, panning_id, 987654321)
+
+        crashed = kb.detect_crashed_workers(conn)
+
+        assert panning_id in crashed
+        task = kb.get_task(conn, panning_id)
+        assert task is not None
+        assert task.status in {"ready", "blocked"}
+        status = read_status("obwf_crash_reclaim")
+        assert status is not None
+        assert status.status == "failed"
+        assert status.steps["panning_for_gold"].status == "failed"
+        assert "crashed" in (status.steps["panning_for_gold"].blocked_or_error or "")
+        assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in _artifact_text("obwf_crash_reclaim")
+
+
 def test_dispatcher_keeps_plan_only_workflow_from_generic_spawn(kanban_home):
     with kb.connect() as conn:
         created = _create(conn, execute_mode="plan-only")
@@ -256,6 +432,87 @@ def test_dispatcher_dry_run_e2e_stops_at_human_review_gate(kanban_home):
         assert kb.get_task(conn, created.step_task_ids["dedupe"]).status == "done"
         assert kb.get_task(conn, created.step_task_ids["human_review"]).status == "blocked"
         assert kb.get_task(conn, created.step_task_ids["ready_cortexdb_import"]).status == "todo"
+
+
+def test_ready_import_dispatcher_blocks_before_runner_without_review_approval(kanban_home):
+    with kb.connect() as conn:
+        created = _create(conn, execute_mode="production-import")
+        _complete_through_dedupe(conn, created)
+        _make_ready_import_dispatchable(conn, created, approved=False)
+        import_runner = FakeRunner(mode="import_success")
+
+        kb.dispatch_once(
+            conn,
+            max_spawn=1,
+            openbrain_runner_factory=lambda task, execute_mode: import_runner,
+        )
+
+        assert import_runner.calls == []
+        ready = kb.get_task(conn, created.step_task_ids["ready_cortexdb_import"])
+        assert ready is not None
+        assert ready.status == "blocked"
+        assert ready.block_kind == "needs_input"
+        text = _artifact_text("obwf_dispatch")
+        assert "review approval" in text
+        assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in text
+
+
+def test_ready_import_dispatcher_blocks_missing_import_receipt_or_dashboard_verification(kanban_home):
+    for mode, expected in (
+        ("missing_import_receipt", "import receipt"),
+        ("missing_dashboard_verification", "dashboard verification"),
+    ):
+        with kb.connect() as conn:
+            run_id = f"obwf_{mode}"
+            created = _create(conn, execute_mode="production-import", run_id=run_id)
+            _complete_through_dedupe(conn, created)
+            if run_id != "obwf_dispatch":
+                path = review_approval_path(run_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"approved": True, "synthetic": True}), encoding="utf-8")
+                conn.execute(
+                    "UPDATE tasks SET status = 'done' WHERE id = ?",
+                    (created.step_task_ids["human_review"],),
+                )
+                kb.recompute_ready(conn)
+            import_runner = FakeRunner(mode=mode)
+
+            kb.dispatch_once(
+                conn,
+                max_spawn=1,
+                openbrain_runner_factory=lambda task, execute_mode, r=import_runner: r,
+            )
+
+            assert import_runner.calls == ["ready_cortexdb_import"]
+            ready = kb.get_task(conn, created.step_task_ids["ready_cortexdb_import"])
+            assert ready is not None
+            assert ready.status == "blocked"
+            text = _artifact_text(run_id)
+            assert expected in text
+            assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in text
+
+
+def test_ready_import_dispatcher_completes_with_review_import_receipt_and_dashboard_verification(kanban_home):
+    with kb.connect() as conn:
+        created = _create(conn, execute_mode="production-import")
+        _complete_through_dedupe(conn, created)
+        _make_ready_import_dispatchable(conn, created, approved=True)
+        import_runner = FakeRunner(mode="import_success")
+
+        kb.dispatch_once(
+            conn,
+            max_spawn=1,
+            openbrain_runner_factory=lambda task, execute_mode: import_runner,
+        )
+
+        assert import_runner.calls == ["ready_cortexdb_import"]
+        ready = kb.get_task(conn, created.step_task_ids["ready_cortexdb_import"])
+        assert ready is not None
+        assert ready.status == "done"
+        status = read_status("obwf_dispatch")
+        assert status is not None
+        assert status.steps["ready_cortexdb_import"].status == "done"
+        assert status.steps["ready_cortexdb_import"].receipt_path
 
 
 def test_duplicate_start_does_not_duplicate_cards_links_or_task_created_events(kanban_home):

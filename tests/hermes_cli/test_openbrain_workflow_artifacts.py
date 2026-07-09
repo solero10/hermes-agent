@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -111,3 +111,64 @@ def test_dashboard_response_uses_revision_change(hermes_home):
     assert same["changed"] is False
     assert same["runs"] == []
     assert same["events"] == []
+
+
+def test_dashboard_response_uses_recent_events_for_large_histories_and_keeps_polling_quiet(hermes_home):
+    write_status(_status(
+        active_step="thought_enrichment",
+        current_phase="enriching_candidates",
+        completed_candidates=88,
+        total_candidates=100,
+        steps={"thought_enrichment": StepStatus(status="running")},
+    ))
+    unsafe = (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value"
+    )
+    path = workflow_run_dir("obwf_test") / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    base = datetime(2026, 7, 6, 10, 0, tzinfo=timezone.utc)
+    with path.open("w", encoding="utf-8") as handle:
+        for event_id in range(1, 1001):
+            if event_id == 501:
+                handle.write("{not valid json}\n")
+            created_at = (base + timedelta(seconds=event_id)).isoformat().replace("+00:00", "Z")
+            message = f"candidate {event_id}/1000 processed"
+            if event_id in {1, 999, 1000}:
+                message = f"{message} {unsafe}"
+            event = WorkflowEvent(
+                event_id=event_id,
+                workflow_run_id="obwf_test",
+                source_unit_id="source-a",
+                step_key="thought_enrichment",
+                event_type="candidate_completed",
+                created_at=created_at,
+                candidate_id=f"SHAPE-{event_id:04d}",
+                completed_candidates=min(event_id, 100),
+                total_candidates=100,
+                message=message,
+            )
+            handle.write(json.dumps(event.model_dump(mode="json", exclude_none=True), ensure_ascii=False) + "\n")
+
+    response = dashboard_response()
+    event_ids = [event["event_id"] for event in response["events"]]
+    assert len(event_ids) == 50
+    assert event_ids[:3] == [1000, 999, 998]
+    assert 951 in event_ids
+    assert 50 not in event_ids
+    assert response["runs"][0]["completed_candidates"] == 88
+    assert response["runs"][0]["total_candidates"] == 100
+
+    payload_text = json.dumps(response, sort_keys=True)
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+    assert "raw transcript paragraph" not in payload_text
+    assert "/mnt/d/private" not in payload_text
+    assert "super-secret-value" not in payload_text
+
+    same = dashboard_response(since_revision=response["revision"])
+    assert same["changed"] is False
+    assert same["runs"] == []
+    assert same["events"] == []
+
+    page = read_events("obwf_test", after=990, limit=20)
+    assert [event["event_id"] for event in page] == list(range(991, 1001))

@@ -1118,3 +1118,176 @@ def test_workflow_monitor_routes_surface_status_events_and_revision(client, herm
 
     events = client.get("/api/plugins/openbrain_ingestion/workflow-runs/obwf_plugin/events").json()
     assert events["events"][0]["candidate_id"] == "cand_1"
+
+
+def test_workflow_monitor_surfaces_stale_failed_polling_and_privacy(client):
+    from hermes_cli.openbrain_workflow_artifacts import append_event, write_status
+    from hermes_cli.openbrain_workflow_contracts import WorkflowEvent, WorkflowStatus
+
+    unsafe_reason = (
+        "stale heartbeat SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/Otter/source.txt api_key=super-secret-value"
+    )
+    stale_status = WorkflowStatus.model_validate(
+        {
+            "workflow_run_id": "obwf_api_stale",
+            "source_unit_id": "transcript-a",
+            "source_title": "Stale fixture",
+            "active_step": "panning_for_gold",
+            "active_task_id": "t_stale",
+            "status": "stale",
+            "started_at": "2026-07-06T10:00:00Z",
+            "updated_at": "2026-07-06T10:10:00Z",
+            "last_heartbeat_at": "2026-07-06T10:01:00Z",
+            "blocked_or_error": unsafe_reason,
+            "steps": {
+                "panning_for_gold": {
+                    "task_id": "t_stale",
+                    "status": "stale",
+                    "blocked_or_error": unsafe_reason,
+                }
+            },
+        }
+    )
+    write_status(stale_status)
+    append_event(
+        WorkflowEvent(
+            workflow_run_id="obwf_api_stale",
+            source_unit_id="transcript-a",
+            step_key="panning_for_gold",
+            task_id="t_stale",
+            event_type="task_blocked",
+            created_at="2026-07-06T10:10:00Z",
+            message=unsafe_reason,
+        )
+    )
+
+    runs = client.get("/api/plugins/openbrain_ingestion/workflow-runs").json()
+    by_id = {run["workflow_run_id"]: run for run in runs["runs"]}
+    assert by_id["obwf_api_stale"]["status"] == "stale"
+    assert by_id["obwf_api_stale"]["kanban_task_state"] == "stale"
+    assert "[redacted-secret]" in by_id["obwf_api_stale"]["blocked_or_error"]
+    payload_text = json.dumps(runs, sort_keys=True)
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+    assert "raw transcript paragraph" not in payload_text
+    assert "/mnt/d/private" not in payload_text
+    assert "super-secret-value" not in payload_text
+
+    old_revision = runs["revision"]
+    failed_reason = "crashed child SECRET_SENTINEL_SHOULD_NOT_APPEAR at /home/kernk/private/source.md"
+    failed_status = WorkflowStatus.model_validate(
+        {
+            "workflow_run_id": "obwf_api_failed",
+            "source_unit_id": "transcript-a",
+            "source_title": "Failed fixture",
+            "active_step": "thought_enrichment",
+            "active_task_id": "t_failed",
+            "status": "failed",
+            "started_at": "2026-07-06T11:00:00Z",
+            "updated_at": "2026-07-06T11:02:00Z",
+            "last_heartbeat_at": "2026-07-06T11:01:00Z",
+            "blocked_or_error": failed_reason,
+            "steps": {
+                "thought_enrichment": {
+                    "task_id": "t_failed",
+                    "status": "failed",
+                    "blocked_or_error": failed_reason,
+                }
+            },
+        }
+    )
+    write_status(failed_status)
+    append_event(
+        WorkflowEvent(
+            workflow_run_id="obwf_api_failed",
+            source_unit_id="transcript-a",
+            step_key="thought_enrichment",
+            task_id="t_failed",
+            event_type="task_blocked",
+            created_at="2026-07-06T11:02:00Z",
+            message=failed_reason,
+        )
+    )
+
+    changed = client.get(
+        "/api/plugins/openbrain_ingestion/workflow-runs",
+        params={"since_revision": old_revision},
+    ).json()
+    assert changed["changed"] is True
+    changed_by_id = {run["workflow_run_id"]: run for run in changed["runs"]}
+    assert changed_by_id["obwf_api_failed"]["status"] == "failed"
+    assert changed_by_id["obwf_api_failed"]["kanban_task_state"] == "failed"
+    changed_text = json.dumps(changed, sort_keys=True)
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in changed_text
+    assert "/home/kernk/private" not in changed_text
+
+    detail = client.get("/api/plugins/openbrain_ingestion/workflow-runs/obwf_api_failed").json()
+    assert detail["run"]["status"] == "failed"
+    assert detail["status"]["steps"]["thought_enrichment"]["status"] == "failed"
+    detail_text = json.dumps(detail, sort_keys=True)
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in detail_text
+    assert "/home/kernk/private" not in detail_text
+
+    events = client.get("/api/plugins/openbrain_ingestion/workflow-runs/obwf_api_failed/events").json()
+    assert events["events"][0]["event_type"] == "task_blocked"
+    events_text = json.dumps(events, sort_keys=True)
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in events_text
+    assert "/home/kernk/private" not in events_text
+
+
+def test_workflow_monitor_websocket_streams_sanitized_stale_state(client, api_module, monkeypatch):
+    from hermes_cli.openbrain_workflow_artifacts import append_event, write_status
+    from hermes_cli.openbrain_workflow_contracts import WorkflowEvent, WorkflowStatus
+
+    unsafe_reason = (
+        "websocket stale SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/Otter/source.txt api_key=super-secret-value"
+    )
+    status = WorkflowStatus.model_validate(
+        {
+            "workflow_run_id": "obwf_ws_api_stale",
+            "source_unit_id": "transcript-a",
+            "source_title": "WebSocket stale fixture",
+            "active_step": "panning_for_gold",
+            "active_task_id": "t_ws_stale",
+            "status": "stale",
+            "started_at": "2026-07-06T12:00:00Z",
+            "updated_at": "2026-07-06T12:10:00Z",
+            "last_heartbeat_at": "2026-07-06T12:01:00Z",
+            "blocked_or_error": unsafe_reason,
+            "steps": {
+                "panning_for_gold": {
+                    "task_id": "t_ws_stale",
+                    "status": "stale",
+                    "blocked_or_error": unsafe_reason,
+                }
+            },
+        }
+    )
+    write_status(status)
+    append_event(
+        WorkflowEvent(
+            workflow_run_id="obwf_ws_api_stale",
+            source_unit_id="transcript-a",
+            step_key="panning_for_gold",
+            task_id="t_ws_stale",
+            event_type="task_blocked",
+            created_at="2026-07-06T12:10:00Z",
+            message=unsafe_reason,
+        )
+    )
+    monkeypatch.setattr(api_module, "_ws_upgrade_authorized", lambda ws: True)
+
+    with client.websocket_connect("/api/plugins/openbrain_ingestion/workflow-events") as ws:
+        payload = ws.receive_json()
+
+    assert payload["type"] == "workflow_events"
+    by_id = {run["workflow_run_id"]: run for run in payload["runs"]}
+    assert by_id["obwf_ws_api_stale"]["status"] == "stale"
+    assert by_id["obwf_ws_api_stale"]["kanban_task_state"] == "stale"
+    assert "[redacted-secret]" in by_id["obwf_ws_api_stale"]["blocked_or_error"]
+    payload_text = json.dumps(payload, sort_keys=True)
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+    assert "raw transcript paragraph" not in payload_text
+    assert "/mnt/d/private" not in payload_text
+    assert "super-secret-value" not in payload_text

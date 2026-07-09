@@ -1490,6 +1490,22 @@ def test_list_tasks_assignee_filter_case_insensitive(kanban_home):
         assert len(found) == 1 and found[0].id == tid
 
 
+def test_nested_write_txn_rolls_back_inner_failure_without_losing_outer_work(kanban_home):
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            outer_id = kb.create_task(conn, title="outer")
+            with pytest.raises(RuntimeError, match="inner boom"):
+                with kb.write_txn(conn):
+                    kb.create_task(conn, title="inner")
+                    raise RuntimeError("inner boom")
+            still_outer = kb.get_task(conn, outer_id)
+            assert still_outer is not None
+            assert still_outer.title == "outer"
+
+        titles = [task.title for task in kb.list_tasks(conn, include_archived=True)]
+        assert titles == ["outer"]
+
+
 def test_archive_hides_from_default_list(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x")

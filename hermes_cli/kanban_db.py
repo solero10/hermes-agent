@@ -2241,10 +2241,34 @@ def write_txn(conn: sqlite3.Connection):
     task + recording an event, etc.).  A claim CAS inside this context is
     atomic -- at most one concurrent writer can succeed.
 
+    Nested callers compose via SQLite savepoints. This lets higher-level
+    workflows wrap a multi-helper operation atomically while preserving the
+    existing small ``write_txn`` blocks inside helpers such as create_task(),
+    complete_task(), and block_task().
+
     The explicit ROLLBACK on exception is wrapped in try/except so that
     a SQLite auto-rollback (which leaves no active transaction) does not
     shadow the original exception with a spurious rollback error.
     """
+    if conn.in_transaction:
+        savepoint = f"hermes_write_txn_{secrets.token_hex(8)}"
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            yield conn
+        except Exception:
+            try:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except sqlite3.OperationalError:
+                pass
+            raise
+        else:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        return
+
     conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
@@ -3557,6 +3581,7 @@ def release_stale_claims(
     """
     now = int(time.time())
     reclaimed = 0
+    openbrain_interrupts: list[tuple[Task, str, str]] = []
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
     stale = conn.execute(
         "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at "
@@ -3667,7 +3692,24 @@ def release_stale_claims(
                 payload,
                 run_id=run_id,
             )
+            task_row = conn.execute(
+                "SELECT * FROM tasks WHERE id = ?", (row["id"],),
+            ).fetchone()
+            if task_row is not None:
+                openbrain_interrupts.append((
+                    Task.from_row(task_row),
+                    "stale",
+                    "stale heartbeat reclaimed" if heartbeat_stale else "stale claim reclaimed",
+                ))
             reclaimed += 1
+    for task, step_status, reason in openbrain_interrupts:
+        try:
+            from hermes_cli.openbrain_workflow_supervisor import mark_interrupted_openbrain_task
+            mark_interrupted_openbrain_task(task, step_status=step_status, reason=reason)
+        except Exception:
+            # Kanban reclaim is the source of truth; artifact mirroring must not
+            # break generic reclaim/retry safety.
+            pass
     return reclaimed
 
 
@@ -6301,6 +6343,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """
     crashed: list[str] = []
     rate_limited: list[str] = []
+    openbrain_interrupts: list[tuple[Task, str, str]] = []
     # Per-crash details collected inside the main txn, used after it
     # closes to run ``_record_task_failure`` (which needs its own
     # write_txn so can't nest). ``protocol_violation`` flags the
@@ -6423,6 +6466,15 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         (row["id"], pid, row["claim_lock"],
                          protocol_violation, error_text)
                     )
+                    task_row = conn.execute(
+                        "SELECT * FROM tasks WHERE id = ?", (row["id"],),
+                    ).fetchone()
+                    if task_row is not None:
+                        openbrain_interrupts.append((
+                            Task.from_row(task_row),
+                            "failed",
+                            f"crashed: {error_text}",
+                        ))
     # Outside the main txn: increment the unified failure counter for
     # each crashed task. If the breaker trips, the task transitions
     # ready → blocked with a ``gave_up`` event on top of the ``crashed``
@@ -6465,6 +6517,14 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # Same side-channel for rate-limited requeues — these did NOT count a
     # failure and are NOT crashes, so they stay out of the ``crashed`` return.
     detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
+    for task, step_status, reason in openbrain_interrupts:
+        try:
+            from hermes_cli.openbrain_workflow_supervisor import mark_interrupted_openbrain_task
+            mark_interrupted_openbrain_task(task, step_status=step_status, reason=reason)
+        except Exception:
+            # Crashed-worker requeue is durable in Kanban; artifact mirroring is
+            # best-effort so a workflow artifact bug cannot break recovery.
+            pass
     return crashed
 
 
