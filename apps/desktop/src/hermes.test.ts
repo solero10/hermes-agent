@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getSessionMessages, listAllProfileSessions, listSessions } from './hermes'
+import { getSessionMessages, listAllProfileSessions, listSessions, transcribeAudio } from './hermes'
 
 const emptySessionsResponse = {
   limit: 0,
@@ -45,6 +45,20 @@ describe('Hermes REST session helpers', () => {
         timeoutMs: 60_000
       })
     )
+  })
+
+  it('allows voice transcription up to 60 seconds before timing out', async () => {
+    await transcribeAudio('data:audio/webm;base64,dm9pY2U=', 'audio/webm')
+
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/audio/transcribe',
+      method: 'POST',
+      timeoutMs: 60_000,
+      body: {
+        data_url: 'data:audio/webm;base64,dm9pY2U=',
+        mime_type: 'audio/webm'
+      }
+    })
   })
 
   it('tags cross-profile message reads for Electron routing and backend lookup', async () => {
