@@ -242,10 +242,14 @@ def _range_payload(
         bucket_seconds = 6 * 3600
     elif span_seconds >= 14 * 24 * 3600:
         bucket_seconds = 3600
-    markers, bands = _reset_metadata(selected)
+    sampled = _downsample(selected, MAX_POINTS_PER_RANGE)
+    # Reset metadata must follow the same bounded sample as chart points.  Building
+    # markers from every 15-second collector row made the snapshot grow past
+    # 20 MB and kept the page trapped in its loading state.
+    markers, bands = _reset_metadata(sampled)
     return {
         "preset": preset,
-        "points": _downsample(selected, MAX_POINTS_PER_RANGE),
+        "points": sampled,
         "available_from": iso(available_from),
         "available_to": iso(available_to),
         "requested_from": iso(requested_from),
