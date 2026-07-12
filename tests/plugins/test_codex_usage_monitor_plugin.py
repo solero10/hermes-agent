@@ -137,8 +137,8 @@ def test_manifest_registers_expected_dashboard_plugin():
         "icon": "Activity",
         "version": "0.1.0",
         "tab": {"path": "/codex-usage", "position": "after:analytics"},
-        "entry": "dist/index.js?v=20260704-session-request-grouping-v1",
-        "css": "dist/style.css?v=20260704-session-request-grouping-v1",
+        "entry": "dist/index.js?v=20260712-window-duration-v2",
+        "css": "dist/style.css?v=20260712-window-duration-v2",
         "api": "plugin_api.py",
     }
 
@@ -326,6 +326,74 @@ def test_one_percent_remaining_is_not_normalized_to_one_hundred(plugin_api):
 
     assert weekly["remaining_percent"] == 1.0
     assert weekly["used_percent"] == 99.0
+
+
+def test_window_duration_overrides_primary_secondary_position(plugin_api):
+    now = datetime(2026, 7, 12, 18, 30, tzinfo=timezone.utc)
+    raw = _raw_snapshot(now)
+    raw["accounts"][0]["windows"] = [
+        {
+            "key": "primary_window",
+            "used_percent": 73,
+            "limit_window_seconds": 7 * 24 * 60 * 60,
+            "reset_at": (now + timedelta(days=5)).isoformat(),
+        }
+    ]
+
+    account = plugin_api.normalize_snapshot(raw, now=now)["accounts"][0]
+
+    assert set(account["windows"]) == {"weekly"}
+    assert account["windows"]["weekly"]["period_seconds"] == 7 * 24 * 60 * 60
+    assert account["windows"]["weekly"]["remaining_percent"] == 27.0
+
+
+def test_misclassified_five_hour_history_is_recovered_as_weekly(plugin_api):
+    observed_at = datetime(2026, 7, 12, 18, 30, tzinfo=timezone.utc)
+    reset_at = observed_at + timedelta(days=5)
+    history_rows = [
+        {
+            "generated_at": observed_at.isoformat(),
+            "accounts": [
+                {
+                    "id": "acct-one",
+                    "windows": {
+                        "five_hour": {
+                            "used_percent": 73.0,
+                            "remaining_percent": 27.0,
+                            "period_seconds": 5 * 60 * 60,
+                            "reset_at": reset_at.isoformat(),
+                            "pace_state": "under",
+                        }
+                    },
+                }
+            ],
+        }
+    ]
+    accounts = [
+        {
+            "id": "acct-one",
+            "windows": {
+                "weekly": {
+                    "used_percent": 73.0,
+                    "remaining_percent": 27.0,
+                    "period_seconds": 7 * 24 * 60 * 60,
+                    "reset_at": reset_at.isoformat(),
+                    "history": [],
+                }
+            },
+        }
+    ]
+
+    attached = plugin_api._attach_history_to_accounts(accounts, history_rows, history_points=20)
+    long_attached = plugin_api.attach_long_history_to_snapshot(
+        {"accounts": accounts}, history_rows, now=observed_at
+    )
+
+    short_history = attached[0]["windows"]["weekly"]["history"]
+    long_history = long_attached["accounts"][0]["windows"]["weekly"]["long_history"]["1w"]["points"]
+    assert short_history[-1]["remaining_percent"] == 27.0
+    assert long_history[-1]["remaining_percent"] == 27.0
+    assert long_history[-1]["period_seconds"] == 7 * 24 * 60 * 60
 
 
 def test_inconsistent_cached_percent_pair_is_repaired_for_history(plugin_api):
@@ -1665,6 +1733,22 @@ def test_frontend_displays_time_left_before_reset_time():
     assert "d \" + hours + \"h left" in frontend
     assert "leftText + \" · \"" in frontend
     assert "formatReset(windowData, props.title)" in frontend
+
+
+def test_frontend_distinguishes_unreported_windows_from_empty_history():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+
+    assert 'if (reason === "not_reported") return "not currently reported"' in frontend
+    assert '"Not currently reported by OpenAI"' in frontend
+    assert "emptyReason: reported ? null : \"not_reported\"" in frontend
+
+
+def test_frontend_uses_fresh_collector_timestamp_for_snapshot_age():
+    frontend = FRONTEND_JS_PATH.read_text(encoding="utf-8")
+
+    assert "snapshot.collector_last_success_at" in frontend
+    assert "latestSnapshotDate" in frontend
+    assert "Date.now() - latestSnapshotDate.getTime()" in frontend
 
 
 def test_frontend_lifts_zero_percent_line_and_reduces_point_clutter():

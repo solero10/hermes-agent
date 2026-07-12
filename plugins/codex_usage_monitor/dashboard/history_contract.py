@@ -71,7 +71,7 @@ def _to_float(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _window_key(raw: Any) -> str:
+def _window_key(raw: Any, window: Any = None, observed_at: Any = None) -> str:
     text = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
     mapping = {
         "primary_window": "five_hour",
@@ -85,7 +85,29 @@ def _window_key(raw: Any) -> str:
         "weekly": "weekly",
         "7d": "weekly",
     }
-    return mapping.get(text, text or "unknown")
+    mapped = mapping.get(text, text or "unknown")
+    payload = window if isinstance(window, dict) else {}
+    period = _to_float(
+        payload.get("period_seconds")
+        or payload.get("limit_window_seconds")
+        or payload.get("window_seconds")
+        or payload.get("duration_seconds")
+    )
+    if period is not None:
+        if 6 * 24 * 60 * 60 <= period <= 8 * 24 * 60 * 60:
+            return "weekly"
+        if 4 * 60 * 60 <= period <= 6 * 60 * 60:
+            reset_dt = parse_dt(payload.get("reset_at"))
+            observed_dt = parse_dt(observed_at)
+            if (
+                mapped == "five_hour"
+                and reset_dt is not None
+                and observed_dt is not None
+                and (reset_dt - observed_dt).total_seconds() > 24 * 60 * 60
+            ):
+                return "weekly"
+            return "five_hour"
+    return mapped
 
 
 def _account_map(accounts: Any) -> dict[str, dict[str, Any]]:
@@ -110,19 +132,33 @@ def _iter_history_points(rows: list[dict[str, Any]], account_id: str, window_key
             windows = account.get("windows")
             if not isinstance(windows, dict):
                 continue
-            window = windows.get(window_key) or windows.get(_window_key(window_key))
+            window = next(
+                (
+                    value
+                    for raw_key, value in windows.items()
+                    if isinstance(value, dict)
+                    and _window_key(raw_key, value, generated_at) == _window_key(window_key)
+                ),
+                None,
+            )
             if not isinstance(window, dict):
                 continue
             remaining = _to_float(window.get("remaining_percent"))
             used = _to_float(window.get("used_percent"))
             if remaining is None and used is None:
                 continue
+            canonical_key = _window_key(window_key)
+            period = int(_to_float(window.get("period_seconds")) or 0) or None
+            if canonical_key == "weekly" and (period is None or period < 6 * 24 * 60 * 60):
+                period = 7 * 24 * 60 * 60
+            elif canonical_key == "five_hour" and (period is None or period > 6 * 60 * 60):
+                period = 5 * 60 * 60
             point = {
                 "generated_at": generated_at,
                 "used_percent": used,
                 "remaining_percent": remaining,
                 "reset_at": iso(parse_dt(window.get("reset_at"))),
-                "period_seconds": int(_to_float(window.get("period_seconds")) or 0) or None,
+                "period_seconds": period,
                 "pace_state": str(window.get("pace_state") or "unknown"),
             }
             points.append(point)

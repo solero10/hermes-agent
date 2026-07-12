@@ -436,32 +436,67 @@ def stable_account_id(account: dict[str, Any], idx: int) -> str:
     return fallback
 
 
-def window_key(raw_key: Any) -> str:
-    """Map wrapper window names onto the dashboard's canonical keys."""
+def window_key(
+    raw_key: Any,
+    *,
+    period_seconds: Any = None,
+    reset_at: Any = None,
+    observed_at: Any = None,
+) -> str:
+    """Map wrapper window names onto canonical keys, preferring duration.
+
+    OpenAI has changed which logical quota bucket appears as ``primary_window``.
+    The advertised ``limit_window_seconds`` is authoritative; the raw primary /
+    secondary position is only a fallback.  The reset-horizon guard also repairs
+    compact history captured by older wrappers that dropped the duration field.
+    """
     if raw_key is None:
-        return "unknown"
-    text = str(raw_key).strip().lower()
-    norm = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
-    mapping = {
-        "primary_window": "five_hour",
-        "primary": "five_hour",
-        "five_hour": "five_hour",
-        "five_hours": "five_hour",
-        "fivehour": "five_hour",
-        "5_hour": "five_hour",
-        "5_hours": "five_hour",
-        "5h": "five_hour",
-        "5hr": "five_hour",
-        "5hrs": "five_hour",
-        "secondary_window": "weekly",
-        "secondary": "weekly",
-        "week": "weekly",
-        "weekly": "weekly",
-        "7_day": "weekly",
-        "7_days": "weekly",
-        "7d": "weekly",
-    }
-    return mapping.get(norm, norm or "unknown")
+        mapped = "unknown"
+    else:
+        text = str(raw_key).strip().lower()
+        norm = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+        mapping = {
+            "primary_window": "five_hour",
+            "primary": "five_hour",
+            "five_hour": "five_hour",
+            "five_hours": "five_hour",
+            "fivehour": "five_hour",
+            "5_hour": "five_hour",
+            "5_hours": "five_hour",
+            "5h": "five_hour",
+            "5hr": "five_hour",
+            "5hrs": "five_hour",
+            "secondary_window": "weekly",
+            "secondary": "weekly",
+            "week": "weekly",
+            "weekly": "weekly",
+            "7_day": "weekly",
+            "7_days": "weekly",
+            "7d": "weekly",
+        }
+        mapped = mapping.get(norm, norm or "unknown")
+
+    period = _to_float(period_seconds)
+    period_key = None
+    if period is not None and period > 0:
+        if 4 * 60 * 60 <= period <= 6 * 60 * 60:
+            period_key = "five_hour"
+        elif 6 * 24 * 60 * 60 <= period <= 8 * 24 * 60 * 60:
+            period_key = "weekly"
+
+    reset_dt = parse_dt(reset_at)
+    observed_dt = parse_dt(observed_at)
+    implausibly_far_for_five_hour = bool(
+        mapped == "five_hour"
+        and reset_dt is not None
+        and observed_dt is not None
+        and (reset_dt - observed_dt).total_seconds() > 24 * 60 * 60
+    )
+    if period_key == "weekly" or implausibly_far_for_five_hour:
+        return "weekly"
+    if period_key == "five_hour":
+        return "five_hour"
+    return mapped
 
 
 def compute_on_pace_remaining(
@@ -630,20 +665,28 @@ def _first_present(mapping: dict[str, Any], *keys: str) -> Any:
 
 def _normalize_window(raw_window: dict[str, Any], now_dt: datetime) -> dict[str, Any] | None:
     clean = sanitize(raw_window)
-    key = window_key(_first_present(clean, "key", "window", "name", "type"))
-    if key == "unknown":
-        return None
-
-    default_period = WINDOW_PERIOD_SECONDS.get(key)
+    raw_key = _first_present(clean, "key", "window", "name", "type")
     period = _to_float(
         _first_present(
             clean,
             "period_seconds",
+            "limit_window_seconds",
             "window_seconds",
             "duration_seconds",
             "reset_period_seconds",
         )
     )
+    reset_dt = parse_dt(_first_present(clean, "reset_at", "resets_at", "resetAt", "reset"))
+    key = window_key(
+        raw_key,
+        period_seconds=period,
+        reset_at=reset_dt,
+        observed_at=now_dt,
+    )
+    if key == "unknown":
+        return None
+
+    default_period = WINDOW_PERIOD_SECONDS.get(key)
     if period is None:
         period = float(default_period) if default_period is not None else None
 
@@ -653,7 +696,6 @@ def _normalize_window(raw_window: dict[str, Any], now_dt: datetime) -> dict[str,
     )
     used, remaining = _reconcile_used_remaining(used, remaining)
 
-    reset_dt = parse_dt(_first_present(clean, "reset_at", "resets_at", "resetAt", "reset"))
     reset_at = _iso(reset_dt)
     reset_at_local = _first_present(clean, "reset_at_local", "resetAtLocal", "reset_local")
 
@@ -707,18 +749,38 @@ def _account_map(accounts_or_snapshot: Any) -> dict[str, dict[str, Any]]:
     return mapped
 
 
-def _window_map(account: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _window_map(account: dict[str, Any], *, observed_at: Any = None) -> dict[str, dict[str, Any]]:
     windows = account.get("windows")
+    mapped: dict[str, dict[str, Any]] = {}
     if isinstance(windows, dict):
-        return {window_key(key): value for key, value in windows.items() if isinstance(value, dict)}
-    if isinstance(windows, list):
-        mapped: dict[str, dict[str, Any]] = {}
-        for item in windows:
-            if isinstance(item, dict):
-                key = window_key(_first_present(item, "key", "window", "name", "type"))
-                mapped[key] = item
+        items = windows.items()
+    elif isinstance(windows, list):
+        items = [
+            (_first_present(item, "key", "window", "name", "type"), item)
+            for item in windows
+            if isinstance(item, dict)
+        ]
+    else:
         return mapped
-    return {}
+
+    for raw_key, value in items:
+        if not isinstance(value, dict):
+            continue
+        key = window_key(
+            raw_key,
+            period_seconds=_first_present(
+                value,
+                "period_seconds",
+                "limit_window_seconds",
+                "window_seconds",
+                "duration_seconds",
+            ),
+            reset_at=value.get("reset_at"),
+            observed_at=observed_at,
+        )
+        if key != "unknown":
+            mapped[key] = value
+    return mapped
 
 
 def _exhausted_windows_summary(windows: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -1236,17 +1298,33 @@ def _history_points_by_account_window(rows: list[dict[str, Any]]) -> dict[tuple[
             account_id = account.get("id")
             if not account_id:
                 continue
-            for key, window in _window_map(account).items():
+            for key, window in _window_map(account, observed_at=generated_at).items():
                 used, remaining = _reconcile_used_remaining(
                     _coerce_percent(window.get("used_percent")),
                     _coerce_percent(window.get("remaining_percent")),
                 )
+                period = _to_float(
+                    _first_present(
+                        window,
+                        "period_seconds",
+                        "limit_window_seconds",
+                        "window_seconds",
+                        "duration_seconds",
+                    )
+                )
+                expected_period = WINDOW_PERIOD_SECONDS.get(key)
+                if expected_period is not None and (
+                    period is None
+                    or (key == "weekly" and period < 6 * 24 * 60 * 60)
+                    or (key == "five_hour" and period > 6 * 60 * 60)
+                ):
+                    period = float(expected_period)
                 point = {
                     "generated_at": generated_at,
                     "used_percent": used,
                     "remaining_percent": remaining,
                     "reset_at": window.get("reset_at"),
-                    "period_seconds": window.get("period_seconds"),
+                    "period_seconds": int(period) if period is not None else None,
                     "pace_state": window.get("pace_state"),
                 }
                 by_key.setdefault((str(account_id), key), []).append(point)

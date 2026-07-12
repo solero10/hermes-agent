@@ -373,6 +373,7 @@
   }
 
   function emptyHistoryMessage(reason) {
+    if (reason === "not_reported") return "not currently reported";
     if (reason === "invalid_range") return "Choose a start date before the end date.";
     if (reason === "custom_dates_required") return "Choose both dates, then apply the custom range.";
     if (reason === "outside_retention") return "No retained samples for this range.";
@@ -447,10 +448,14 @@
 
   function SnapshotMeta(props) {
     const snapshot = props.snapshot || {};
-    const updated = formatDateTime(snapshot.generated_at);
-    const age = formatAge(snapshot.age_seconds);
+    const generatedDate = parseDate(snapshot.generated_at);
+    const collectorDate = parseDate(snapshot.collector_last_success_at);
+    const latestSnapshotDate = collectorDate && (!generatedDate || collectorDate > generatedDate) ? collectorDate : generatedDate;
+    const updated = latestSnapshotDate ? formatDateTime(latestSnapshotDate.toISOString()) : null;
+    const computedAgeSeconds = latestSnapshotDate ? Math.max(0, (Date.now() - latestSnapshotDate.getTime()) / 1000) : null;
+    const ageSeconds = computedAgeSeconds !== null ? computedAgeSeconds : toNumber(snapshot.age_seconds);
+    const age = formatAge(ageSeconds);
     const interval = toNumber(snapshot.poll_interval_seconds) || 30;
-    const ageSeconds = toNumber(snapshot.age_seconds);
     const staleAfter = toNumber(snapshot.stale_after_seconds) || interval * 2;
     const collectorStatus = snapshot.collector_status ? String(snapshot.collector_status) : "";
     const isStale = ageSeconds !== null && ageSeconds > staleAfter;
@@ -636,7 +641,7 @@
         y: layout.top + layout.plotHeight / 2,
         textAnchor: "middle",
         dominantBaseline: "middle",
-      }, emptyHistoryMessage(rangePayload && rangePayload.empty_reason)));
+      }, emptyHistoryMessage(props.emptyReason || (rangePayload && rangePayload.empty_reason))));
     } else {
       if (points.length === 1) {
         const point = points[0];
@@ -745,6 +750,7 @@
   }
 
   function WindowMetric(props) {
+    const reported = Boolean(props.windowData && Object.keys(props.windowData).length);
     const windowData = props.windowData || {};
     const rangePayload = props.rangePayload || null;
     const remaining = formatPercent(windowData.remaining_percent);
@@ -756,10 +762,10 @@
         h("span", { className: "codex-usage-window-title" }, props.title),
         h("span", { className: "codex-usage-window-value" }, remaining, onPaceText, " remaining")
       ),
-      h("div", { className: "codex-usage-reset" }, formatReset(windowData, props.title)),
+      h("div", { className: "codex-usage-reset" }, reported ? formatReset(windowData, props.title) : "Not currently reported by OpenAI"),
       props.rangeState && props.onRangeChange ? h(RangeControls, { title: props.title, windowKey: props.windowKey, state: props.rangeState, onChange: props.onRangeChange }) : null,
       rangePayload ? h("div", { className: "codex-usage-range-meta" }, rangeLabel(rangePayload.preset), " · ", rangePayload.points && rangePayload.points.length ? rangePayload.points.length + " points" : emptyHistoryMessage(rangePayload.empty_reason)) : null,
-      h(UsageChart, { history: windowData.history, label: props.title, windowData: windowData, rangePayload: rangePayload })
+      h(UsageChart, { history: windowData.history, label: props.title, windowData: windowData, rangePayload: rangePayload, emptyReason: reported ? null : "not_reported" })
     );
   }
 
