@@ -5,6 +5,13 @@ from unittest.mock import MagicMock, patch
 
 import cli as cli_mod
 from cli import HermesCLI
+from prompt_toolkit.filters import Condition
+from prompt_toolkit.layout import (
+    ConditionalContainer,
+    FormattedTextControl,
+    HSplit,
+    Window,
+)
 
 
 def _make_cli(model: str = "anthropic/claude-sonnet-4-20250514"):
@@ -54,6 +61,38 @@ def _attach_agent(
 
 
 class TestCLIStatusBar:
+    def test_two_row_status_container_preserves_shared_visibility_contract(self):
+        cli_obj = _make_cli()
+        cli_obj._status_bar_visible = True
+        cli_obj._status_bar_suppressed_after_resize = False
+
+        # Several older CLI tests replace prompt_toolkit modules while
+        # importing ``cli``.  Pin this test to the real layout primitives so
+        # it remains order-independent in the complete tests/cli suite.
+        with (
+            patch.object(cli_mod, "Condition", Condition),
+            patch.object(cli_mod, "ConditionalContainer", ConditionalContainer),
+            patch.object(cli_mod, "FormattedTextControl", FormattedTextControl),
+            patch.object(cli_mod, "HSplit", HSplit),
+            patch.object(cli_mod, "Window", Window),
+        ):
+            container = cli_obj._build_status_bar_container()
+
+        assert isinstance(container, ConditionalContainer)
+        assert isinstance(container.content, HSplit)
+        assert len(container.content.children) == 2
+        assert all(isinstance(row, Window) for row in container.content.children)
+        assert all(row.height == 1 for row in container.content.children)
+        assert all(row.wrap_lines() is False for row in container.content.children)
+        assert container.filter() is True
+
+        cli_obj._status_bar_visible = False
+        assert container.filter() is False
+
+        cli_obj._status_bar_visible = True
+        cli_obj._status_bar_suppressed_after_resize = True
+        assert container.filter() is False
+
     def test_context_style_thresholds(self):
         cli_obj = _make_cli()
 
@@ -82,7 +121,7 @@ class TestCLIStatusBar:
         assert "$0.06" not in text  # cost hidden by default
         assert "15m" in text
 
-    def test_build_status_bar_text_includes_cached_codex_usage(self, tmp_path, monkeypatch):
+    def test_builtin_status_bar_text_excludes_cached_codex_usage(self, tmp_path, monkeypatch):
         status_file = tmp_path / "codex-usage.txt"
         status_file.write_text("#1K2 29/89 2.1h/6.9d|#2D 99/100 5.0h/7.0d\n", encoding="utf-8")
         monkeypatch.setenv("HERMES_CODEX_USAGE_STATUS_FILE", str(status_file))
@@ -98,9 +137,34 @@ class TestCLIStatusBar:
 
         text = cli_obj._build_status_bar_text(width=220)
 
-        assert "Cx#1K2 29/89" in text
+        assert "Cx#" not in text
+        assert "12.4K/200K" in text
+        assert "6%" in text
 
-    def test_cached_codex_usage_in_wide_fragments(self, tmp_path, monkeypatch):
+    def test_custom_status_bar_text_includes_cached_codex_usage_only(self, tmp_path, monkeypatch):
+        status_file = tmp_path / "codex-usage.txt"
+        status_file.write_text("#1K2 29/89 2.1h/6.9d|#2D 99/100 5.0h/7.0d\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_CODEX_USAGE_STATUS_FILE", str(status_file))
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_230,
+            completion_tokens=2_220,
+            total_tokens=12_450,
+            api_calls=7,
+            context_tokens=12_450,
+            context_length=200_000,
+            compressions=3,
+        )
+
+        text = cli_obj._build_custom_status_bar_text(width=220)
+
+        assert "Cx#1K2 29/89 2.1h/6.9d|#2D 99/100 5.0h/7.0d" in text
+        assert "claude-sonnet" not in text
+        assert "200K" not in text
+        assert "🗜️" not in text
+        assert "⏲" not in text
+
+    def test_builtin_status_bar_fragments_exclude_cached_codex_usage(self, tmp_path, monkeypatch):
         status_file = tmp_path / "codex-usage.txt"
         status_file.write_text("#1K2 29/89 2.1h/6.9d\n", encoding="utf-8")
         monkeypatch.setenv("HERMES_CODEX_USAGE_STATUS_FILE", str(status_file))
@@ -118,7 +182,130 @@ class TestCLIStatusBar:
         with patch.object(HermesCLI, "_get_tui_terminal_width", return_value=220):
             frags = cli_obj._get_status_bar_fragments()
 
-        assert "Cx#1K2 29/89 2.1h/6.9d" in [text for _, text in frags]
+        text = "".join(part for _, part in frags)
+        assert "Cx#" not in text
+        assert "12.4K/200K" in text
+
+    def test_custom_status_bar_fragments_include_cached_codex_usage_only(self, tmp_path, monkeypatch):
+        status_file = tmp_path / "codex-usage.txt"
+        status_file.write_text("#1K2 29/89 2.1h/6.9d\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_CODEX_USAGE_STATUS_FILE", str(status_file))
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_230,
+            completion_tokens=2_220,
+            total_tokens=12_450,
+            api_calls=7,
+            context_tokens=12_450,
+            context_length=200_000,
+            compressions=3,
+        )
+        cli_obj._status_bar_visible = True
+
+        frags = cli_obj._get_custom_status_bar_fragments(width=220)
+
+        text = "".join(part for _, part in frags)
+        assert "Cx#1K2 29/89 2.1h/6.9d" in text
+        assert "claude-sonnet" not in text
+        assert "200K" not in text
+        assert "🗜️" not in text
+        assert "⏲" not in text
+
+    def test_custom_status_bar_uses_stable_placeholder_when_cache_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(
+            "HERMES_CODEX_USAGE_STATUS_FILE",
+            str(tmp_path / "missing-codex-usage.txt"),
+        )
+        cli_obj = _make_cli()
+        cli_obj._status_bar_visible = True
+
+        assert cli_obj._build_custom_status_bar_text(width=80) == "Cx --"
+        fragments = cli_obj._get_custom_status_bar_fragments(width=80)
+        assert "".join(text for _, text in fragments).strip() == "Cx --"
+
+    def test_builtin_and_custom_status_rows_trim_independently(self, tmp_path, monkeypatch):
+        status_file = tmp_path / "codex-usage.txt"
+        status_file.write_text(
+            "#1K2 29/89 2.1h/6.9d|#2D 99/100 5.0h/7.0d|#3K1 45/100 1.0h/7.0d\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_CODEX_USAGE_STATUS_FILE", str(status_file))
+        cli_obj = _attach_agent(
+            _make_cli(),
+            prompt_tokens=10_230,
+            completion_tokens=2_220,
+            total_tokens=12_450,
+            api_calls=7,
+            context_tokens=12_450,
+            context_length=200_000,
+            compressions=3,
+        )
+        cli_obj._status_bar_visible = True
+
+        for width in (12, 20, 32, 40, 52, 76, 80, 120, 200):
+            builtin_text = cli_obj._build_status_bar_text(width=width)
+            custom_text = cli_obj._build_custom_status_bar_text(width=width)
+            with patch.object(HermesCLI, "_get_tui_terminal_width", return_value=width):
+                builtin_fragments = cli_obj._get_status_bar_fragments()
+            custom_fragments = cli_obj._get_custom_status_bar_fragments(width=width)
+            builtin_fragment_text = "".join(text for _, text in builtin_fragments)
+            custom_fragment_text = "".join(text for _, text in custom_fragments)
+
+            for text in (builtin_text, custom_text, builtin_fragment_text, custom_fragment_text):
+                assert "\n" not in text
+            assert cli_obj._status_bar_display_width(builtin_text) <= width
+            assert cli_obj._status_bar_display_width(custom_text) <= width
+            assert cli_obj._status_bar_display_width(builtin_fragment_text) <= width
+            assert cli_obj._status_bar_display_width(custom_fragment_text) <= width
+            assert "Cx#" not in builtin_text
+            assert "Cx#" not in builtin_fragment_text
+            assert "claude-sonnet" not in custom_text
+            assert "200K" not in custom_text
+            assert "claude-sonnet" not in custom_fragment_text
+            assert "200K" not in custom_fragment_text
+
+    def test_custom_status_bar_uses_only_first_printable_cache_line(self, tmp_path, monkeypatch):
+        status_file = tmp_path / "codex-usage.txt"
+        status_file.write_text("#1K2 29/89\nSHOULD-NOT-RENDER\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_CODEX_USAGE_STATUS_FILE", str(status_file))
+        cli_obj = _make_cli()
+        cli_obj._status_bar_visible = True
+
+        text = cli_obj._build_custom_status_bar_text(width=80)
+        fragment_text = "".join(
+            part for _, part in cli_obj._get_custom_status_bar_fragments(width=80)
+        )
+
+        assert "Cx#1K2 29/89" in text
+        assert "SHOULD-NOT-RENDER" not in text
+        assert "SHOULD-NOT-RENDER" not in fragment_text
+
+    def test_custom_status_row_does_not_build_full_status_snapshot(self, tmp_path, monkeypatch):
+        status_file = tmp_path / "codex-usage.txt"
+        status_file.write_text("#1K2 29/89\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_CODEX_USAGE_STATUS_FILE", str(status_file))
+        cli_obj = _make_cli()
+        cli_obj._status_bar_visible = True
+
+        with patch.object(
+            cli_obj,
+            "_get_status_bar_snapshot",
+            side_effect=AssertionError("custom row must not collect built-in state"),
+        ) as snapshot:
+            assert "Cx#1K2 29/89" in cli_obj._build_custom_status_bar_text(width=80)
+            fragments = cli_obj._get_custom_status_bar_fragments(width=80)
+
+        snapshot.assert_not_called()
+        assert "Cx#1K2 29/89" in "".join(text for _, text in fragments)
+
+    def test_custom_status_text_fallback_remains_width_bounded(self):
+        cli_obj = _make_cli()
+
+        with patch.object(cli_obj, "_read_codex_usage_status", side_effect=OSError("cache read failed")):
+            text = cli_obj._build_custom_status_bar_text(width=2)
+
+        assert cli_obj._status_bar_display_width(text) <= 2
+        assert "\n" not in text
 
     def test_post_compression_sentinel_does_not_render_negative(self):
         """Right after a compression, last_prompt_tokens is parked at the -1

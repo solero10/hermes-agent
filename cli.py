@@ -4782,9 +4782,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
             compressions = snapshot.get("compressions", 0)
             parts = [f"⚕ {snapshot['model_short']}"]
-            codex_usage = snapshot.get("codex_usage_status")
-            if codex_usage:
-                parts.append(f"Cx{codex_usage}")
             parts.extend([context_label, percent_label])
             if compressions:
                 parts.append(f"🗜️ {compressions}")
@@ -4809,6 +4806,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             return self._trim_status_bar_text(" │ ".join(parts), width)
         except Exception:
             return f"⚕ {self.model if getattr(self, 'model', None) else 'Hermes'}"
+
+    def _build_custom_status_bar_text(self, width: Optional[int] = None) -> str:
+        """Return the bounded one-line custom/local status text for row 2."""
+        try:
+            if width is None:
+                width = self._get_tui_terminal_width()
+            codex_usage = self._read_codex_usage_status()
+            text = f"Cx{codex_usage}" if codex_usage else "Cx --"
+            return self._trim_status_bar_text(text, width)
+        except Exception:
+            safe_width = width if isinstance(width, int) else 80
+            return self._trim_status_bar_text("Cx --", safe_width)
 
     def _get_status_bar_fragments(self):
         if not self._status_bar_visible or getattr(self, '_model_picker_state', None):
@@ -4849,10 +4858,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         ("class:status-bar-dim", " · "),
                         (self._status_bar_context_style(percent), percent_label),
                     ]
-                    codex_usage = snapshot.get("codex_usage_status")
-                    if codex_usage:
-                        frags.append(("class:status-bar-dim", " · "))
-                        frags.append(("class:status-bar-strong", f"Cx{codex_usage}"))
                     if compressions:
                         frags.append(("class:status-bar-dim", " · "))
                         frags.append((self._compression_count_style(compressions), f"🗜️ {compressions}"))
@@ -4890,12 +4895,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
                     ]
-                    codex_usage = snapshot.get("codex_usage_status")
-                    if codex_usage:
-                        frags.extend([
-                            ("class:status-bar-dim", " │ "),
-                            ("class:status-bar-strong", f"Cx{codex_usage}"),
-                        ])
                     frags.extend([
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", context_label),
@@ -4943,6 +4942,35 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             return frags
         except Exception:
             return [("class:status-bar", f" {self._build_status_bar_text()} ")]
+
+    def _get_custom_status_bar_fragments(self, width: Optional[int] = None):
+        """Return bounded prompt_toolkit fragments for the custom/local row."""
+        if not self._status_bar_visible or getattr(self, "_model_picker_state", None):
+            return []
+        try:
+            if width is None:
+                width = self._get_tui_terminal_width()
+            codex_usage = self._read_codex_usage_status()
+            if codex_usage:
+                fragments = [
+                    ("class:status-bar", " "),
+                    ("class:status-bar-dim", "Cx"),
+                    ("class:status-bar-strong", codex_usage),
+                    ("class:status-bar", " "),
+                ]
+            else:
+                fragments = [
+                    ("class:status-bar", " "),
+                    ("class:status-bar-dim", "Cx --"),
+                    ("class:status-bar", " "),
+                ]
+
+            plain = "".join(text for _, text in fragments)
+            if self._status_bar_display_width(plain) > width:
+                return [("class:status-bar", self._trim_status_bar_text(plain, width))]
+            return fragments
+        except Exception:
+            return [("class:status-bar", self._build_custom_status_bar_text(width=width))]
 
     def _normalize_model_for_provider(self, resolved_provider: str) -> bool:
         """Normalize provider-specific model IDs and routing."""
@@ -12439,6 +12467,38 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             manipulate user input from a keybinding handler.
         """
 
+    def _build_status_bar_container(self):
+        """Build the shared two-row classic CLI status area.
+
+        Keep both physical rows behind one visibility/resize filter so the
+        protected ``status_bar`` layout-hook contract remains unchanged and a
+        resize can never suppress or restore only half of the footer.
+        """
+        cli_ref = self
+        status_bar_filter = Condition(
+            lambda: cli_ref._status_bar_visible
+            and not getattr(cli_ref, "_status_bar_suppressed_after_resize", False)
+        )
+        return ConditionalContainer(
+            HSplit([
+                Window(
+                    content=FormattedTextControl(
+                        lambda: cli_ref._get_status_bar_fragments()
+                    ),
+                    height=1,
+                    wrap_lines=False,
+                ),
+                Window(
+                    content=FormattedTextControl(
+                        lambda: cli_ref._get_custom_status_bar_fragments()
+                    ),
+                    height=1,
+                    wrap_lines=False,
+                ),
+            ]),
+            filter=status_bar_filter,
+        )
+
     def _build_tui_layout_children(
         self,
         *,
@@ -14269,25 +14329,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             filter=Condition(lambda: cli_ref._voice_mode),
         )
 
-        status_bar = ConditionalContainer(
-            Window(
-                content=FormattedTextControl(lambda: cli_ref._get_status_bar_fragments()),
-                height=1,
-                # Prevent fragments that overflow the terminal width from
-                # wrapping onto a second line, which causes the status bar to
-                # appear duplicated (one full + one partial row) during long
-                # sessions, especially on SSH where shutil.get_terminal_size
-                # may return stale values.  _get_status_bar_fragments now reads
-                # width from prompt_toolkit's own output object, so fragments
-                # will always fit; wrap_lines=False is the belt-and-suspenders
-                # guard against any future width mismatch.
-                wrap_lines=False,
-            ),
-            filter=Condition(
-                lambda: cli_ref._status_bar_visible
-                and not getattr(cli_ref, "_status_bar_suppressed_after_resize", False)
-            ),
-        )
+        status_bar = self._build_status_bar_container()
 
         # Allow wrapper CLIs to register extra keybindings.
         self._register_extra_tui_keybindings(kb, input_area=input_area)
