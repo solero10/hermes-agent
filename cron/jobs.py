@@ -789,6 +789,7 @@ def create_job(
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -806,6 +807,9 @@ def create_job(
         model: Optional per-job model override
         provider: Optional per-job provider override
         base_url: Optional per-job base URL override
+        reasoning_effort: Optional per-job reasoning override: none, minimal,
+                          low, medium, high, or xhigh. When omitted, inherit
+                          agent.reasoning_effort from config.yaml.
         script: Optional path to a script whose stdout feeds the job. With
                 ``no_agent=True`` the script IS the job — its stdout is
                 delivered verbatim. Without ``no_agent``, its stdout is
@@ -858,9 +862,17 @@ def create_job(
     normalized_model = str(model).strip() if isinstance(model, str) else None
     normalized_provider = str(provider).strip() if isinstance(provider, str) else None
     normalized_base_url = str(base_url).strip().rstrip("/") if isinstance(base_url, str) else None
+    if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+        raise ValueError("reasoning_effort must be a string or None")
+    normalized_reasoning_effort = str(reasoning_effort).strip().lower() if isinstance(reasoning_effort, str) else None
     normalized_model = normalized_model or None
     normalized_provider = normalized_provider or None
     normalized_base_url = normalized_base_url or None
+    normalized_reasoning_effort = normalized_reasoning_effort or None
+    if normalized_reasoning_effort not in {None, "none", "minimal", "low", "medium", "high", "xhigh"}:
+        raise ValueError(
+            "reasoning_effort must be one of: none, minimal, low, medium, high, xhigh"
+        )
     normalized_script = str(script).strip() if isinstance(script, str) else None
     normalized_script = normalized_script or None
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
@@ -943,6 +955,7 @@ def create_job(
         "provider_snapshot": provider_snapshot,
         "model_snapshot": model_snapshot,
         "base_url": normalized_base_url,
+        "reasoning_effort": normalized_reasoning_effort,
         "script": normalized_script,
         "no_agent": normalized_no_agent,
         "context_from": context_from,
@@ -1062,6 +1075,18 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     updates["workdir"] = None
                 else:
                     updates["workdir"] = _normalize_workdir(_wd)
+
+            if "reasoning_effort" in updates:
+                _effort = updates["reasoning_effort"]
+                if _effort in {None, "", False}:
+                    updates["reasoning_effort"] = None
+                else:
+                    _effort = str(_effort).strip().lower()
+                    if _effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}:
+                        raise ValueError(
+                            "reasoning_effort must be one of: none, minimal, low, medium, high, xhigh"
+                        )
+                    updates["reasoning_effort"] = _effort
 
             updated = _apply_skill_fields({**job, **updates})
             schedule_changed = "schedule" in updates

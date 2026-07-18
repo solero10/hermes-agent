@@ -1959,6 +1959,26 @@ def _scan_assembled_cron_prompt(
     return assembled
 
 
+def _resolve_job_reasoning_config(job: dict, cfg: dict) -> dict | None:
+    """Resolve cron reasoning, preferring a valid per-job override."""
+    from hermes_constants import parse_reasoning_effort
+
+    agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else {}
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+    global_effort = str(agent_cfg.get("reasoning_effort", "") or "").strip()
+
+    job_effort = job.get("reasoning_effort") if isinstance(job, dict) else None
+    if job_effort is not None:
+        normalized = str(job_effort).strip().lower()
+        parsed = parse_reasoning_effort(normalized)
+        if parsed is not None:
+            return parsed
+    # Empty or malformed stored overrides fail safely back to the configured
+    # global setting instead of silently selecting the model/provider default.
+    return parse_reasoning_effort(global_effort)
+
+
 def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -2295,10 +2315,9 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         except Exception:
             pass
 
-        # Reasoning config from config.yaml
-        from hermes_constants import parse_reasoning_effort
-        effort = str(_cfg.get("agent", {}).get("reasoning_effort", "")).strip()
-        reasoning_config = parse_reasoning_effort(effort)
+        # Per-job reasoning overrides global config; omitted jobs keep the
+        # existing agent.reasoning_effort behavior.
+        reasoning_config = _resolve_job_reasoning_config(job, _cfg)
 
         # Prefill messages from env or config.yaml. The top-level
         # prefill_messages_file key is canonical; agent.prefill_messages_file is
