@@ -4480,36 +4480,41 @@ def test_write_txn_healthy_commit_no_exception(tmp_path):
     conn.close()
 
 
-def test_write_txn_raises_on_truncated_file(tmp_path):
-    """A mocked smaller file size triggers the torn-extend check."""
+def test_write_txn_skips_raw_file_length_check_in_wal_mode(tmp_path):
+    """A WAL commit must not inspect an unsynchronized raw main-file snapshot."""
     from hermes_cli.kanban_db import connect, write_txn
+    import hermes_cli.kanban_db as kanban_db_module
+
     db = tmp_path / "test.db"
     conn = connect(db_path=db)
-    # Get actual page size so we can fake a smaller file
-    page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-    original_getsize = os.path.getsize
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
 
-    def fake_getsize(path):
-        # Return a size that implies at least 1 fewer page than header claims
-        real_size = original_getsize(path)
-        return max(0, real_size - page_size)
+    with unittest.mock.patch.object(
+        kanban_db_module,
+        "_check_file_length_invariant",
+        side_effect=AssertionError("raw main-file check must not run in WAL mode"),
+    ):
+        with write_txn(conn) as c:
+            c.execute(
+                "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
+                "VALUES ('t_test02', 'test task 2', 'tester', 'todo', 0, 1234567890)"
+            )
 
-    with pytest.raises(sqlite3.DatabaseError, match="torn-extend|page count mismatch"):
-        with unittest.mock.patch("hermes_cli.kanban_db.os.path.getsize", side_effect=fake_getsize):
-            with write_txn(conn) as c:
-                c.execute(
-                    "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
-                    "VALUES ('t_test02', 'test task 2', 'tester', 'todo', 0, 1234567890)"
-                )
+    row = conn.execute("SELECT title FROM tasks WHERE id='t_test02'").fetchone()
+    assert row["title"] == "test task 2"
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     conn.close()
 
 
-def test_write_txn_post_commit_check_fires_every_call(tmp_path):
-    """The invariant check runs on every write_txn call."""
+def test_write_txn_keeps_file_length_check_for_non_wal_mode(tmp_path):
+    """The diagnostic remains active where the main DB is the authoritative view."""
     from hermes_cli.kanban_db import connect, write_txn
     import hermes_cli.kanban_db as kanban_db_module
+
     db = tmp_path / "test.db"
     conn = connect(db_path=db)
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    assert conn.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
     call_count = 0
     real_check = kanban_db_module._check_file_length_invariant
 

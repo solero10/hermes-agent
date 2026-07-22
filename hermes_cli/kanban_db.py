@@ -2283,9 +2283,15 @@ def write_txn(conn: sqlite3.Connection):
         raise
     else:
         conn.execute("COMMIT")
-        # Post-commit file-length check: header page_count must match actual file pages.
-        # A discrepancy means a torn-extend — raise now rather than silently corrupt.
-        _check_file_length_invariant(conn)
+        # A raw main-file header/size comparison is not coherent in WAL mode:
+        # another connection may be checkpointing while this process reads the
+        # main file outside SQLite's pager locks.  That can report a transient
+        # page-count mismatch *after* a successful durable commit and crash the
+        # caller.  Keep the diagnostic for rollback-journal modes, where the
+        # main DB is the authoritative committed image.
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()
+        if not journal_mode or str(journal_mode[0]).strip().lower() != "wal":
+            _check_file_length_invariant(conn)
 
 
 # ---------------------------------------------------------------------------
