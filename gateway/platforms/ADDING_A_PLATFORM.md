@@ -120,6 +120,7 @@ If your platform supports interactive button/menu messages, implement these for 
 | `send_exec_approval(chat_id, command, session_key, description, ...)` | Render dangerous-command approval as Approve/Deny buttons. Inbound dispatch routes to `tools.approval.resolve_gateway_approval`. |
 | `send_slash_confirm(chat_id, title, message, session_key, confirm_id, ...)` | Render slash-command confirmations (e.g. `/reload-mcp`) as Once/Always/Cancel buttons. Inbound dispatch routes to `tools.slash_confirm.resolve`. |
 | `send_model_picker(...)` | Interactive `/model` picker. Used by Telegram and Discord. |
+| `send_choice_picker(...)` | Flat single-level picker for finite-choice commands (`/reasoning`, `/fast`). Implemented by Telegram (inline keyboard), Discord (select menu), and Matrix (reactions). Platforms without it fall back to the text status card automatically. |
 
 See `gateway/platforms/telegram.py`, `discord.py`, and `whatsapp_cloud.py` for reference implementations. The button-callback id convention (`cl:<id>:<idx>`, `appr:<id>:<choice>`, `sc:<choice>:<id>`) is shared across adapters — match it so the gateway-side resolvers work without modification.
 
@@ -366,7 +367,7 @@ identifiers are masked in ALL log output, not just your adapter's logs.
 | `CONTRIBUTING.md` | Contributor-facing rules, if the platform changes review, config, or tool-footprint guidance |
 | `website/docs/user-guide/messaging/<platform>.md` | **NEW** — Full setup guide (see existing platform docs for template) |
 | `website/docs/user-guide/messaging/index.md` | Architecture diagram, toolset table, security examples, Next Steps links |
-| `website/docs/reference/environment-variables.md` | All env vars/config knobs for the platform |
+| `website/docs/reference/environment-variables.md` | All env vars for the platform |
 
 ---
 
@@ -395,11 +396,11 @@ Optional but valuable:
 After implementing everything, verify with:
 
 ```bash
-# All tests pass
-python -m pytest tests/ -q
+# All relevant tests pass through the canonical per-file subprocess runner.
+scripts/run_tests.sh tests/gateway/ tests/tools/ tests/agent/ -- -q
 
-# Grep for your platform name to find any missed integration points
-grep -r "telegram\|discord\|whatsapp\|slack" gateway/ tools/ agent/ cron/ hermes_cli/ toolsets.py \
-  --include="*.py" -l | sort -u
+# Search for your platform name to find missed integration points.
+git grep -l -E "telegram|discord|whatsapp|slack" -- \
+  gateway tools agent cron hermes_cli toolsets.py | sort -u
 # Check each file in the output — if it mentions other platforms but not yours, you missed it
 ```

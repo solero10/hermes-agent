@@ -69,6 +69,15 @@
   overflow-x: auto;
 }
 
+.hermes-kanban-columns--scrollable {
+  cursor: grab;
+}
+
+.hermes-kanban-columns--panning,
+.hermes-kanban-columns--panning * {
+  cursor: grabbing !important;
+}
+
 .hermes-kanban-column {
   flex: 0 0 280px;
   display: flex;
@@ -314,8 +323,8 @@
   max-width: 100%;
   border: 1px solid color-mix(in srgb, var(--color-ring) 38%, var(--color-border));
   border-radius: 999px;
-  padding: 0.08rem 0.45rem;
-  color: var(--color-foreground);
+  padding: 0.08rem 0.4rem;
+  color: var(--color-muted-foreground);
   background: color-mix(in srgb, var(--color-ring) 10%, transparent);
   font-size: 0.68rem;
   line-height: 1.2;
@@ -325,29 +334,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--color-muted-foreground);
 }
 
-.hermes-kanban-workflow-detail .hermes-kanban-meta-value {
-  overflow-wrap: anywhere;
-}
+/* ---- Create-task dialog ----------------------------------------------- */
 
-/* ---- Inline create --------------------------------------------------- */
-
-.hermes-kanban-inline-create {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  padding: 0.5rem;
-  margin-bottom: 0.5rem;
-  background: color-mix(in srgb, var(--color-card) 70%, transparent);
-  border: 1px dashed var(--color-border);
-  border-radius: var(--radius-sm, 0.25rem);
-}
-
-.hermes-kanban-inline-create > .flex.gap-2:last-child > button:first-of-type {
-  flex: 1;
-  min-width: 0;
+/* Wider than the base dialog so the workspace/parent selectors and the
+   labeled two-column rows breathe; still clamped to the viewport. */
+.hermes-kanban-create-dialog {
+  width: 36rem;
 }
 
 /* ---- Drawer (task detail side panel) --------------------------------- */
@@ -597,6 +591,18 @@
   max-width: 280px;
 }
 
+/* Comment footer = workflow hint + input row. The border-top lives on the
+   wrapper so the hint sits inside the same visual block as the input. */
+.hermes-kanban-drawer-comment-foot {
+  border-top: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-card) 90%, transparent);
+}
+
+.hermes-kanban-comment-hint {
+  padding: 0.45rem 0.75rem 0;
+  cursor: help;
+}
+
 .hermes-kanban-drawer-comment-row {
   display: flex;
   gap: 0.4rem;
@@ -604,8 +610,6 @@
   /* Keep the comment input clear of the mobile browser nav bar / home
      indicator by extending the bottom padding with the safe-area inset. */
   padding-bottom: max(0.55rem, calc(0.55rem + env(safe-area-inset-bottom)));
-  border-top: 1px solid var(--color-border);
-  background: color-mix(in srgb, var(--color-card) 90%, transparent);
 }
 
 .hermes-kanban-count {

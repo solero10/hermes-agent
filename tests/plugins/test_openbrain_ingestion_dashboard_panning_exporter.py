@@ -90,7 +90,7 @@ def test_panning_run_exports_valid_sanitized_dashboard_snapshot():
 
     rendered = json.dumps(validated)
     assert "/mnt/d/private" not in rendered
-    assert "C:\\Users\\Ken" not in rendered
+    assert "C:\\Users\\Example" not in rendered
     assert "localhost:9123" not in rendered
     assert "should-not-leak" not in rendered
 
@@ -100,7 +100,7 @@ def test_panning_run_exports_valid_sanitized_dashboard_snapshot():
     assert first_unit["source_ref"] == {
         "kind": "otter_transcript",
         "source_unit_id": first_unit["id"],
-        "display_path": "Otter/2023-11-30 EY AI Architecture Platform Development.md",
+        "display_path": "Otter/2023-11-30 Demo AI Architecture Platform Session.md",
     }
 
 
@@ -631,7 +631,7 @@ def test_exported_snapshot_is_read_by_dashboard_board_api(tmp_path, monkeypatch)
 
     rendered = json.dumps(board)
     assert "/mnt/d/private" not in rendered
-    assert "C:\\Users\\Ken" not in rendered
+    assert "C:\\Users\\Example" not in rendered
     assert "localhost:9123" not in rendered
 
 

@@ -14,7 +14,7 @@ def test_safe_credential_metadata_uses_label_and_demotes_priority_only():
         source="manual:device_code",
         id="raw-credential-id-not-used",
         access_token="sk-sec...pear",
-        refresh_token="refresh-secret-should-not-appear",
+        refresh_token="redacted-refresh-marker",
     )
 
     metadata = attribution.safe_credential_metadata(entry)

@@ -1,86 +1,80 @@
 # Hermes Agent Testing Guide
 
 This file holds the full testing guidance that used to live in the root
-`AGENTS.md`. The root file keeps only the short commands and invariant rules.
+`AGENTS.md`. The root file keeps only short commands and invariant rules.
 
-## Canonical Runner
-
-**Always prefer `scripts/run_tests.sh`** for repo verification. It activates the
-repo virtualenv, runs in a clean environment, and delegates to
-`scripts/run_tests_parallel.py`.
+## Development Environment
 
 ```bash
-scripts/run_tests.sh                                  # full suite
-scripts/run_tests.sh -j 4                             # cap parallel worker count
-scripts/run_tests.sh tests/gateway/                   # one directory
-scripts/run_tests.sh tests/agent/test_prompt_builder.py  # one file
-scripts/run_tests.sh tests/agent/test_prompt_builder.py -- -k TestBuildContextFilesPrompt
-scripts/run_tests.sh tests/agent/test_prompt_builder.py -- -q --tb=long
-scripts/run_tests.sh -- -v --tb=long                  # pytest args only
-```
-
-Important argument rule: anything after a literal `--` is passed through to each
-per-file pytest invocation. Positional paths before `--` must be directories or
-`.py` files; node IDs such as `tests/foo.py::test_bar` are not discovery paths.
-Use a file path plus `-- -k pattern` for a focused test.
-
-## What the Wrapper Enforces
-
-`scripts/run_tests.sh` provides CI-like local behavior:
-
-- Activates `.venv`, `venv`, or `$HOME/.hermes/hermes-agent/venv`.
-- Starts from a clean environment with credential variables removed.
-- Sets `TZ=UTC`, `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, and `PYTHONHASHSEED=0`.
-- Runs `scripts/run_tests_parallel.py`, which discovers test files and runs one
-  `python -m pytest <file>` subprocess per file.
-- Avoids persistent xdist workers; per-file subprocesses prevent cross-file
-  module-level state leakage.
-- Skips integration/e2e/docker directories during default discovery unless the
-  user explicitly targets them or uses runner options intended for that path.
-
-Runner knobs:
-
-- `-j N` caps parallel worker count.
-- `--file-timeout SECONDS` adjusts the per-file wall-clock cap.
-- `--slice I/N` runs one duration-balanced CI-style slice.
-- `HERMES_TEST_WORKERS`, `HERMES_TEST_PATHS`, and `HERMES_TEST_SLICE` provide
-  environment-based overrides.
-
-## Direct Pytest Use
-
-Use direct pytest only for IDE debugging or when you intentionally need a raw
-pytest path. Activate the venv first and remember this does not fully mirror the
-wrapper's clean environment.
-
-```bash
+# Prefer .venv; fall back to venv if that's what your checkout has.
 source .venv/bin/activate   # or: source venv/bin/activate
-python -m pytest tests/agent/test_prompt_builder.py -q
-python -m pytest tests/agent/test_prompt_builder.py::TestBuildContextFilesPrompt -q
 ```
 
-Before opening a PR or claiming a fix is verified, rerun the relevant scope via
-`scripts/run_tests.sh`.
+`scripts/run_tests.sh` probes `.venv` first, then `venv`, then
+`$HOME/.hermes/hermes-agent/venv` (for worktrees that share a venv with the
+main checkout).
 
-## Hermetic Test Rules
+## Testing
 
-- Tests must not write to the real `~/.hermes/` tree. Use `tmp_path`,
-  `monkeypatch`, and the existing fixtures that redirect `HERMES_HOME`.
-- Tests that mock `Path.home()` for profile features must also set
-  `HERMES_HOME`, because runtime code uses `get_hermes_home()`.
-- Do not let tests call live gateway/systemd/process-control paths without the
-  explicit guard-bypass markers and heavy justification.
-- For config migration, provider resolution, plugin discovery, prompt building,
-  security boundaries, file/network I/O, and remote backends, prefer real-path
-  tests over mocks.
+### Python
+**ALWAYS use `scripts/run_tests.sh`** — do not call `pytest` directly for repo
+verification. The script enforces hermetic environment parity with CI
+(credential vars unset, TZ=UTC, LANG=C.UTF-8, PYTHONHASHSEED=0) and runs each
+test file in a freshly-spawned subprocess through `scripts/run_tests_parallel.py`
+(no xdist, no shared workers). Direct `pytest` on a 16+ core developer
+machine with API keys set diverges from CI in ways that have caused multiple
+"works locally, fails in CI" incidents (and the reverse).
 
-## Don't Write Change-Detector Tests
+```bash
+scripts/run_tests.sh                                  # full suite, CI-parity
+scripts/run_tests.sh tests/gateway/                   # one directory
+scripts/run_tests.sh tests/agent/test_foo.py -- -k test_x  # one test/filter
+scripts/run_tests.sh -v --tb=long                     # pass-through pytest flags
+```
 
-A test is a **change-detector** if it fails whenever data that is expected to
-change gets updated: model catalogs, config-version literals, provider counts,
-enumeration counts, skill names, or current catalog snapshots. These tests add
-little behavioral coverage and make routine updates noisy.
+**Flake policy:** the runner auto-retries a failing test FILE once in a fresh
+subprocess (`--file-retries`, default 1; `HERMES_TEST_FILE_RETRIES=0` to
+disable). Pass-on-retry counts as green but is printed in a `⚠ FLAKY` summary
+section with both attempts' output. A FLAKY report is a bug to fix, not noise
+to ignore — timing-sensitive tests must not assume a quiet runner (loose
+wall-clock bounds ≥ 2s, event-based sync, no `assert not _wait_until(...)`
+negative-timing races).
 
-Do not write:
+#### Subprocess-per-test-file isolation
+
+Every test file runs with per-file subprocess isolation: a freshly-spawned Python subprocess via `run_tests_parallel.py`. This means module-level dicts/sets and
+ContextVars from one test file cannot leak into the next.
+
+#### Why the wrapper
+
+|                     | Without wrapper                             | With wrapper                              |
+| ------------------- | ------------------------------------------- | ----------------------------------------- |
+| Provider API keys   | Whatever is in your env (auto-detects pool) | All env vars except a specific few unset. |
+| HOME / `~/.hermes/` | Your real config+auth.json                  | Temp dir per test                         |
+| Timezone            | Local TZ (PDT etc.)                         | UTC                                       |
+| Locale              | Whatever is set                             | C.UTF-8                                   |
+
+### Where to place what tests
+
+The CI change classifier (`scripts/ci/classify_changes.py`) runs specific jobs based on what files changed. A Python test that asserts
+about the contents of `package.json`, `package-lock.json`, `.ts`/`.tsx`
+source, or any other JS-side artifact will not run on a PR that only touches
+those files. This means a regression can go green on a PR and red on `main` (where the
+classifier fails open and runs everything).
+
+Any test that reads or asserts about `package.json`,
+`package-lock.json`, `tsconfig.json`, `.ts`/`.tsx`/`.js`/`.mjs`/`.cjs`
+source files configuration belongs in the JS (vitest) test suite, not in `tests/*.py`.
+
+### Don't write change-detector tests
+
+A test is a **change-detector** if it fails whenever data that is **expected
+to change** gets updated — model catalogs, config version numbers,
+enumeration counts, hardcoded lists of provider models. These tests add no
+behavioral coverage; they just guarantee that routine source updates break
+CI and cost engineering time to "fix."
+
+**Do not write:**
 
 ```python
 # catalog snapshot — breaks every model release
@@ -94,7 +88,7 @@ assert DEFAULT_CONFIG["_config_version"] == 21
 assert len(_PROVIDER_MODELS["huggingface"]) == 8
 ```
 
-Do write:
+**Do write:**
 
 ```python
 # behavior: does the catalog plumbing work at all?
@@ -112,5 +106,74 @@ for m in _PROVIDER_MODELS["huggingface"]:
     assert m.lower() in DEFAULT_CONTEXT_LENGTHS_LOWER
 ```
 
-Rule of thumb: if the test reads like a snapshot of current data, rewrite it as
-an invariant about how two pieces of data must relate.
+The rule: if the test reads like a snapshot of current data, delete it. If
+it reads like a contract about how two pieces of data must relate, keep it.
+When a PR adds a new provider/model and you want a test, make the test
+assert the relationship (e.g. "catalog entries all have context lengths"),
+not the specific names.
+
+Reviewers should reject new change-detector tests; authors should convert
+them into invariants before re-requesting review.
+
+### Never read source code in tests
+
+A test that reads a source file's text is testing *the shape of the
+source code*, not its behavior. This is a hard antipattern, banned outright.
+Any test that reads a .py, .ts, .tsx, etc., file is suspect.
+
+**Why it's actively harmful, not just weak:**
+
+- It passes when the implementation is subtly broken (the regex matches a
+  call site that exists but is wired wrong) and fails when a correct
+  refactor changes formatting, variable names, or control flow with
+  identical runtime behavior. Both directions of failure are wrong.
+- It can't be run against a built/bundled/minified artifact, so it silently
+  stops testing anything the moment code moves, gets renamed, or a
+  dependency reformats it.
+- It actively blocks refactors: reviewers see "keeps a pattern intact" tests
+  fail during pure structural cleanup with no behavior change, and either
+  hand-wave the failure (dangerous) or waste time updating regexes that add
+  nothing (waste).
+- It gives false confidence. a green suite full of source-regex tests
+  looks like coverage but has never once executed the code path it claims
+  to guard.
+
+**Do not write:**
+
+```ts
+const source = fs.readFileSync(path.join(__dirname, 'main.ts'), 'utf8')
+
+test('backend spawn hides the Windows console', () => {
+  assert.match(source, /spawn\(\s*backend\.command,\s*backend\.args[\s\S]{0,300}hiddenWindowsChildOptions/)
+})
+```
+
+**Do write — extract the logic into a small pure/DI-testable function and
+call it for real:**
+
+```ts
+// backend-spawn.ts
+export function hiddenWindowsChildOptions(options: SpawnOptionsLike = {}, isWindows = process.platform === 'win32') {
+  if (!isWindows || 'windowsHide' in options) return options
+  return { ...options, windowsHide: true }
+}
+
+// backend-spawn.test.ts
+test('windowsHide defaults to true on Windows, is left alone elsewhere', () => {
+  assert.equal(hiddenWindowsChildOptions({}, true).windowsHide, true)
+  assert.equal(hiddenWindowsChildOptions({}, false).windowsHide, undefined)
+  assert.equal(hiddenWindowsChildOptions({ windowsHide: false }, true).windowsHide, false)
+})
+```
+
+If the logic lives inline in a god-file (`main.ts`, `cli.py`,
+`gateway/run.py`) and extracting it feels disruptive: that's the actual
+signal to do the extraction, not to regex around it.
+
+## Runner Argument Notes
+
+Anything after a literal `--` is passed through to each per-file pytest
+invocation. Bare pytest flags such as `-q`, `-v`, `-k pattern`, and `--tb=long`
+also pass through automatically. Positional test targets before `--` should be
+directories or `.py` files; for a single test, name the file and pass `-- -k
+pattern`.

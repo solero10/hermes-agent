@@ -167,6 +167,8 @@ def test_feasibility_check_passes_live_main_runtime():
             "base_url": "https://chatgpt.com/backend-api/codex",
             "api_key": "codex-token",
             "api_mode": "codex_responses",
+            "request_attribution_credential": {},
+            "auth_mode": "",
         },
     )
 

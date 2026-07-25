@@ -37,6 +37,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -59,62 +60,13 @@ except ImportError:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_hermes_home() -> Path:
-    """Return the active Hermes home directory."""
-    try:
-        from hermes_constants import get_hermes_home
-        return get_hermes_home()
-    except ImportError:
-        return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
-
-
 def _get_sessions_dir() -> Path:
     """Return the sessions directory using HERMES_HOME."""
-    return _get_hermes_home() / "sessions"
-
-
-def _routing_for_entry(session_key: str, entry: dict) -> dict:
-    """Build read-only platform routing visibility for a session entry."""
-    origin = entry.get("origin", {}) if isinstance(entry.get("origin", {}), dict) else {}
-    platform = entry.get("platform") or origin.get("platform", "")
-    chat_id = origin.get("chat_id", "")
-    thread_id = origin.get("thread_id")
-    target = f"{platform}:{chat_id}" if platform and chat_id else platform
-    if thread_id not in (None, "") and target:
-        routed_target = f"{target}:{thread_id}"
-    else:
-        routed_target = target
-
-    return {
-        "target": target,
-        "routed_target": routed_target,
-        "platform": platform,
-        "chat_id": chat_id,
-        "thread_id": thread_id,
-        "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
-        "chat_name": origin.get("chat_name", ""),
-        "chat_topic": origin.get("chat_topic"),
-        "user_id": origin.get("user_id", ""),
-        "user_name": origin.get("user_name", ""),
-        "session_key": session_key,
-        "session_id": entry.get("session_id", ""),
-    }
-
-
-def _provenance_for_entry(session_key: str, entry: dict) -> dict:
-    """Build read-only source provenance for an MCP conversation record."""
-    origin = entry.get("origin", {}) if isinstance(entry.get("origin", {}), dict) else {}
-    return {
-        "read_only": True,
-        "source": "gateway_sessions_index",
-        "sessions_index_path": str(_get_sessions_dir() / "sessions.json"),
-        "session_db_path": str(_get_hermes_home() / "state.db"),
-        "session_key": session_key,
-        "session_id": entry.get("session_id", ""),
-        "origin_present": bool(origin),
-        "created_at": entry.get("created_at", ""),
-        "updated_at": entry.get("updated_at", ""),
-    }
+    try:
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / "sessions"
+    except ImportError:
+        return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "sessions"
 
 
 def _get_session_db():
@@ -128,10 +80,99 @@ def _get_session_db():
 
 
 def _load_sessions_index() -> dict:
-    """Load the gateway sessions.json index directly.
+    """Load the gateway session routing index.
 
     Returns a dict of session_key -> entry_dict with platform routing info.
-    This avoids importing the full SessionStore which needs GatewayConfig.
+
+    state.db is the primary source (#9006): gateway sessions persist their
+    routing metadata (session_key, chat/thread ids, display_name, origin) on
+    the durable session row, so a single database read replaces the old
+    dual-file sessions.json dependency.  Falls back to sessions.json for
+    pre-migration databases where no gateway rows carry a session_key yet.
+    """
+    entries = _load_sessions_index_from_db()
+    if entries:
+        return entries
+    return _load_sessions_index_from_json()
+
+
+def _row_to_index_entry(row: dict) -> dict:
+    """Convert a state.db gateway session row to the sessions.json entry shape."""
+    origin = {}
+    origin_json = row.get("origin_json")
+    if origin_json:
+        try:
+            parsed = json.loads(origin_json)
+            if isinstance(parsed, dict):
+                origin = parsed
+        except (TypeError, ValueError):
+            pass
+    if not origin:
+        # Pre-origin_json rows: synthesize the minimal origin from columns.
+        origin = {
+            "platform": row.get("source", ""),
+            "chat_id": row.get("chat_id"),
+            "chat_type": row.get("chat_type"),
+            "thread_id": row.get("thread_id"),
+            "user_id": row.get("user_id"),
+        }
+
+    def _iso(ts) -> str:
+        try:
+            return datetime.fromtimestamp(float(ts)).isoformat() if ts else ""
+        except (TypeError, ValueError, OSError):
+            return ""
+
+    input_tokens = int(row.get("input_tokens") or 0)
+    output_tokens = int(row.get("output_tokens") or 0)
+    return {
+        "session_id": str(row.get("id", "")),
+        "session_key": row.get("session_key", ""),
+        "platform": row.get("source", ""),
+        "chat_type": row.get("chat_type") or origin.get("chat_type", ""),
+        "display_name": row.get("display_name") or origin.get("chat_name") or "",
+        "origin": origin,
+        "created_at": _iso(row.get("started_at")),
+        "updated_at": _iso(row.get("last_active") or row.get("started_at")),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _load_sessions_index_from_db() -> dict:
+    """Build the routing index from state.db gateway session rows."""
+    db = _get_session_db()
+    if db is None:
+        return {}
+    try:
+        lister = getattr(db, "list_gateway_sessions", None)
+        if not callable(lister):
+            return {}
+        rows = lister(active_only=True)
+        entries = {}
+        for row in rows:
+            key = row.get("session_key")
+            if not key:
+                continue
+            entries[key] = _row_to_index_entry(row)
+        return entries
+    except Exception as e:
+        logger.debug("Failed to load gateway sessions from state.db: %s", e)
+        return {}
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _load_sessions_index_from_json() -> dict:
+    """Legacy fallback: load the gateway sessions.json index directly.
+
+    Used only for pre-migration databases whose gateway rows don't carry a
+    session_key yet.  This avoids importing the full SessionStore which
+    needs GatewayConfig.
     """
     sessions_file = _get_sessions_dir() / "sessions.json"
     if not sessions_file.exists():
@@ -169,6 +210,57 @@ def _load_channel_directory() -> dict:
     except Exception as e:
         logger.debug("Failed to load channel_directory.json: %s", e)
         return {}
+
+
+def _get_state_db_path() -> Path:
+    """Return the session database path using HERMES_HOME."""
+    try:
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / "state.db"
+    except ImportError:
+        return Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")) / "state.db"
+
+
+def _routing_for_entry(session_key: str, entry: dict) -> dict:
+    """Return sanitized delivery/routing metadata for a gateway session.
+
+    The MCP bridge is read-mostly, but clients still need to understand where a
+    session came from and which target string would route back to the same
+    chat/topic.  Keep this to identifiers Hermes already exposes through
+    gateway session/channel surfaces; do not include credentials or raw message
+    data.
+    """
+    origin = entry.get("origin", {}) if isinstance(entry, dict) else {}
+    platform = (entry.get("platform") if isinstance(entry, dict) else "") or origin.get("platform", "")
+    chat_id = origin.get("chat_id", "")
+    thread_id = origin.get("thread_id")
+    chat_topic = origin.get("chat_topic")
+    target = f"{platform}:{chat_id}" if platform and chat_id else platform or ""
+    routed_target = target
+    if target and thread_id not in (None, ""):
+        routed_target = f"{target}:{thread_id}"
+    return {
+        "session_key": session_key,
+        "session_id": entry.get("session_id", "") if isinstance(entry, dict) else "",
+        "platform": platform,
+        "chat_id": chat_id,
+        "thread_id": thread_id,
+        "chat_topic": chat_topic,
+        "target": target,
+        "routed_target": routed_target,
+    }
+
+
+def _provenance_for_entry(session_key: str, entry: dict) -> dict:
+    """Return read-only source metadata for MCP conversation results."""
+    return {
+        "source": "gateway_sessions_index",
+        "read_only": True,
+        "session_key": session_key,
+        "session_id": entry.get("session_id", "") if isinstance(entry, dict) else "",
+        "sessions_index_path": str(_get_sessions_dir() / "sessions.json"),
+        "session_db_path": str(_get_state_db_path()),
+    }
 
 
 def _coerce_int(
@@ -275,8 +367,7 @@ class EventBridge:
         self._last_poll_timestamps: Dict[str, float] = {}  # session_key -> unix timestamp
         # In-memory approval tracking (populated from events)
         self._pending_approvals: Dict[str, dict] = {}
-        # mtime cache — skip expensive work when files haven't changed
-        self._sessions_json_mtime: float = 0.0
+        # mtime cache — skip expensive work when state.db hasn't changed
         self._state_db_mtime: float = 0.0
         self._cached_sessions_index: dict = {}
 
@@ -402,21 +493,14 @@ class EventBridge:
     def _poll_once(self, db):
         """Check for new messages across all sessions.
 
-        Uses mtime checks on sessions.json and state.db to skip work
-        when nothing has changed — makes 200ms polling essentially free.
+        Uses a single mtime check on state.db to skip work when nothing
+        has changed — makes 200ms polling essentially free.  Since #9006
+        the routing index itself lives in state.db (session rows carry
+        session_key/origin metadata), so a new conversation and its first
+        message land in the SAME file and one mtime check covers both —
+        eliminating the old dual-file (sessions.json + state.db) race that
+        could drop brand-new conversations (#8925).
         """
-        # Check if sessions.json has changed (mtime check is ~1μs)
-        sessions_file = _get_sessions_dir() / "sessions.json"
-        try:
-            sj_mtime = sessions_file.stat().st_mtime if sessions_file.exists() else 0.0
-        except OSError:
-            sj_mtime = 0.0
-
-        if sj_mtime != self._sessions_json_mtime:
-            self._sessions_json_mtime = sj_mtime
-            self._cached_sessions_index = _load_sessions_index()
-
-        # Check if state.db has changed
         try:
             from hermes_constants import get_hermes_home
             db_file = get_hermes_home() / "state.db"
@@ -428,10 +512,14 @@ class EventBridge:
         except OSError:
             db_mtime = 0.0
 
-        if db_mtime == self._state_db_mtime and sj_mtime == self._sessions_json_mtime:
+        if db_mtime == self._state_db_mtime:
             return  # Nothing changed since last poll — skip entirely
 
         self._state_db_mtime = db_mtime
+        # Refresh the routing index from state.db on every change tick —
+        # it's a single indexed query and it can never lag the messages
+        # table (both live in the same database file).
+        self._cached_sessions_index = _load_sessions_index()
         entries = self._cached_sessions_index
 
         for session_key, entry in entries.items():
@@ -503,14 +591,13 @@ class EventBridge:
 # MCP Server
 # ---------------------------------------------------------------------------
 
-def create_mcp_server(event_bridge: Optional[EventBridge] = None):
+def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
     """Create and return the Hermes MCP server with all tools registered."""
     if not _MCP_SERVER_AVAILABLE:
         raise ImportError(
             "MCP server requires the 'mcp' package. "
             f"Install with: {sys.executable} -m pip install 'mcp'"
         )
-    assert FastMCP is not None
 
     mcp = FastMCP(
         "hermes",
@@ -534,8 +621,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None):
         """List active messaging conversations across connected platforms.
 
         Returns conversations with their session keys (needed for messages_read),
-        platform, chat type, display name, last activity time, and read-only
-        routing/provenance metadata for deciding where a conversation came from.
+        platform, chat type, display name, and last activity time.
 
         Args:
             platform: Filter by platform name (telegram, discord, slack, etc.)
@@ -572,6 +658,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None):
                 "user_name": origin.get("user_name", ""),
                 "updated_at": entry.get("updated_at", ""),
                 "routing": _routing_for_entry(key, entry),
+                "provenance_source": "gateway_sessions_index",
             })
 
         conversations.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
@@ -589,9 +676,6 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None):
     @mcp.tool()
     def conversation_get(session_key: str) -> str:
         """Get detailed info about one conversation by its session key.
-
-        Includes read-only routing and provenance blocks so MCP clients can see
-        the platform target/session-index source without sending a message.
 
         Args:
             session_key: The session key from conversations_list
@@ -632,7 +716,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None):
         """Read recent messages from a conversation.
 
         Returns the message history in chronological order with role, content,
-        timestamp, and read-only routing/provenance metadata for the transcript.
+        and timestamp for each message.
 
         Args:
             session_key: The session key from conversations_list
@@ -675,11 +759,11 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None):
         return json.dumps({
             "session_key": session_key,
             "session_id": session_id,
+            "count": len(messages),
+            "total_in_session": len(filtered),
             "read_only": True,
             "routing": _routing_for_entry(session_key, entry),
             "provenance": _provenance_for_entry(session_key, entry),
-            "count": len(messages),
-            "total_in_session": len(filtered),
             "messages": messages,
         }, indent=2)
 
@@ -730,8 +814,13 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None):
         attachments = _extract_attachments(target_msg)
 
         return json.dumps({
+            "session_key": session_key,
+            "session_id": session_id,
             "message_id": message_id,
             "count": len(attachments),
+            "read_only": True,
+            "routing": _routing_for_entry(session_key, entry),
+            "provenance": _provenance_for_entry(session_key, entry),
             "attachments": attachments,
         }, indent=2)
 
@@ -859,13 +948,14 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None):
                     continue
                 if platform and p.lower() != platform.lower():
                     continue
-                target_str = f"{p}:{chat_id}"
+                routing = _routing_for_entry(key, entry)
+                target_str = routing["target"]
                 if target_str in seen:
                     continue
                 seen.add(target_str)
                 targets.append({
                     "target": target_str,
-                    "routed_target": _routing_for_entry(key, entry).get("routed_target", target_str),
+                    "routed_target": routing["routed_target"],
                     "platform": p,
                     "name": entry.get("display_name") or origin.get("chat_name", ""),
                     "chat_type": entry.get("chat_type", origin.get("chat_type", "")),
@@ -883,9 +973,10 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None):
                 for ch in entries_list:
                     if isinstance(ch, dict):
                         chat_id = ch.get("id", ch.get("chat_id", ""))
+                        target = f"{plat}:{chat_id}" if chat_id else plat
                         channels.append({
-                            "target": f"{plat}:{chat_id}" if chat_id else plat,
-                            "routed_target": f"{plat}:{chat_id}" if chat_id else plat,
+                            "target": target,
+                            "routed_target": target,
                             "platform": plat,
                             "name": ch.get("name", ch.get("display_name", "")),
                             "chat_type": ch.get("type", ""),

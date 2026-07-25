@@ -75,14 +75,18 @@ across replays.
 
 ### Bare test doubles skip __init__
 Some gateway tests build lightweight objects with `object.__new__(Class)` to
-avoid heavy adapter or runner initialization. Code paths exercised by those
-tests should use safe `getattr` defaults for optional attributes instead of
-assuming `__init__` populated every field.
+avoid heavy adapter or runner initialization. Code paths exercised by those tests
+should use safe `getattr` defaults for optional attributes instead of assuming
+`__init__` populated every field.
 
 ### Boolean auth gates require real bool markers
 Authorization gates for adapter-verified facts (for example role allowlists)
-should compare with `is True`, not generic truthiness. This prevents MagicMock
-or other truthy stand-ins from accidentally authorizing a request in tests or
+should compare with `is True`, not generic truthiness. This prevents MagicMock or
+other truthy stand-ins from accidentally authorizing a request in tests or
 fixture-heavy paths.
 
----
+### Probe classes, not MagicMock instances, for optional adapter capabilities
+When testing or dispatching optional adapter methods, inspect the adapter class
+or a real adapter object instead of a `MagicMock` instance. MagicMock creates
+truthy attributes on demand, so instance-level probes can misclassify a bare test
+double as supporting a method it never implemented.

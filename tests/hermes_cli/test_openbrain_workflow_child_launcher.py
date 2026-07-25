@@ -135,7 +135,12 @@ while True:
 """
     adapter = _adapter_for_command(tmp_path, hermes_home, [sys.executable, "-c", code])
 
-    result = SubprocessChildRunner().run(adapter, timeout_seconds=0.2, poll_interval_seconds=0.01)
+    # Give the Python child enough time to start and install its SIGTERM
+    # handler before the supervisor timeout fires. A 0.2s timeout made this
+    # test scheduler-sensitive under parallel load: the supervisor could send
+    # SIGTERM before the child had reached signal.signal(), so the marker was
+    # not written even though production termination was behaving correctly.
+    result = SubprocessChildRunner().run(adapter, timeout_seconds=1.0, poll_interval_seconds=0.02)
 
     assert result.timed_out is True
     assert marker.read_text(encoding="utf-8") == "terminated"

@@ -40,13 +40,16 @@ _OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{4,}\b")
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{6,}")
 _URL_RE = re.compile(r"\b(?:https?|file)://[^\s\"'<>]+")
 _UNC_RE = re.compile(r"\\\\[^\s\"'<>]+")
-_WIN_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s\"'<>]+")
+_WIN_PATH_RE = re.compile(r"\b[A-Za-z]:[\\/][^\s\"'<>]+")
 _POSIX_PRIVATE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_])/(?:mnt|home|Users|private|var|tmp)/(?:[^\s\"'<>]+)"
 )
 _FIXTURE_SENTINEL_RE = re.compile(r"\b[A-Z0-9_]*SECRET[A-Z0-9_]*\b")
 _TRANSCRIPT_SENTINEL_RE = re.compile(r"(?i)\b(fake transcript paragraph|raw transcript|transcript paragraph)\b[^.!?]*(?:[.!?]|$)")
 _WHITESPACE_RE = re.compile(r"\s+")
+_WORKFLOW_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,160}$")
+_SAFE_RELATIVE_ARTIFACT_RE = re.compile(r"^[A-Za-z0-9_.@:+/-]{1,160}$")
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 def utc_now_iso() -> str:
@@ -79,6 +82,7 @@ def redact_workflow_text(value: Any, *, max_length: int = 500) -> str:
         pass
     text = _BEARER_RE.sub("Bearer [redacted]", text)
     text = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}=[redacted]", text)
+    text = re.sub(r"(?i)\b(?:api[_-]?key|authorization|bearer|credential|password|secret|token)=\[redacted\]", "[redacted-secret]", text)
     text = _OPENAI_KEY_RE.sub("[redacted-key]", text)
     text = _FIXTURE_SENTINEL_RE.sub("[redacted-secret]", text)
     text = _TRANSCRIPT_SENTINEL_RE.sub("[redacted-transcript]", text)
@@ -87,6 +91,57 @@ def redact_workflow_text(value: Any, *, max_length: int = 500) -> str:
     text = _WIN_PATH_RE.sub("[path]", text)
     text = _POSIX_PRIVATE_PATH_RE.sub("[path]", text)
     return clamp_text(text, max_length=max_length)
+
+
+def validate_workflow_identifier(value: Any, *, field_name: str = "identifier") -> str:
+    """Accept only bounded opaque ids in workflow monitor artifacts."""
+
+    text = str(value or "").strip()
+    if not _WORKFLOW_ID_RE.fullmatch(text) or ".." in text:
+        raise ValueError(f"invalid {field_name}")
+    return text
+
+
+def validate_optional_workflow_identifier(value: Any, *, field_name: str = "identifier") -> str | None:
+    if value is None:
+        return None
+    return validate_workflow_identifier(value, field_name=field_name)
+
+
+def validate_candidate_id_list(values: Any) -> list[str]:
+    return [validate_workflow_identifier(value, field_name="candidate_id") for value in (values or [])]
+
+
+def _safe_relative_artifact_pointer(value: Any) -> str | None:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return None
+    if text.startswith("artifact:"):
+        label = text.removeprefix("artifact:")
+        if label == "[redacted]" or _safe_relative_artifact_pointer(label):
+            return text
+        return None
+    if len(text) > 160 or "://" in text or text.startswith("/") or text.startswith("//") or _WINDOWS_DRIVE_PATH_RE.match(text):
+        return None
+    parts = [part for part in text.split("/") if part]
+    if not parts or any(part in {".", ".."} for part in parts):
+        return None
+    if not _SAFE_RELATIVE_ARTIFACT_RE.fullmatch(text):
+        return None
+    if redact_workflow_text(text, max_length=200) != text:
+        return None
+    return text
+
+
+def sanitize_artifact_path_list(values: Any) -> list[str]:
+    sanitized: list[str] = []
+    for value in values or []:
+        pointer = _safe_relative_artifact_pointer(value)
+        if pointer:
+            sanitized.append(pointer if pointer.startswith("artifact:") else f"artifact:{pointer}")
+        elif str(value or "").strip():
+            sanitized.append("artifact:[redacted]")
+    return sanitized
 
 
 def format_elapsed(seconds: int | float | None) -> str:
@@ -136,7 +191,7 @@ class StepStatus(BaseModel):
 
     task_id: str | None = None
     status: StepRuntimeStatus = "pending"
-    candidate_ids: list[str] = Field(default_factory=list, max_length=5000)
+    candidate_ids: list[str] = Field(default_factory=list, max_length=500)
     receipt_path: str | None = Field(default=None, max_length=500)
     completed_at: str | None = None
     blocked_or_error: str | None = Field(default=None, max_length=500)
@@ -145,6 +200,16 @@ class StepStatus(BaseModel):
     @classmethod
     def _redact_error(cls, value: str | None) -> str | None:
         return redact_workflow_text(value, max_length=500) if value else value
+
+    @field_validator("task_id")
+    @classmethod
+    def _validate_task_id(cls, value: str | None) -> str | None:
+        return validate_optional_workflow_identifier(value, field_name="task_id")
+
+    @field_validator("candidate_ids")
+    @classmethod
+    def _validate_candidate_ids(cls, value: list[str]) -> list[str]:
+        return validate_candidate_id_list(value)
 
     @field_validator("receipt_path")
     @classmethod
@@ -187,6 +252,16 @@ class WorkflowStatus(BaseModel):
     def _sanitize_text_fields(cls, value: str | None) -> str | None:
         return redact_workflow_text(value, max_length=500) if value else value
 
+    @field_validator("workflow_run_id", "source_unit_id")
+    @classmethod
+    def _validate_required_ids(cls, value: str) -> str:
+        return validate_workflow_identifier(value, field_name="workflow_id")
+
+    @field_validator("active_step", "active_task_id", "worker_session_id", "current_candidate_id", "dashboard_snapshot_revision")
+    @classmethod
+    def _validate_optional_ids(cls, value: str | None) -> str | None:
+        return validate_optional_workflow_identifier(value, field_name="workflow_id")
+
     @field_validator("source_folder", "receipt_path")
     @classmethod
     def _preserve_private_pointer_fields(cls, value: str | None) -> str | None:
@@ -225,6 +300,21 @@ class WorkflowEvent(BaseModel):
     def _sanitize_strings(cls, value: str | None) -> str | None:
         return redact_workflow_text(value, max_length=500) if value else value
 
+    @field_validator("workflow_run_id", "source_unit_id")
+    @classmethod
+    def _validate_event_required_ids(cls, value: str) -> str:
+        return validate_workflow_identifier(value, field_name="workflow_id")
+
+    @field_validator("step_key", "task_id", "candidate_id")
+    @classmethod
+    def _validate_event_optional_ids(cls, value: str | None) -> str | None:
+        return validate_optional_workflow_identifier(value, field_name="workflow_id")
+
+    @field_validator("artifact_paths")
+    @classmethod
+    def _sanitize_artifact_paths(cls, value: list[str]) -> list[str]:
+        return sanitize_artifact_path_list(value)
+
 
 class DashboardVerification(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -239,6 +329,11 @@ class DashboardVerification(BaseModel):
     @classmethod
     def _sanitize_note(cls, value: str | None) -> str | None:
         return redact_workflow_text(value, max_length=500) if value else value
+
+    @field_validator("source_unit_id", "snapshot_revision")
+    @classmethod
+    def _validate_dashboard_ids(cls, value: str | None) -> str | None:
+        return validate_optional_workflow_identifier(value, field_name="dashboard_id")
 
 
 class StatusArtifacts(BaseModel):
@@ -258,11 +353,26 @@ class StepHandoff(BaseModel):
     step_key: str
     step_name: str
     candidate_count: int = Field(default=0, ge=0)
-    candidate_ids: list[str] = Field(default_factory=list, max_length=5000)
+    candidate_ids: list[str] = Field(default_factory=list, max_length=500)
     receipt_path: str | None = None
     dashboard_verification: DashboardVerification = Field(default_factory=DashboardVerification)
     status_artifacts: StatusArtifacts | None = None
     next_eligible_step: str | None = None
+
+    @field_validator("workflow_run_id", "source_unit_id", "step_key")
+    @classmethod
+    def _validate_handoff_required_ids(cls, value: str) -> str:
+        return validate_workflow_identifier(value, field_name="handoff_id")
+
+    @field_validator("next_eligible_step")
+    @classmethod
+    def _validate_handoff_optional_ids(cls, value: str | None) -> str | None:
+        return validate_optional_workflow_identifier(value, field_name="handoff_id")
+
+    @field_validator("candidate_ids")
+    @classmethod
+    def _validate_handoff_candidate_ids(cls, value: list[str]) -> list[str]:
+        return validate_candidate_id_list(value)
 
 
 class WorkflowDashboardRun(BaseModel):

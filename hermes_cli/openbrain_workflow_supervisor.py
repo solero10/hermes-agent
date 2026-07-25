@@ -51,6 +51,8 @@ OPENBRAIN_WORKFLOW_STEPS = {
     "ready_cortexdb_import",
 }
 _EXECUTE_MODES = {"plan-only", "dry-run-execute", "production-execute", "production-import"}
+DISPATCH_HEARTBEAT_INTERVAL_SECONDS = 60.0
+DISPATCH_POLL_INTERVAL_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -985,9 +987,9 @@ def run_openbrain_step_task(
             source_unit_id=source_unit_id,
             source_folder=source_folder,
             heartbeat_callback=_kanban_heartbeat,
-            heartbeat_interval_seconds=0,
+            heartbeat_interval_seconds=DISPATCH_HEARTBEAT_INTERVAL_SECONDS,
             timeout_seconds=getattr(task, "max_runtime_seconds", None),
-            poll_interval_seconds=0.05,
+            poll_interval_seconds=DISPATCH_POLL_INTERVAL_SECONDS,
         ).run()
     if result.status == "done":
         kb.complete_task(

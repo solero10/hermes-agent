@@ -98,8 +98,9 @@ def test_cold_start_empty_model_does_not_crash(monkeypatch):
 def test_bare_runner_without_cache_attr_does_not_crash(monkeypatch):
     """object.__new__ runners lack _last_resolved_model.
 
-    See PITFALLS.md, "Bare test doubles skip __init__"; the getattr guard must
-    tolerate the missing attribute.
+    See PITFALLS.md, "Bare test doubles skip __init__."
+
+    The getattr guard must tolerate the missing attribute.
     """
     _patch_resolution(monkeypatch, model_from_config="deepseek/deepseek-v4-flash")
     runner = object.__new__(gateway_run.GatewayRunner)

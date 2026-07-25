@@ -46,7 +46,7 @@ def hermes_home(tmp_path, monkeypatch):
             {
                 "id": "transcript-a",
                 "source_type": "transcripts",
-                "label": "2023-11-30 EY AI Architecture Platform Development",
+                "label": "2023-11-30 Demo AI Architecture Platform Session",
                 "subtitle": "Otter transcript · 74 min",
                 "source_ref": {
                     "kind": "otter_transcript",
@@ -156,7 +156,7 @@ def hermes_home(tmp_path, monkeypatch):
                                 {
                                     "kind": "source_title",
                                     "label": "Source title",
-                                    "text": "2023-11-30 EY AI Architecture Platform Development",
+                                    "text": "2023-11-30 Demo AI Architecture Platform Session",
                                     "source": "source_unit.label",
                                 },
                                 {
@@ -1001,7 +1001,7 @@ def test_snapshot_redacts_sensitive_fields_and_paths_in_api(client, hermes_home)
     data["source_units"][0]["source_path"] = "/mnt/d/private/Otter/source.md"
     data["source_units"][0]["raw_url"] = "http://localhost:9123/private"
     data["source_units"][0]["label"] = "see /mnt/d/private/My Folder/file.md"
-    data["source_units"][0]["subtitle"] = "see C:\\Users\\Ken\\Private Folder\\file.md"
+    data["source_units"][0]["subtitle"] = "see C:\\Users\\Example\\Private Folder\\file.md"
     data["source_units"][0]["thoughts"][0]["api_token"] = "super-secret-value"
     data["source_units"][0]["thoughts"][0]["summary"] = (
         "api_key=SECRET123 password: hunter2 "

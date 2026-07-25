@@ -74,6 +74,39 @@ def test_append_event_assigns_incrementing_ids(hermes_home):
     assert [e["event_id"] for e in events] == [1, 2]
 
 
+def test_event_artifact_paths_are_redacted_before_dashboard_output(hermes_home):
+    unsafe = "/mnt/d/private/OpenBrain/source.txt api_key=super-secret-value SECRET_SENTINEL_SHOULD_NOT_APPEAR"
+    unsafe_windows_cloud = "D:/Cloud/G_Drive_kernk2/OpenBrain/SECRET_SENTINEL_SHOULD_NOT_APPEAR.txt?token=super-secret-value"
+    write_status(_status(active_step="thought_enrichment", steps={"thought_enrichment": StepStatus(status="running")}))
+    append_event(WorkflowEvent(
+        workflow_run_id="obwf_test",
+        source_unit_id="source-a",
+        step_key="thought_enrichment",
+        event_type="candidate_completed",
+        created_at="2026-07-06T10:00:00Z",
+        artifact_paths=[unsafe, unsafe_windows_cloud, "steps/thought_enrichment/receipt-pointer.json"],
+        message=f"{unsafe} {unsafe_windows_cloud}",
+    ))
+
+    events = read_events("obwf_test")
+    response = dashboard_response()
+    assert events
+    assert response["events"]
+    payload_text = json.dumps({"events": events, "response": response}, sort_keys=True)
+    assert "/mnt/d/private" not in payload_text
+    assert "D:/Cloud" not in payload_text
+    assert "G_Drive_kernk2" not in payload_text
+    assert "super-secret-value" not in payload_text
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+    assert "api_key=" not in payload_text
+    assert "token=" not in payload_text
+    event_artifacts = events[0]["artifact_paths"]
+    dashboard_artifacts = response["events"][0]["artifact_paths"]
+    assert event_artifacts == dashboard_artifacts
+    assert all(path.startswith("artifact:") for path in event_artifacts)
+    assert "artifact:steps/thought_enrichment/receipt-pointer.json" in event_artifacts
+
+
 def test_dashboard_summary_falls_back_to_status(hermes_home):
     write_status(_status(current_phase="enriching", completed_candidates=1, total_candidates=3))
     summary = read_dashboard_summary("obwf_test")

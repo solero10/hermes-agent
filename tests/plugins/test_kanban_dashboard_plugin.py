@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -115,6 +116,163 @@ def test_create_task_appears_on_board(client):
     assert "researcher" in data["assignees"]
 
 
+def test_board_list_recommends_persistent_workspace_for_configured_workdir(
+    client, tmp_path
+):
+    """Board metadata should tell the UI which safe task default to use."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    kb.write_board_metadata("default", default_workdir=str(repo))
+
+    plain_dir = tmp_path / "notes"
+    plain_dir.mkdir()
+    kb.create_board("notes", default_workdir=str(plain_dir))
+    kb.create_board("disposable")
+
+    response = client.get("/api/plugins/kanban/boards")
+
+    assert response.status_code == 200
+    boards = {board["slug"]: board for board in response.json()["boards"]}
+    assert boards["default"]["default_workspace_kind"] == "worktree"
+    assert boards["notes"]["default_workspace_kind"] == "dir"
+    assert boards["disposable"]["default_workspace_kind"] == "scratch"
+
+
+def test_create_board_persists_project_directory(client, tmp_path):
+    """The dashboard board form should anchor future tasks to its project."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+
+    response = client.post(
+        "/api/plugins/kanban/boards",
+        json={
+            "slug": "project-board",
+            "name": "Project Board",
+            "default_workdir": str(project_dir),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    board = response.json()["board"]
+    assert board["default_workdir"] == str(project_dir.resolve())
+    assert board["default_workspace_kind"] == "dir"
+    assert kb.read_board_metadata("project-board")["default_workdir"] == str(
+        project_dir.resolve()
+    )
+
+
+@pytest.mark.parametrize("path", ["relative/project", "~/missing-project"])
+def test_create_board_rejects_invalid_project_directory(client, path):
+    """A board must not persist a path that cannot anchor worker output."""
+    response = client.post(
+        "/api/plugins/kanban/boards",
+        json={"slug": "invalid-project", "default_workdir": path},
+    )
+
+    assert response.status_code == 400
+    assert "project directory" in response.json()["detail"].lower()
+
+
+def test_patch_board_sets_project_directory(client, tmp_path):
+    """Board-level default_workdir must be editable after creation."""
+    kb.create_board("late-config")
+    project_dir = tmp_path / "late-project"
+    project_dir.mkdir()
+
+    response = client.patch(
+        "/api/plugins/kanban/boards/late-config",
+        json={"default_workdir": str(project_dir)},
+    )
+
+    assert response.status_code == 200, response.text
+    board = response.json()["board"]
+    assert board["default_workdir"] == str(project_dir.resolve())
+    # The recommendation flips from scratch to a persistent kind so the
+    # create-task dialog's workspace default follows the board setting.
+    assert board["default_workspace_kind"] == "dir"
+    assert kb.read_board_metadata("late-config")["default_workdir"] == str(
+        project_dir.resolve()
+    )
+
+
+def test_patch_board_clears_project_directory(client, tmp_path):
+    """Empty string clears default_workdir; omitting it leaves it unchanged."""
+    project_dir = tmp_path / "was-configured"
+    project_dir.mkdir()
+    kb.create_board("clearable", default_workdir=str(project_dir))
+
+    # Omitted key → unchanged.
+    r = client.patch(
+        "/api/plugins/kanban/boards/clearable",
+        json={"name": "Renamed Only"},
+    )
+    assert r.status_code == 200
+    assert r.json()["board"]["default_workdir"] == str(project_dir.resolve())
+
+    # Empty string → cleared, recommendation falls back to scratch.
+    r = client.patch(
+        "/api/plugins/kanban/boards/clearable",
+        json={"default_workdir": ""},
+    )
+    assert r.status_code == 200
+    board = r.json()["board"]
+    assert not board.get("default_workdir")
+    assert board["default_workspace_kind"] == "scratch"
+
+
+@pytest.mark.parametrize("path", ["relative/project", "~/missing-project"])
+def test_patch_board_rejects_invalid_project_directory(client, path):
+    """PATCH must validate default_workdir like board creation does."""
+    kb.create_board("strict")
+
+    response = client.patch(
+        "/api/plugins/kanban/boards/strict",
+        json={"default_workdir": path},
+    )
+
+    assert response.status_code == 400
+    assert "project directory" in response.json()["detail"].lower()
+
+
+def test_new_board_dialog_collects_project_directory():
+    """Board creation should expose the setting that controls safe task defaults."""
+    bundle = (
+        Path(__file__).resolve().parents[2]
+        / "plugins"
+        / "kanban"
+        / "dashboard"
+        / "dist"
+        / "index.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'const [projectDirectory, setProjectDirectory] = useState("");' in bundle
+    assert "Project directory" in bundle
+    assert "Absolute path to the project folder" in bundle
+    assert "default_workdir: projectDirectory.trim() || undefined" in bundle
+
+
+def test_dashboard_workspace_picker_explains_persistence_contract():
+    """Task creation must make scratch deletion visible without a hover."""
+    bundle = (
+        Path(__file__).resolve().parents[2]
+        / "plugins"
+        / "kanban"
+        / "dashboard"
+        / "dist"
+        / "index.js"
+    ).read_text(encoding="utf-8")
+
+    assert "Temporary — deleted on completion" in bundle
+    assert "Git worktree — preserved" in bundle
+    assert "Directory — preserved" in bundle
+    assert "defaultWorkspacePath: (props.boardMeta && props.boardMeta.default_workdir) || \"\"" in bundle
+    assert (
+        "This workspace and any files left in it are deleted when the task completes."
+        in bundle
+    )
+
+
 def test_scheduled_tasks_have_their_own_column_not_todo(client):
     """Scheduled/time-delay tasks must not be silently bucketed into todo."""
 
@@ -210,23 +368,6 @@ def test_dashboard_select_filters_use_sdk_value_change_handler():
     assert "onChange: function (e)" in js
     assert "selectChangeHandler(props.setTenantFilter)" in js
     assert "selectChangeHandler(props.setAssigneeFilter)" in js
-
-
-def test_dashboard_does_not_crash_when_host_sdk_lacks_ws_helper():
-    """Older built dashboard hosts may not expose ``SDK.buildWsUrl``.
-
-    The Kanban tab should still render and poll REST data instead of throwing a
-    TypeError during the live-event WebSocket effect.
-    """
-
-    repo_root = Path(__file__).resolve().parents[2]
-    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
-    js = bundle.read_text()
-
-    assert 'const buildWsUrl = SDK.buildWsUrl;' in js
-    assert 'typeof buildWsUrl !== "function"' in js
-    assert "Kanban live updates disabled: SDK.buildWsUrl is unavailable" in js
-    assert "buildWsUrl.call(SDK" in js
 
 
 def test_dashboard_client_side_filtering_includes_tenant_filter():
@@ -912,65 +1053,6 @@ def test_ws_events_board_query_param_default_overrides_current_board_pointer(tmp
     task_ids = {event["task_id"] for event in payload["events"]}
     assert default_task in task_ids
     assert other_task not in task_ids
-
-
-def test_ws_events_sanitizes_openbrain_workflow_payloads(tmp_path, monkeypatch):
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
-
-    unsafe = (
-        "SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
-        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value"
-    )
-    conn = kb.connect()
-    try:
-        task_id = kb.create_task(
-            conn,
-            title="OpenBrain websocket step",
-            body="workflow_run_id: obwf_ws_privacy\nstep_key: panning_for_gold",
-            assignee="default",
-            workflow_template_id="openbrain-source-v1",
-            current_step_key="panning_for_gold",
-        )
-        assert kb.claim_task(conn, task_id) is not None
-        assert kb.heartbeat_worker(
-            conn,
-            task_id,
-            note=f"obwf=obwf_ws_privacy step=panning_for_gold {unsafe}",
-        )
-    finally:
-        conn.close()
-
-    import hermes_cli
-    import types
-
-    stub = types.SimpleNamespace(
-        _SESSION_TOKEN="secret-xyz",
-        _ws_auth_ok=lambda ws: ws.query_params.get("token", "") == "secret-xyz",
-    )
-    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", stub)
-    monkeypatch.setattr(hermes_cli, "web_server", stub, raising=False)
-
-    app = FastAPI()
-    app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
-    c = TestClient(app)
-
-    with c.websocket_connect("/api/plugins/kanban/events?token=secret-xyz&since=0") as ws:
-        payload = ws.receive_json()
-
-    events = [event for event in payload["events"] if event["task_id"] == task_id]
-    heartbeat = next(event for event in events if event["kind"] == "heartbeat")
-    assert heartbeat["payload"]["note"].startswith("obwf=obwf_ws_privacy")
-    assert "[redacted-secret]" in heartbeat["payload"]["note"]
-
-    payload_text = json.dumps(payload, sort_keys=True)
-    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
-    assert "raw transcript paragraph" not in payload_text
-    assert "/mnt/d/private" not in payload_text
-    assert "super-secret-value" not in payload_text
 
 
 def test_ws_events_swallows_cancellation_on_shutdown(tmp_path, monkeypatch):
@@ -2162,13 +2244,10 @@ def _patch_specifier_response(monkeypatch, *, content, model="test-model"):
     resp = MagicMock()
     resp.choices = [MagicMock()]
     resp.choices[0].message.content = content
-    fake_client = MagicMock()
-    fake_client.chat.completions.create = MagicMock(return_value=resp)
-    monkeypatch.setattr(
-        "agent.auxiliary_client.get_text_auxiliary_client",
-        lambda *a, **kw: (fake_client, model),
-    )
-    return fake_client
+    # specify_task routes through call_llm now (#35566) — mock it directly.
+    fake_call = MagicMock(return_value=resp)
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", fake_call)
+    return fake_call
 
 
 def test_specify_happy_path(client, monkeypatch):
@@ -2230,11 +2309,11 @@ def test_specify_no_aux_client_surfaces_reason(client, monkeypatch):
         json={"title": "rough", "triage": True},
     ).json()["task"]
 
-    # Simulate "no auxiliary client configured".
-    monkeypatch.setattr(
-        "agent.auxiliary_client.get_text_auxiliary_client",
-        lambda *a, **kw: (None, ""),
-    )
+    # Simulate "no auxiliary client configured" — call_llm raises when
+    # no provider resolves (#35566 routing).
+    def _no_provider(**kwargs):
+        raise RuntimeError("No LLM provider configured")
+    monkeypatch.setattr("agent.auxiliary_client.call_llm", _no_provider)
 
     r = client.post(
         f"/api/plugins/kanban/tasks/{t['id']}/specify",
@@ -2243,7 +2322,8 @@ def test_specify_no_aux_client_surfaces_reason(client, monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is False
-    assert "auxiliary client" in body["reason"]
+    # call_llm's no-provider RuntimeError surfaces via the LLM-error branch.
+    assert "LLM error" in body["reason"]
 
     # Task must stay in triage — nothing was touched.
     detail = client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()["task"]
@@ -2343,6 +2423,286 @@ def test_dashboard_failed_card_highlight_class_exists():
     assert "hermes-kanban-card--failed" in css
     assert "failedIds" in js
 
+# ---------------------------------------------------------------------------
+# Final result visibility for Done cards
+# ---------------------------------------------------------------------------
+
+
+def test_task_detail_exposes_result_and_latest_summary_separately(client):
+    """The drawer receives both source fields without a duplicate alias."""
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "Task with explicit result"},
+    )
+    task_id = r.json()["task"]["id"]
+    client.patch(
+        f"/api/plugins/kanban/tasks/{task_id}",
+        json={"status": "done", "result": "The final answer is 42.", "summary": "short handoff"},
+    )
+    r = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+    assert r.status_code == 200
+    data = r.json()["task"]
+    assert data["result"] == "The final answer is 42."
+    assert data["latest_summary"] == "short handoff"
+    assert "final_result" not in data
+
+
+def test_task_detail_exposes_latest_summary_when_result_is_empty(client):
+    """Summary-only completions remain available to the drawer fallback."""
+    conn = kb.connect()
+    task_id = kb.create_task(conn, title="Task with only run summary")
+    kb.claim_task(conn, task_id)
+    kb.complete_task(conn, task_id, summary="Report written to /output/report.md")
+    conn.close()
+
+    r = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+    assert r.status_code == 200
+    data = r.json()["task"]
+    assert data["status"] == "done"
+    assert not data["result"]
+    assert data["latest_summary"] == "Report written to /output/report.md"
+
+
+def test_task_detail_latest_summary_none_when_nothing_recorded(client):
+    """When no run summary exists, the existing field remains None."""
+    r = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "Task with no result at all"},
+    )
+    task_id = r.json()["task"]["id"]
+    r = client.get(f"/api/plugins/kanban/tasks/{task_id}")
+    assert r.status_code == 200
+    assert r.json()["task"]["latest_summary"] is None
+
+
+def test_board_tasks_include_latest_summary(client):
+    """Board cards already expose the summary used by the drawer fallback."""
+    conn = kb.connect()
+    task_id = kb.create_task(conn, title="Board card with summary only")
+    kb.claim_task(conn, task_id)
+    kb.complete_task(conn, task_id, summary="Done: see attachment")
+    conn.close()
+
+    r = client.get("/api/plugins/kanban/board")
+    assert r.status_code == 200
+    done_col = next(c for c in r.json()["columns"] if c["name"] == "done")
+    card = next((t for t in done_col["tasks"] if t["id"] == task_id), None)
+    assert card is not None
+    assert "Done: see attachment" in card["latest_summary"]
+
+
+def test_dashboard_done_final_result_section_rendered_from_summary():
+    """Frontend must render Final Result section from run summary when task.result is empty."""
+    repo_root = Path(__file__).resolve().parents[2]
+    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    assert "t.result || t.latest_summary" in dist
+    assert "Final Result (run summary)" in dist
+    assert "No final result was recorded" in dist
+    assert "orchestrator" in dist or "parent task" in dist
+
+
+def test_task_detail_includes_child_result_summaries(client):
+    """Parent drawers should receive the child results they need to render."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="Research topic")
+        child = kb.create_task(conn, title="Collect sources")
+        kb.link_tasks(conn, parent, child)
+        kb.complete_task(conn, parent, summary="Delegated research to child tasks.")
+        kb.recompute_ready(conn)
+        kb.complete_task(conn, child, summary="Collected five primary sources.")
+
+    response = client.get(f"/api/plugins/kanban/tasks/{parent}")
+
+    assert response.status_code == 200
+    assert response.json()["child_results"] == [
+        {
+            "id": child,
+            "title": "Collect sources",
+            "status": "done",
+            "latest_summary": "Collected five primary sources.",
+            "result": None,
+        }
+    ]
+
+
+def test_task_detail_child_results_sanitize_openbrain_workflow_child_handoffs(client):
+    """Workflow parent child_results must redact child display handoffs."""
+    unsafe = (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value "
+        "Bearer abcdefgh"
+    )
+    with kb.connect() as conn:
+        parent = kb.create_task(
+            conn,
+            title="OpenBrain workflow parent",
+            body="workflow_run_id: obwf_child_results_privacy",
+            assignee="default",
+            workflow_template_id="openbrain-source-v1",
+            current_step_key="orchestrate_children",
+        )
+        child = kb.create_task(
+            conn,
+            title="OpenBrain workflow child",
+            body="workflow_run_id: obwf_child_results_privacy\nstep_key: panning_for_gold",
+            assignee="default",
+            workflow_template_id="openbrain-source-v1",
+            current_step_key="panning_for_gold",
+        )
+        generic_child = kb.create_task(
+            conn,
+            title=f"Generic linked child {unsafe}",
+            body="generic child linked under workflow parent",
+            assignee="default",
+        )
+        kb.link_tasks(conn, parent, child)
+        kb.link_tasks(conn, parent, generic_child)
+        kb.complete_task(conn, parent, summary="Delegated workflow child.")
+        kb.recompute_ready(conn)
+        kb.complete_task(
+            conn,
+            child,
+            result=f"child final result {unsafe}",
+            summary=f"child latest summary {unsafe}",
+        )
+        kb.complete_task(
+            conn,
+            generic_child,
+            result=f"generic child final result {unsafe}",
+            summary=f"generic child latest summary {unsafe}",
+        )
+
+    response = client.get(f"/api/plugins/kanban/tasks/{parent}")
+
+    assert response.status_code == 200
+    child_results = response.json()["child_results"]
+    assert len(child_results) == 2
+    by_id = {result["id"]: result for result in child_results}
+    child_result = by_id[child]
+    assert child_result["id"] == child
+    assert child_result["title"] == "OpenBrain workflow child"
+    assert child_result["status"] == "done"
+    assert "[redacted-secret]" in child_result["result"]
+    assert "[redacted-secret]" in child_result["latest_summary"]
+    generic_child_result = by_id[generic_child]
+    assert generic_child_result["id"] == generic_child
+    assert generic_child_result["title"].startswith("Generic linked child")
+    assert generic_child_result["status"] == "done"
+    assert "[redacted-secret]" in generic_child_result["title"]
+    assert "[redacted-secret]" in generic_child_result["result"]
+    assert "[redacted-secret]" in generic_child_result["latest_summary"]
+
+    payload_text = json.dumps(child_results, sort_keys=True)
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+    assert "raw transcript paragraph" not in payload_text
+    assert "/mnt/d/private" not in payload_text
+    assert "super-secret-value" not in payload_text
+    assert "Bearer abcdefgh" not in payload_text
+
+
+def test_dashboard_final_result_uses_existing_fields_without_alias():
+    """The drawer should not duplicate result/summary into another API field."""
+    repo_root = Path(__file__).resolve().parents[2]
+    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    api = (repo_root / "plugins" / "kanban" / "dashboard" / "plugin_api.py").read_text()
+
+    assert "var finalResult = t.result || t.latest_summary || null;" in dist
+    assert "t.final_result" not in dist
+    assert 'd["final_result"]' not in api
+
+
+def test_dashboard_parent_notice_and_child_results_use_detail_links():
+    """Parent detection must use links.children, which exists in task detail."""
+    repo_root = Path(__file__).resolve().parents[2]
+    dist = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js").read_text()
+    detail = dist[dist.index("function TaskDetail"):]
+
+    assert "links.children.length > 0" in detail
+    assert "t.link_counts" not in detail
+    assert "Child Results" in detail
+    assert "props.data.child_results" in detail
+
+
+# ---------------------------------------------------------------------------
+# Local upgrade-preservation contracts: workflow metadata/privacy/UI hooks
+# ---------------------------------------------------------------------------
+
+
+def test_dashboard_does_not_crash_when_host_sdk_lacks_ws_helper():
+    """Older built dashboard hosts may not expose ``SDK.buildWsUrl``.
+
+    The Kanban tab should still render and poll REST data instead of throwing a
+    TypeError during the live-event WebSocket effect.
+    """
+
+    repo_root = Path(__file__).resolve().parents[2]
+    bundle = repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "index.js"
+    js = bundle.read_text()
+
+    assert 'const buildWsUrl = SDK.buildWsUrl;' in js
+    assert 'typeof buildWsUrl !== "function"' in js
+    assert "Kanban live updates disabled: SDK.buildWsUrl is unavailable" in js
+    assert "buildWsUrl.call(SDK" in js
+
+
+def test_ws_events_sanitizes_openbrain_workflow_payloads(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+
+    unsafe = (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value"
+    )
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="OpenBrain websocket step",
+            body="workflow_run_id: obwf_ws_privacy\nstep_key: panning_for_gold",
+            assignee="default",
+            workflow_template_id="openbrain-source-v1",
+            current_step_key="panning_for_gold",
+        )
+        assert kb.claim_task(conn, task_id) is not None
+        assert kb.heartbeat_worker(
+            conn,
+            task_id,
+            note=f"obwf=obwf_ws_privacy step=panning_for_gold {unsafe}",
+        )
+    finally:
+        conn.close()
+
+    import hermes_cli
+    import types
+
+    stub = types.SimpleNamespace(
+        _SESSION_TOKEN="***",
+        _ws_auth_ok=lambda ws: ws.query_params.get("token", "") == "secret-xyz",
+    )
+    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", stub)
+    monkeypatch.setattr(hermes_cli, "web_server", stub, raising=False)
+
+    app = FastAPI()
+    app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
+    c = TestClient(app)
+
+    with c.websocket_connect("/api/plugins/kanban/events?token=secret-xyz&since=0") as ws:
+        payload = ws.receive_json()
+
+    events = [event for event in payload["events"] if event["task_id"] == task_id]
+    heartbeat = next(event for event in events if event["kind"] == "heartbeat")
+    assert heartbeat["payload"]["note"].startswith("obwf=obwf_ws_privacy")
+    assert "[redacted-secret]" in heartbeat["payload"]["note"]
+
+    payload_text = json.dumps(payload, sort_keys=True)
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+    assert "raw transcript paragraph" not in payload_text
+    assert "/mnt/d/private" not in payload_text
+    assert "super-secret-value" not in payload_text
+
 
 def test_workflow_fields_surface_on_board_and_detail(client, kanban_home):
     created = client.post(
@@ -2379,6 +2739,623 @@ def test_workflow_fields_surface_on_board_and_detail(client, kanban_home):
     detail = client.get(f"/api/plugins/kanban/tasks/{created['id']}").json()["task"]
     assert detail["workflow"]["step_key"] == "thought_enrichment"
     assert "progress=1/3" in detail["latest_heartbeat_note"]
+
+
+def test_openbrain_workflow_metadata_ids_are_sanitized_in_dashboard_payloads(client, kanban_home):
+    """Workflow id fields are user-controlled metadata, not safe display text.
+
+    Quality/security gate t_f0661d06 reproduced a leak where unsafe
+    workflow_template_id/current_step_key values reached create, board, and
+    detail payloads raw even though other workflow strings were redacted.
+    """
+    unsafe_template = (
+        "openbrain-source-v1 api_key=super-secret-value "
+        "/mnt/d/private/OpenBrain/source.txt SECRET_SENTINEL_SHOULD_NOT_APPEAR"
+    )
+    unsafe_step = (
+        "panning_for_gold Bearer abcdefgh raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt"
+    )
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "OpenBrain unsafe metadata step",
+            "body": "workflow_run_id: obwf_dashboard_metadata_privacy",
+            "assignee": "default",
+            "workflow_template_id": unsafe_template,
+            "current_step_key": unsafe_step,
+        },
+    ).json()["task"]
+
+    board = client.get("/api/plugins/kanban/board").json()
+    cards = [task for col in board["columns"] for task in col["tasks"]]
+    card = next(task for task in cards if task["id"] == created["id"])
+    detail = client.get(f"/api/plugins/kanban/tasks/{created['id']}").json()["task"]
+
+    for payload in (created, card, detail):
+        assert payload["workflow_template_id"] == payload["workflow"]["template_id"]
+        assert payload["current_step_key"] == payload["workflow"]["step_key"]
+        payload_text = json.dumps(payload, sort_keys=True)
+        assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+        assert "super-secret-value" not in payload_text
+        assert "/mnt/d/private" not in payload_text
+        assert "Bearer abcdefgh" not in payload_text
+        assert "raw transcript paragraph" not in payload_text
+    assert "[redacted-secret]" in json.dumps(detail, sort_keys=True)
+
+
+
+def test_openbrain_workflow_task_metadata_fields_are_sanitized_in_create_board_and_detail_payloads(
+    client, kanban_home
+):
+    """Workflow task metadata fields must not leak raw user/control strings.
+
+    Regression for quality/security gate t_f0661d06: create, board, and detail
+    task payloads were still based on ``asdict(task)`` and leaked workflow task
+    metadata fields such as workspace_path, tenant, idempotency_key, skills,
+    and session_id even while body/result-style fields were redacted.
+    """
+    unsafe_snippets = [
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR",
+        "raw transcript paragraph",
+        "/mnt/d/private",
+        "super-secret-value",
+        "Bearer abcdefgh",
+    ]
+    created_response = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "OpenBrain unsafe task metadata",
+            "body": "workflow_run_id: obwf_dashboard_task_metadata_privacy",
+            "assignee": "default",
+            "workspace_kind": "worktree",
+            "workspace_path": "/mnt/d/private/OpenBrain/workspace SECRET_SENTINEL_SHOULD_NOT_APPEAR",
+            "tenant": "raw transcript paragraph tenant SECRET_SENTINEL_SHOULD_NOT_APPEAR",
+            "idempotency_key": "workflow-idempotency api_key=super-secret-value",
+            "skills": [
+                "panning-for-gold",
+                "skill-api_key=super-secret-value",
+                "Bearer abcdefgh skill",
+            ],
+            "workflow_template_id": "openbrain-source-v1",
+            "current_step_key": "panning_for_gold",
+        },
+    )
+    assert created_response.status_code == 200, created_response.text
+    created_payload = created_response.json()
+    task_id = created_payload["task"]["id"]
+
+    # session_id, branch_name, project_id, and model_override are not reachable
+    # through the dashboard create body, but they are still Task/asdict fields
+    # and must be sanitized when a workflow-marked task reaches dashboard APIs.
+    with kb.connect() as conn:
+        conn.execute(
+            """
+            UPDATE tasks
+            SET session_id=?, branch_name=?, project_id=?, model_override=?
+            WHERE id=?
+            """,
+            (
+                "session-safe-id raw transcript paragraph Bearer abcdefgh",
+                "feature/SECRET_SENTINEL_SHOULD_NOT_APPEAR",
+                "project api_key=super-secret-value",
+                "model /mnt/d/private/OpenBrain/model.txt",
+                task_id,
+            ),
+        )
+
+    board_payload = client.get("/api/plugins/kanban/board").json()
+    cards = [task for col in board_payload["columns"] for task in col["tasks"]]
+    card = next(task for task in cards if task["id"] == task_id)
+    detail_payload = client.get(f"/api/plugins/kanban/tasks/{task_id}").json()
+    detail_task = detail_payload["task"]
+
+    for payload in (created_payload["task"], card, detail_task):
+        assert payload["workflow_template_id"] == "openbrain-source-v1"
+        assert payload["current_step_key"] == "panning_for_gold"
+        assert payload["workflow"] == {
+            "template_id": "openbrain-source-v1",
+            "step_key": "panning_for_gold",
+            "run_id": "obwf_dashboard_task_metadata_privacy",
+        }
+    assert "panning-for-gold" in detail_task["skills"]
+
+    for surface_name, payload in {
+        "create": created_payload,
+        "board": board_payload,
+        "detail": detail_payload,
+    }.items():
+        payload_text = json.dumps(payload, sort_keys=True)
+        for snippet in unsafe_snippets:
+            assert snippet not in payload_text, f"{surface_name} leaked {snippet!r}"
+    assert "[redacted-secret]" in json.dumps(detail_payload, sort_keys=True)
+
+
+def _unsafe_operator_title_fixture() -> str:
+    return (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value "
+        "Bearer abcdefgh"
+    )
+
+
+def test_openbrain_workflow_diagnostics_task_title_is_sanitized(client, kanban_home):
+    """Operator diagnostics must not leak workflow-controlled task titles."""
+    unsafe = _unsafe_operator_title_fixture()
+    workflow_title = f"OpenBrain diagnostics title {unsafe}"
+    generic_title = f"Generic diagnostics title {unsafe}"
+    with kb.connect() as conn:
+        workflow_task = kb.create_task(
+            conn,
+            title=workflow_title,
+            body="workflow_run_id: obwf_dashboard_diagnostics_title_privacy",
+            assignee="default",
+            workflow_template_id="openbrain-source-v1",
+            current_step_key="panning_for_gold",
+        )
+        workflow_real = kb.create_task(
+            conn, title="workflow real child", assignee="default", created_by="default"
+        )
+        with pytest.raises(kb.HallucinatedCardsError):
+            kb.complete_task(
+                conn,
+                workflow_task,
+                summary="workflow phantom",
+                created_cards=[workflow_real, "t_deadbeef0001"],
+            )
+
+        generic_task = kb.create_task(conn, title=generic_title, assignee="default")
+        generic_real = kb.create_task(
+            conn, title="generic real child", assignee="default", created_by="default"
+        )
+        with pytest.raises(kb.HallucinatedCardsError):
+            kb.complete_task(
+                conn,
+                generic_task,
+                summary="generic phantom",
+                created_cards=[generic_real, "t_deadbeef0002"],
+            )
+
+    response = client.get("/api/plugins/kanban/diagnostics")
+    assert response.status_code == 200, response.text
+    rows = {row["task_id"]: row for row in response.json()["diagnostics"]}
+
+    workflow_row = rows[workflow_task]
+    assert "[redacted-secret]" in workflow_row["task_title"]
+    workflow_text = json.dumps(workflow_row, sort_keys=True)
+    for snippet in (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR",
+        "raw transcript paragraph",
+        "/mnt/d/private",
+        "super-secret-value",
+        "Bearer abcdefgh",
+    ):
+        assert snippet not in workflow_text
+
+    # Generic non-workflow diagnostics remain raw/back-compatible.
+    assert rows[generic_task]["task_title"] == generic_title
+
+
+def test_openbrain_workflow_active_worker_task_title_is_sanitized(client, kanban_home):
+    """The cross-task active-worker list is an operator display surface."""
+    unsafe = _unsafe_operator_title_fixture()
+    workflow_title = f"OpenBrain worker title {unsafe}"
+    generic_title = f"Generic worker title {unsafe}"
+    now = int(time.time())
+    with kb.connect() as conn:
+        workflow_task = kb.create_task(
+            conn,
+            title=workflow_title,
+            body="workflow_run_id: obwf_dashboard_worker_title_privacy",
+            assignee="default",
+            workflow_template_id="openbrain-source-v1",
+            current_step_key="panning_for_gold",
+        )
+        generic_task = kb.create_task(conn, title=generic_title, assignee="default")
+        for task_id, pid in ((workflow_task, 11111), (generic_task, 22222)):
+            conn.execute("UPDATE tasks SET status='running' WHERE id=?", (task_id,))
+            conn.execute(
+                """
+                INSERT INTO task_runs
+                    (task_id, status, claim_lock, claim_expires, worker_pid, started_at)
+                VALUES (?, 'running', ?, ?, ?, ?)
+                """,
+                (task_id, f"lock-{pid}", now + 3600, pid, now),
+            )
+        conn.commit()
+
+    response = client.get("/api/plugins/kanban/workers/active")
+    assert response.status_code == 200, response.text
+    workers = {row["task_id"]: row for row in response.json()["workers"]}
+
+    workflow_worker = workers[workflow_task]
+    assert workflow_worker["worker_pid"] == 11111
+    assert "[redacted-secret]" in workflow_worker["task_title"]
+    workflow_text = json.dumps(workflow_worker, sort_keys=True)
+    for snippet in (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR",
+        "raw transcript paragraph",
+        "/mnt/d/private",
+        "super-secret-value",
+        "Bearer abcdefgh",
+    ):
+        assert snippet not in workflow_text
+
+    # Generic non-workflow workers remain raw/back-compatible.
+    assert workers[generic_task]["task_title"] == generic_title
+    assert workers[generic_task]["worker_pid"] == 22222
+
+
+def test_openbrain_workflow_blocked_parent_ready_conflict_title_is_sanitized(
+    client, kanban_home
+):
+    """Ready-conflict errors must redact workflow parent display titles."""
+    unsafe = _unsafe_operator_title_fixture()
+    workflow_title = f"OpenBrain blocked parent {unsafe}"
+    generic_title = f"Generic blocked parent {unsafe}"
+    with kb.connect() as conn:
+        workflow_parent = kb.create_task(
+            conn,
+            title=workflow_title,
+            body="workflow_run_id: obwf_dashboard_ready_conflict_privacy",
+            assignee="default",
+            workflow_template_id="openbrain-source-v1",
+            current_step_key="blocked_parent",
+        )
+        workflow_child = kb.create_task(
+            conn,
+            title="workflow child waiting on parent",
+            body="child still dependency-held",
+            assignee="default",
+            parents=[workflow_parent],
+        )
+        generic_parent = kb.create_task(conn, title=generic_title, assignee="default")
+        generic_child = kb.create_task(
+            conn,
+            title="generic child waiting on parent",
+            body="child still dependency-held",
+            assignee="default",
+            parents=[generic_parent],
+        )
+
+    workflow_response = client.patch(
+        f"/api/plugins/kanban/tasks/{workflow_child}", json={"status": "ready"}
+    )
+    assert workflow_response.status_code == 409
+    workflow_detail = workflow_response.json()["detail"]
+    assert workflow_parent in workflow_detail
+    assert "status=ready" in workflow_detail
+    assert "[redacted-secret]" in workflow_detail
+    for snippet in (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR",
+        "raw transcript paragraph",
+        "/mnt/d/private",
+        "super-secret-value",
+        "Bearer abcdefgh",
+    ):
+        assert snippet not in workflow_detail
+
+    # Generic non-workflow conflict detail remains raw/back-compatible.
+    generic_response = client.patch(
+        f"/api/plugins/kanban/tasks/{generic_child}", json={"status": "ready"}
+    )
+    assert generic_response.status_code == 409
+    assert generic_title in generic_response.json()["detail"]
+
+
+def test_openbrain_workflow_title_comments_and_attachments_are_sanitized_in_dashboard_payloads(client, kanban_home):
+    """Workflow display payloads must not leak task/comment/attachment text."""
+    unsafe = (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value "
+        "Bearer abcdefgh"
+    )
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title=f"OpenBrain unsafe title {unsafe}",
+            body="workflow_run_id: obwf_dashboard_detail_surfaces_privacy",
+            assignee="default",
+            workflow_template_id="openbrain-source-v1",
+            current_step_key="panning_for_gold",
+        )
+        comment_id = kb.add_comment(
+            conn,
+            task_id,
+            author=f"qa-gate {unsafe}",
+            body=f"workflow comment {unsafe}",
+        )
+        attachment_id = kb.add_attachment(
+            conn,
+            task_id,
+            filename=f"source attachment {unsafe}.txt",
+            stored_path=f"/mnt/d/private/OpenBrain/source.txt {unsafe}",
+            content_type=f"text/plain {unsafe}",
+            size=123,
+            uploaded_by=f"qa-gate {unsafe}",
+        )
+
+    board = client.get("/api/plugins/kanban/board").json()
+    cards = [task for col in board["columns"] for task in col["tasks"]]
+    card = next(task for task in cards if task["id"] == task_id)
+    detail = client.get(f"/api/plugins/kanban/tasks/{task_id}").json()
+    detail_task = detail["task"]
+    comment = detail["comments"][0]
+    attachment = detail["attachments"][0]
+
+    assert card["id"] == task_id
+    assert card["status"] == "ready"
+    assert detail_task["id"] == task_id
+    assert detail_task["workflow"]["template_id"] == "openbrain-source-v1"
+    assert comment["id"] == comment_id
+    assert comment["task_id"] == task_id
+    assert attachment["id"] == attachment_id
+    assert attachment["task_id"] == task_id
+    assert "[redacted-secret]" in comment["author"]
+    assert "[redacted-secret]" in attachment["content_type"]
+    assert "[redacted-secret]" in attachment["uploaded_by"]
+    assert attachment["size"] == 123
+    # Download identity is the attachment id; the UI does not need a raw
+    # worker-readable path in workflow detail payloads.
+    assert attachment["stored_path"] is None
+
+    assert "[redacted-secret]" in card["title"]
+    assert "[redacted-secret]" in detail_task["title"]
+    assert "[redacted-secret]" in comment["body"]
+    assert "[redacted-secret]" in attachment["filename"]
+
+    payload_text = json.dumps({"board_card": card, "detail": detail}, sort_keys=True)
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+    assert "raw transcript paragraph" not in payload_text
+    assert "/mnt/d/private" not in payload_text
+    assert "super-secret-value" not in payload_text
+    assert "Bearer abcdefgh" not in payload_text
+
+
+def test_openbrain_workflow_attachment_upload_list_and_download_surfaces_are_sanitized(client, kanban_home):
+    """Workflow attachment routes must keep downloads usable without leaking display metadata."""
+    unsafe = (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value "
+        "Bearer abcdefgh"
+    )
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "OpenBrain attachment endpoint privacy",
+            "body": "workflow_run_id: obwf_dashboard_attachment_endpoint_privacy",
+            "assignee": "default",
+            "workflow_template_id": "openbrain-source-v1",
+            "current_step_key": "panning_for_gold",
+        },
+    ).json()["task"]
+    generic = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "Generic attachment endpoint control",
+            "body": "generic attachment task",
+            "assignee": "default",
+        },
+    ).json()["task"]
+
+    workflow_upload = client.post(
+        f"/api/plugins/kanban/tasks/{created['id']}/attachments",
+        files={"file": (f"workflow upload {unsafe}.txt", b"workflow bytes remain downloadable", "text/plain")},
+        data={"uploaded_by": f"dashboard uploader {unsafe}"},
+    )
+    assert workflow_upload.status_code == 200, workflow_upload.text
+    workflow_attachment = workflow_upload.json()["attachment"]
+    assert workflow_attachment["task_id"] == created["id"]
+    assert workflow_attachment["id"]
+    assert workflow_attachment["size"] == len(b"workflow bytes remain downloadable")
+    assert workflow_attachment["created_at"]
+    assert workflow_attachment["stored_path"] is None
+    assert "[redacted" in workflow_attachment["filename"]
+    assert "[redacted-secret]" in workflow_attachment["uploaded_by"]
+
+    workflow_list = client.get(f"/api/plugins/kanban/tasks/{created['id']}/attachments")
+    assert workflow_list.status_code == 200
+    listed_workflow_attachment = workflow_list.json()["attachments"][0]
+    assert listed_workflow_attachment["id"] == workflow_attachment["id"]
+    assert listed_workflow_attachment["stored_path"] is None
+    assert "[redacted" in listed_workflow_attachment["filename"]
+    assert "[redacted-secret]" in listed_workflow_attachment["uploaded_by"]
+
+    workflow_download = client.get(f"/api/plugins/kanban/attachments/{workflow_attachment['id']}")
+    assert workflow_download.status_code == 200
+    assert workflow_download.content == b"workflow bytes remain downloadable"
+    workflow_headers = json.dumps(dict(workflow_download.headers), sort_keys=True)
+    assert f"attachment-{workflow_attachment['id']}" in workflow_headers
+
+    generic_upload = client.post(
+        f"/api/plugins/kanban/tasks/{generic['id']}/attachments",
+        files={"file": (f"generic upload {unsafe}.txt", b"generic bytes", "text/plain")},
+        data={"uploaded_by": f"generic uploader {unsafe}"},
+    )
+    assert generic_upload.status_code == 200, generic_upload.text
+    generic_attachment = generic_upload.json()["attachment"]
+    assert unsafe in json.dumps(generic_attachment, sort_keys=True)
+    generic_list = client.get(f"/api/plugins/kanban/tasks/{generic['id']}/attachments").json()
+    assert unsafe in json.dumps(generic_list, sort_keys=True)
+
+    for surface_name, payload_text in {
+        "workflow_upload": json.dumps(workflow_upload.json(), sort_keys=True),
+        "workflow_list": json.dumps(workflow_list.json(), sort_keys=True),
+        "workflow_download_headers": workflow_headers,
+    }.items():
+        assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text, surface_name
+        assert "raw transcript paragraph" not in payload_text, surface_name
+        assert "/mnt/d/private" not in payload_text, surface_name
+        assert "super-secret-value" not in payload_text, surface_name
+        assert "Bearer abcdefgh" not in payload_text, surface_name
+
+
+def test_openbrain_workflow_run_metadata_keys_are_sanitized_in_detail_payload(client, kanban_home):
+    """Run metadata keys are user-controlled and must be redacted too.
+
+    The dashboard detail endpoint serializes ``task_runs.metadata`` through
+    ``_run_dict(..., sanitize_workflow=True)`` for workflow tasks. Dict values
+    were already redacted, but unsafe string keys could still leak private
+    paths, secret-shaped text, bearer strings, transcript text, and sentinels.
+    """
+    unsafe_key = (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR /mnt/d/private/OpenBrain/source.txt "
+        "api_key=super-secret-value"
+    )
+    unsafe_nested_key = (
+        "Bearer abcdefgh raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt"
+    )
+    unsafe_value = (
+        "metadata value SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value "
+        "Bearer abcdefgh"
+    )
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "OpenBrain unsafe run metadata key",
+            "body": "workflow_run_id: obwf_dashboard_run_metadata_privacy",
+            "assignee": "default",
+            "workflow_template_id": "openbrain-source-v1",
+            "current_step_key": "panning_for_gold",
+        },
+    ).json()["task"]
+
+    with kb.connect() as conn:
+        claimed = kb.claim_task(conn, created["id"])
+        assert claimed is not None
+        conn.execute(
+            """
+            UPDATE task_runs
+            SET profile=?, step_key=?, claim_lock=?, summary=?, error=?, metadata=?
+            WHERE task_id=?
+            """,
+            (
+                f"run profile {unsafe_value}",
+                f"run step key {unsafe_value}",
+                f"run claim lock {unsafe_value}",
+                f"run summary {unsafe_value}",
+                f"run error {unsafe_value}",
+                json.dumps(
+                    {
+                        unsafe_key: unsafe_value,
+                        "safe_outer": {
+                            unsafe_nested_key: {"safe_inner": unsafe_value},
+                            "safe_list": [{unsafe_key: unsafe_value}],
+                        },
+                    }
+                ),
+                created["id"],
+            ),
+        )
+
+    detail = client.get(f"/api/plugins/kanban/tasks/{created['id']}").json()
+    runs = detail["runs"]
+    assert len(runs) == 1
+    assert isinstance(runs[0]["metadata"], dict)
+    assert "safe_outer" in runs[0]["metadata"]
+    assert "[redacted-secret]" in runs[0]["profile"]
+    assert "[redacted-secret]" in runs[0]["step_key"]
+    assert "[redacted-secret]" in runs[0]["claim_lock"]
+
+    payload_text = json.dumps(runs, sort_keys=True)
+    assert "[redacted-secret]" in payload_text
+    assert "SECRET_SENTINEL_SHOULD_NOT_APPEAR" not in payload_text
+    assert "raw transcript paragraph" not in payload_text
+    assert "/mnt/d/private" not in payload_text
+    assert "super-secret-value" not in payload_text
+    assert "Bearer abcdefgh" not in payload_text
+
+
+def test_direct_run_lookup_sanitizes_openbrain_workflow_parent_payload(client, kanban_home):
+    """Direct run lookup must apply workflow redaction like task detail history."""
+    unsafe = (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR raw transcript paragraph "
+        "from /mnt/d/private/OpenBrain/source.txt api_key=super-secret-value "
+        "Bearer abcdefgh"
+    )
+    unsafe_key = f"metadata key {unsafe}"
+    unsafe_nested_key = f"nested key {unsafe}"
+
+    with kb.connect() as conn:
+        workflow_task = kb.create_task(
+            conn,
+            title="OpenBrain direct run lookup privacy",
+            body="workflow_run_id: obwf_direct_run_lookup_privacy",
+            assignee="default",
+            workflow_template_id="openbrain-source-v1",
+            current_step_key="panning_for_gold",
+        )
+        generic_task = kb.create_task(
+            conn,
+            title="Generic direct run lookup control",
+            body="generic task should keep raw run payloads",
+            assignee="default",
+        )
+        assert kb.claim_task(conn, workflow_task) is not None
+        assert kb.claim_task(conn, generic_task) is not None
+        workflow_run = kb.latest_run(conn, workflow_task)
+        generic_run = kb.latest_run(conn, generic_task)
+        assert workflow_run is not None
+        assert generic_run is not None
+        workflow_run_id = workflow_run.id
+        generic_run_id = generic_run.id
+        for run_id in (workflow_run_id, generic_run_id):
+            conn.execute(
+                """
+                UPDATE task_runs
+                SET profile=?, step_key=?, claim_lock=?, outcome=?, summary=?, error=?, metadata=?
+                WHERE id=?
+                """,
+                (
+                    f"profile {unsafe}",
+                    f"step key {unsafe}",
+                    f"claim lock {unsafe}",
+                    f"outcome {unsafe}",
+                    f"summary {unsafe}",
+                    f"error {unsafe}",
+                    json.dumps(
+                        {
+                            unsafe_key: unsafe,
+                            "safe_outer": {unsafe_nested_key: {"safe_inner": unsafe}},
+                        }
+                    ),
+                    run_id,
+                ),
+            )
+        conn.commit()
+
+    workflow_response = client.get(f"/api/plugins/kanban/runs/{workflow_run_id}")
+    assert workflow_response.status_code == 200, workflow_response.text
+    workflow_run = workflow_response.json()["run"]
+    assert workflow_run["id"] == workflow_run_id
+    assert workflow_run["task_id"] == workflow_task
+    assert "[redacted-secret]" in workflow_run["profile"]
+    assert "[redacted-secret]" in workflow_run["step_key"]
+    assert "[redacted-secret]" in workflow_run["claim_lock"]
+    assert "[redacted-secret]" in workflow_run["outcome"]
+    assert "[redacted-secret]" in workflow_run["summary"]
+    assert "[redacted-secret]" in workflow_run["error"]
+    assert "safe_outer" in workflow_run["metadata"]
+
+    workflow_text = json.dumps(workflow_run, sort_keys=True)
+    for snippet in (
+        "SECRET_SENTINEL_SHOULD_NOT_APPEAR",
+        "raw transcript paragraph",
+        "/mnt/d/private",
+        "super-secret-value",
+        "Bearer abcdefgh",
+    ):
+        assert snippet not in workflow_text
+
+    # Generic non-workflow direct run lookup remains raw/back-compatible.
+    generic_response = client.get(f"/api/plugins/kanban/runs/{generic_run_id}")
+    assert generic_response.status_code == 200, generic_response.text
+    generic_text = json.dumps(generic_response.json()["run"], sort_keys=True)
+    assert unsafe in generic_text
+    assert unsafe_key in generic_text
+    assert unsafe_nested_key in generic_text
 
 
 def test_openbrain_workflow_payloads_sanitize_heartbeat_block_events_and_runs(client, kanban_home):

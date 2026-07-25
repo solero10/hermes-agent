@@ -67,7 +67,7 @@ class TestCLIStatusBar:
         cli_obj._status_bar_suppressed_after_resize = False
 
         # Several older CLI tests replace prompt_toolkit modules while
-        # importing ``cli``.  Pin this test to the real layout primitives so
+        # importing ``cli``. Pin this test to the real layout primitives so
         # it remains order-independent in the complete tests/cli suite.
         with (
             patch.object(cli_mod, "Condition", Condition),
@@ -251,8 +251,8 @@ class TestCLIStatusBar:
             builtin_fragment_text = "".join(text for _, text in builtin_fragments)
             custom_fragment_text = "".join(text for _, text in custom_fragments)
 
-            for text in (builtin_text, custom_text, builtin_fragment_text, custom_fragment_text):
-                assert "\n" not in text
+            for rendered in (builtin_text, custom_text, builtin_fragment_text, custom_fragment_text):
+                assert "\n" not in rendered
             assert cli_obj._status_bar_display_width(builtin_text) <= width
             assert cli_obj._status_bar_display_width(custom_text) <= width
             assert cli_obj._status_bar_display_width(builtin_fragment_text) <= width
@@ -625,13 +625,20 @@ class TestCLIStatusBar:
         cli_obj = _make_cli()
         cli_obj._spinner_text = "running tool"
 
-        # <60s path
-        cli_obj._tool_start_time = time.monotonic() - 9.2
-        short = cli_obj._render_spinner_text()
+        # Pin the clock: time.monotonic()'s epoch is arbitrary (often near
+        # boot), so deriving _tool_start_time from the real monotonic clock
+        # made the test fail on hosts where monotonic() < 65.2 — the start
+        # time went negative, the (t0 > 0) guard in _render_spinner_text
+        # dropped the "(elapsed)" suffix entirely, and the split below hit an
+        # IndexError. A fixed clock keeps both elapsed paths deterministic.
+        with patch.object(cli_mod.time, "monotonic", return_value=1000.0):
+            # <60s path
+            cli_obj._tool_start_time = 1000.0 - 9.2
+            short = cli_obj._render_spinner_text()
 
-        # >=60s path
-        cli_obj._tool_start_time = time.monotonic() - 65.2
-        long = cli_obj._render_spinner_text()
+            # >=60s path
+            cli_obj._tool_start_time = 1000.0 - 65.2
+            long = cli_obj._render_spinner_text()
 
         short_elapsed = short.split("(", 1)[1].rstrip(")")
         long_elapsed = long.split("(", 1)[1].rstrip(")")

@@ -8,7 +8,6 @@ import {
   estimateRows,
   estimateTokensRough,
   fmtK,
-  formatToolCall,
   hasAnsi,
   isToolTrailResultLine,
   lastCotTrailIndex,
@@ -18,8 +17,7 @@ import {
   sanitizeAnsiForRender,
   splitToolDuration,
   stripAnsi,
-  thinkingPreview,
-  toolTrailLabel
+  thinkingPreview
 } from '../lib/text.js'
 
 describe('isToolTrailResultLine', () => {
@@ -37,16 +35,6 @@ describe('buildToolTrailLine', () => {
     expect(line).toBe('Read File("x") (0.9s) ✓')
     expect(parseToolTrailResultLine(line)).toEqual({ call: 'Read File("x") (0.9s)', detail: '', mark: '✓' })
     expect(splitToolDuration('Read File("x") (0.9s)')).toEqual({ label: 'Read File("x")', duration: ' (0.9s)' })
-  })
-
-  it('uses friendly labels for OpenBrain MCP tools', () => {
-    expect(toolTrailLabel('mcp_cortexdb_search_thoughts')).toBe('OpenBrain search')
-    expect(formatToolCall('mcp_cortexdb_search_thoughts', 'short query preview')).toBe(
-      'OpenBrain search: "short query preview"'
-    )
-    expect(buildToolTrailLine('mcp_cortexdb_search_thoughts', 'short query preview', false, '3 found', 6.4)).toBe(
-      'OpenBrain search: "short query preview" (6.4s) :: 3 found ✓'
-    )
   })
 })
 

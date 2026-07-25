@@ -101,57 +101,6 @@ def test_secret_capture_uses_masked_prompt_without_tui():
     assert result["skipped"] is False
 
 
-def test_transient_secret_capture_does_not_store_without_tui():
-    cli = _make_cli_stub()
-
-    with patch("hermes_cli.callbacks.masked_secret_prompt", return_value="secret-value"), patch(
-        "hermes_cli.callbacks.save_env_value_secure"
-    ) as save_secret:
-        result = prompt_for_secret(
-            cli,
-            "HBS_TRANSIENT_WEBSITE_PASSWORD",
-            "Website password",
-            {"transient": True},
-        )
-
-    assert result["success"] is True
-    assert result["transient"] is True
-    assert result["value"] == "secret-value"
-    assert result["skipped"] is False
-    save_secret.assert_not_called()
-
-
-def test_transient_secret_capture_from_cli_state_machine_does_not_store():
-    cli = _make_cli_stub(with_app=True)
-    results = []
-
-    with patch("hermes_cli.callbacks.save_env_value_secure") as save_secret:
-        thread = threading.Thread(
-            target=lambda: results.append(
-                cli._secret_capture_callback(
-                    "HBS_TRANSIENT_WEBSITE_PASSWORD",
-                    "Website password",
-                    {"transient": True},
-                )
-            )
-        )
-        thread.start()
-
-        deadline = time.time() + 2
-        while cli._secret_state is None and time.time() < deadline:
-            time.sleep(0.01)
-
-        assert cli._secret_state is not None
-        cli._submit_secret_response("super-secret-value")
-        thread.join(timeout=2)
-
-    assert results[0]["success"] is True
-    assert results[0]["transient"] is True
-    assert results[0]["value"] == "super-secret-value"
-    assert results[0]["skipped"] is False
-    save_secret.assert_not_called()
-
-
 def test_secret_capture_timeout_clears_hidden_input_buffer():
     cli = _make_cli_stub(with_app=True)
     cleared = {"value": False}

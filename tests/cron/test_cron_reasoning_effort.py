@@ -30,6 +30,24 @@ def test_job_without_override_inherits_global_config():
     ) == {"enabled": True, "effort": "high"}
 
 
+def test_job_without_override_uses_effective_cron_model_reasoning_override():
+    cfg = {
+        "model": {"default": "default-model"},
+        "agent": {
+            "reasoning_effort": "low",
+            "reasoning_overrides": {
+                "default-model": "minimal",
+                "special-model": "xhigh",
+            },
+        },
+    }
+
+    assert _resolve_job_reasoning_config({}, cfg, "special-model") == {
+        "enabled": True,
+        "effort": "xhigh",
+    }
+
+
 def test_empty_or_malformed_override_falls_back_to_global():
     global_cfg = {"agent": {"reasoning_effort": "high"}}
     assert _resolve_job_reasoning_config({"reasoning_effort": ""}, global_cfg) == {

@@ -28,6 +28,7 @@ class FakeRunner:
         self.mode = mode
         self.calls: list[str] = []
         self.adapters: list[StepAdapter] = []
+        self.heartbeat_intervals: list[float] = []
 
     def run(
         self,
@@ -40,9 +41,13 @@ class FakeRunner:
     ) -> ChildRunResult:
         self.calls.append(adapter.step_key)
         self.adapters.append(adapter)
+        self.heartbeat_intervals.append(heartbeat_interval_seconds)
         receipt = Path(adapter.receipt_pointer_path)
         receipt.parent.mkdir(parents=True, exist_ok=True)
-        if heartbeat_callback:
+        if heartbeat_callback and self.mode == "heartbeat_probe" and heartbeat_interval_seconds <= 0:
+            for _ in range(8):
+                heartbeat_callback(f"obwf=obwf_dispatch step={adapter.step_key} source=source-a elapsed=00:00:01")
+        elif heartbeat_callback:
             heartbeat_callback(f"obwf=obwf_dispatch step={adapter.step_key} source=source-a elapsed=00:00:01")
         if self.mode == "crash":
             return ChildRunResult(exit_code=2, stdout="", stderr="SECRET_SENTINEL_SHOULD_NOT_APPEAR crash", timed_out=False)
@@ -152,6 +157,27 @@ def test_dispatcher_routes_openbrain_step_through_supervisor_fake_runner(kanban_
         assert status.steps["panning_for_gold"].status == "done"
         assert status.steps["panning_for_gold"].candidate_ids == ["panning_for_gold-cand"]
         assert any(event["event_type"] == "task_completed" for event in read_events("obwf_dispatch"))
+
+
+def test_dispatcher_uses_bounded_nonzero_heartbeat_interval_to_avoid_poll_spam(kanban_home):
+    runner = FakeRunner(mode="heartbeat_probe")
+    with kb.connect() as conn:
+        created = _create(conn)
+        panning_id = created.step_task_ids["panning_for_gold"]
+
+        kb.dispatch_once(
+            conn,
+            max_spawn=1,
+            openbrain_runner_factory=lambda task, execute_mode: runner,
+        )
+
+        assert runner.calls == ["panning_for_gold"]
+        assert runner.heartbeat_intervals == [60]
+        heartbeat_events = [event for event in read_events("obwf_dispatch") if event["event_type"] == "heartbeat_sent"]
+        assert len(heartbeat_events) <= 1
+        task = kb.get_task(conn, panning_id)
+        assert task is not None
+        assert task.status == "done"
 
 
 def test_dispatcher_threads_parent_candidate_ids_into_enrichment_adapter(kanban_home):

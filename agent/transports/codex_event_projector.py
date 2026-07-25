@@ -39,8 +39,9 @@ def _deterministic_call_id(item_type: str, item_id: str) -> str:
 
     Uses the codex item id directly when present (already a uuid); falls back
     to a content hash so replay produces the same id across sessions and
-    prefix caches stay valid. See PITFALLS.md, "Deterministic IDs in tool call
-    history."""
+    prefix caches stay valid. See PITFALLS.md, "Deterministic IDs in
+    tool call history."
+    """
     if item_id:
         return f"codex_{item_type}_{item_id}"
     digest = hashlib.sha256(f"{item_type}".encode()).hexdigest()[:16]
@@ -217,7 +218,9 @@ class CodexEventProjector:
     def _project_mcp_tool_call(self, item: dict, item_id: str) -> ProjectionResult:
         server = item.get("server") or "mcp"
         tool = item.get("tool") or "unknown"
-        call_id = _deterministic_call_id(f"mcp_{server}_{tool}", item_id)
+        # Mirror the native MCP tool-name convention (mcp__server__tool) so the
+        # deterministic call_id input stays consistent with registration names.
+        call_id = _deterministic_call_id(f"mcp__{server}__{tool}", item_id)
         args = item.get("arguments") or {}
         if not isinstance(args, dict):
             args = {"arguments": args}

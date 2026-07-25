@@ -155,17 +155,59 @@ BOARD_COLUMNS: list[str] = [
 
 _CARD_SUMMARY_PREVIEW_CHARS = 200
 _WORKFLOW_RUN_RE = re.compile(r"workflow_run_id:\s*([A-Za-z0-9_.-]+)|obwf=([A-Za-z0-9_.-]+)")
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(api[_-]?key|authorization|bearer|credential|password|secret|token)\b\s*[:=]\s*[^\s,;]+"
+)
+_OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{4,}\b")
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{6,}")
+_URL_RE = re.compile(r"\b(?:https?|file)://[^\s\"'<>]+")
+_UNC_RE = re.compile(r"\\\\[^\s\"'<>]+")
+_WIN_PATH_RE = re.compile(r"\b[A-Za-z]:\\[^\s\"'<>]+")
+_POSIX_PRIVATE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_])/(?:mnt|home|Users|private|var|tmp)/(?:[^\s\"'<>]+)"
+)
+_FIXTURE_SENTINEL_RE = re.compile(r"\b[A-Z0-9_]*SECRET[A-Z0-9_]*\b")
+_TRANSCRIPT_SENTINEL_RE = re.compile(r"(?i)\b(fake transcript paragraph|raw transcript|transcript paragraph)\b[^.!?]*(?:[.!?]|$)")
+_WHITESPACE_RE = re.compile(r"\s+")
+_WORKFLOW_TASK_METADATA_FIELDS: tuple[str, ...] = (
+    "workspace_path",
+    "tenant",
+    "idempotency_key",
+    "skills",
+    "session_id",
+    "branch_name",
+    "project_id",
+    "model_override",
+)
+
+
+def _clamp_workflow_text(value: Any, *, max_length: int = 500) -> str:
+    text = _WHITESPACE_RE.sub(" ", str(value or "")).strip()
+    if max_length > 0 and len(text) > max_length:
+        return text[: max_length - 1].rstrip() + "…"
+    return text
 
 
 def _redact_openbrain_workflow_text(value: Any, *, max_length: int = 500) -> str:
     """Sanitize OpenBrain workflow strings before they reach dashboard payloads."""
 
+    text = str(value or "")
     try:
-        from hermes_cli.openbrain_workflow_contracts import redact_workflow_text
+        from agent.redact import redact_sensitive_text
+
+        text = redact_sensitive_text(text, force=True)
     except Exception:
-        text = str(value or "")
-        return text[:max_length]
-    return redact_workflow_text(value, max_length=max_length)
+        pass
+    text = _BEARER_RE.sub("Bearer [redacted]", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}=[redacted]", text)
+    text = _OPENAI_KEY_RE.sub("[redacted-key]", text)
+    text = _FIXTURE_SENTINEL_RE.sub("[redacted-secret]", text)
+    text = _TRANSCRIPT_SENTINEL_RE.sub("[redacted-transcript]", text)
+    text = _URL_RE.sub("[url]", text)
+    text = _UNC_RE.sub("[path]", text)
+    text = _WIN_PATH_RE.sub("[path]", text)
+    text = _POSIX_PRIVATE_PATH_RE.sub("[path]", text)
+    return _clamp_workflow_text(text, max_length=max_length)
 
 
 def _sanitize_openbrain_workflow_payload(value: Any) -> Any:
@@ -176,12 +218,52 @@ def _sanitize_openbrain_workflow_payload(value: Any) -> Any:
     if isinstance(value, tuple):
         return [_sanitize_openbrain_workflow_payload(item) for item in value]
     if isinstance(value, dict):
-        return {key: _sanitize_openbrain_workflow_payload(item) for key, item in value.items()}
+        sanitized: dict[Any, Any] = {}
+        for key, item in value.items():
+            safe_key = _redact_openbrain_workflow_text(key) if isinstance(key, str) else key
+            sanitized[safe_key] = _sanitize_openbrain_workflow_payload(item)
+        return sanitized
     return value
 
 
+def _sanitize_workflow_identifier(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    return _redact_openbrain_workflow_text(value, max_length=200)
+
+
+def _has_openbrain_workflow_marker(
+    workflow_template_id: Optional[str], current_step_key: Optional[str]
+) -> bool:
+    return bool(workflow_template_id or current_step_key)
+
+
 def _is_openbrain_workflow_task(task: kanban_db.Task) -> bool:
-    return bool(task.workflow_template_id or task.current_step_key)
+    return _has_openbrain_workflow_marker(
+        task.workflow_template_id, task.current_step_key
+    )
+
+
+def _operator_visible_task_title(
+    title: Optional[str],
+    *,
+    workflow_template_id: Optional[str] = None,
+    current_step_key: Optional[str] = None,
+) -> Optional[str]:
+    """Return a task title safe for cross-task/operator display surfaces.
+
+    Workflow title text is user/workflow-controlled display data.  Dashboard
+    cards/detail already serialize workflow ``Task`` objects through
+    ``_task_dict()``; this helper covers surfaces that only have SQL rows
+    (diagnostics, active workers, and blocked-parent conflict strings) while
+    preserving generic Kanban titles unchanged.
+    """
+
+    if title is not None and _has_openbrain_workflow_marker(
+        workflow_template_id, current_step_key
+    ):
+        return _redact_openbrain_workflow_text(title, max_length=500)
+    return title
 
 
 def _workflow_run_id_from_text(*values: object) -> Optional[str]:
@@ -252,6 +334,16 @@ def _task_dict(
 ) -> dict[str, Any]:
     d = asdict(task)
     is_workflow_task = _is_openbrain_workflow_task(task)
+    workflow_template_id = task.workflow_template_id
+    current_step_key = task.current_step_key
+    if is_workflow_task:
+        workflow_template_id = _sanitize_workflow_identifier(task.workflow_template_id)
+        current_step_key = _sanitize_workflow_identifier(task.current_step_key)
+        d["workflow_template_id"] = workflow_template_id
+        d["current_step_key"] = current_step_key
+        for key in _WORKFLOW_TASK_METADATA_FIELDS:
+            if d.get(key) is not None:
+                d[key] = _sanitize_openbrain_workflow_payload(d[key])
     # Add derived age metrics so the UI can colour stale cards without
     # computing deltas client-side.
     try:
@@ -268,13 +360,15 @@ def _task_dict(
         else latest_summary
     )
     if is_workflow_task:
+        if d.get("title"):
+            d["title"] = _redact_openbrain_workflow_text(d["title"], max_length=500)
         for key in ("body", "result", "block_reason", "last_failure_error"):
             if d.get(key):
                 d[key] = _redact_openbrain_workflow_text(d[key], max_length=2000)
     if task.workflow_template_id or task.current_step_key:
         d["workflow"] = {
-            "template_id": task.workflow_template_id,
-            "step_key": task.current_step_key,
+            "template_id": workflow_template_id,
+            "step_key": current_step_key,
             "run_id": _workflow_run_id_from_text(task.body, latest_summary, task.result),
         }
     if latest_heartbeat_note:
@@ -303,54 +397,83 @@ def _event_dict(event: kanban_db.Event, *, sanitize_workflow: bool = False) -> d
     }
 
 
-def _comment_dict(c: kanban_db.Comment) -> dict[str, Any]:
+def _comment_dict(c: kanban_db.Comment, *, sanitize_workflow: bool = False) -> dict[str, Any]:
+    author = c.author
+    body = c.body
+    if sanitize_workflow:
+        author = _redact_openbrain_workflow_text(author, max_length=500)
+        body = _redact_openbrain_workflow_text(body, max_length=2000)
     return {
         "id": c.id,
         "task_id": c.task_id,
-        "author": c.author,
-        "body": c.body,
+        "author": author,
+        "body": body,
         "created_at": c.created_at,
     }
 
 
-def _attachment_dict(a: kanban_db.Attachment) -> dict[str, Any]:
-    """Serialise an Attachment for the drawer. ``stored_path`` is the
-    absolute on-disk path workers read; the UI uses ``id`` for download."""
+def _attachment_dict(a: kanban_db.Attachment, *, sanitize_workflow: bool = False) -> dict[str, Any]:
+    """Serialise an Attachment for the drawer.
+
+    Generic Kanban detail payloads keep ``stored_path`` for back-compat.
+    Workflow detail payloads preserve the attachment ``id`` for download but
+    suppress the raw worker-readable path because the browser UI does not need
+    it and OpenBrain workflow source paths can be sensitive.
+    """
+    filename = a.filename
+    content_type = a.content_type
+    uploaded_by = a.uploaded_by
+    stored_path: Optional[str] = a.stored_path
+    if sanitize_workflow:
+        filename = _redact_openbrain_workflow_text(filename, max_length=500)
+        content_type = _redact_openbrain_workflow_text(content_type, max_length=500)
+        uploaded_by = _redact_openbrain_workflow_text(uploaded_by, max_length=500)
+        stored_path = None
     return {
         "id": a.id,
         "task_id": a.task_id,
-        "filename": a.filename,
-        "content_type": a.content_type,
+        "filename": filename,
+        "content_type": content_type,
         "size": a.size,
-        "uploaded_by": a.uploaded_by,
-        "stored_path": a.stored_path,
+        "uploaded_by": uploaded_by,
+        "stored_path": stored_path,
         "created_at": a.created_at,
     }
 
 
 def _run_dict(r: kanban_db.Run, *, sanitize_workflow: bool = False) -> dict[str, Any]:
     """Serialise a Run for the drawer's Run history section."""
+    profile = r.profile
+    step_key = r.step_key
+    status = r.status
+    claim_lock = r.claim_lock
+    outcome = r.outcome
     summary = r.summary
     metadata = r.metadata
     error = r.error
     if sanitize_workflow:
+        profile = _sanitize_openbrain_workflow_payload(profile)
+        step_key = _sanitize_openbrain_workflow_payload(step_key)
+        status = _sanitize_openbrain_workflow_payload(status)
+        claim_lock = _sanitize_openbrain_workflow_payload(claim_lock)
+        outcome = _sanitize_openbrain_workflow_payload(outcome)
         summary = _sanitize_openbrain_workflow_payload(summary)
         metadata = _sanitize_openbrain_workflow_payload(metadata)
         error = _sanitize_openbrain_workflow_payload(error)
     return {
         "id": r.id,
         "task_id": r.task_id,
-        "profile": r.profile,
-        "step_key": r.step_key,
-        "status": r.status,
-        "claim_lock": r.claim_lock,
+        "profile": profile,
+        "step_key": step_key,
+        "status": status,
+        "claim_lock": claim_lock,
         "claim_expires": r.claim_expires,
         "worker_pid": r.worker_pid,
         "max_runtime_seconds": r.max_runtime_seconds,
         "last_heartbeat_at": r.last_heartbeat_at,
         "started_at": r.started_at,
         "ended_at": r.ended_at,
-        "outcome": r.outcome,
+        "outcome": outcome,
         "summary": summary,
         "metadata": metadata,
         "error": error,
@@ -612,13 +735,26 @@ def get_board(
         # Stable per-column ordering already applied by list_tasks
         # (priority DESC, created_at ASC), keep as-is.
 
-        # List of known tenants for the UI filter dropdown.
-        tenants = [
-            r["tenant"]
-            for r in conn.execute(
-                "SELECT DISTINCT tenant FROM tasks WHERE tenant IS NOT NULL ORDER BY tenant"
-            )
-        ]
+        # List of known tenants for the UI filter dropdown. Preserve raw generic
+        # Kanban tenant labels, but redact tenants that belong to workflow-marked
+        # tasks before including them in the dashboard payload.
+        tenant_rows = conn.execute(
+            """
+            SELECT DISTINCT tenant, workflow_template_id, current_step_key
+            FROM tasks
+            WHERE tenant IS NOT NULL
+            ORDER BY tenant
+            """
+        ).fetchall()
+        tenants: list[str] = []
+        seen_tenants: set[str] = set()
+        for row in tenant_rows:
+            tenant_value = row["tenant"]
+            if row["workflow_template_id"] or row["current_step_key"]:
+                tenant_value = _redact_openbrain_workflow_text(tenant_value, max_length=500)
+            if tenant_value not in seen_tenants:
+                tenants.append(tenant_value)
+                seen_tenants.add(tenant_value)
         # List of distinct assignees for the lane-by-profile sub-grouping.
         assignees = [
             r["assignee"]
@@ -684,6 +820,41 @@ def get_task(
             latest_heartbeat_note=heartbeat.get("note"),
             active_run_elapsed_seconds=ctx.get("elapsed"),
         )
+        is_workflow_task = _is_openbrain_workflow_task(task)
+        links = _links_for(conn, task_id)
+        child_ids = links["children"]
+        child_summaries = kanban_db.latest_summaries(conn, child_ids)
+        child_results = []
+        for child_id in child_ids:
+            child = kanban_db.get_task(conn, child_id)
+            if child is None:
+                continue
+            child_latest_summary = child_summaries.get(child.id)
+            child_result = child.result
+            child_title = child.title
+            if is_workflow_task or _is_openbrain_workflow_task(child):
+                # A workflow parent detail payload is a workflow privacy surface
+                # even when an ordinary child is linked under it. Redact child
+                # display handoff text there, while leaving generic parent
+                # detail payloads unchanged unless the child itself is workflow.
+                child_title = _redact_openbrain_workflow_text(
+                    child_title, max_length=500
+                )
+                if child_latest_summary is not None:
+                    child_latest_summary = _redact_openbrain_workflow_text(
+                        child_latest_summary, max_length=1200
+                    )
+                if child_result is not None:
+                    child_result = _redact_openbrain_workflow_text(
+                        child_result, max_length=2000
+                    )
+            child_results.append({
+                "id": child.id,
+                "title": child_title,
+                "status": child.status,
+                "latest_summary": child_latest_summary,
+                "result": child_result,
+            })
         # Attach diagnostics so the drawer's Diagnostics section can
         # render recovery actions without a second round-trip.
         diags = _compute_task_diagnostics(conn, task_ids=[task_id])
@@ -691,16 +862,22 @@ def get_task(
         if diag_list:
             task_d["diagnostics"] = diag_list
             task_d["warnings"] = _warnings_summary_from_diagnostics(diag_list)
-        is_workflow_task = _is_openbrain_workflow_task(task)
         return {
             "task": task_d,
-            "comments": [_comment_dict(c) for c in kanban_db.list_comments(conn, task_id)],
+            "comments": [
+                _comment_dict(c, sanitize_workflow=is_workflow_task)
+                for c in kanban_db.list_comments(conn, task_id)
+            ],
             "events": [
                 _event_dict(e, sanitize_workflow=is_workflow_task)
                 for e in kanban_db.list_events(conn, task_id)
             ],
-            "attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)],
-            "links": _links_for(conn, task_id),
+            "attachments": [
+                _attachment_dict(a, sanitize_workflow=is_workflow_task)
+                for a in kanban_db.list_attachments(conn, task_id)
+            ],
+            "links": links,
+            "child_results": child_results,
             "runs": [
                 _run_dict(r, sanitize_workflow=is_workflow_task)
                 for r in kanban_db.list_runs(
@@ -790,28 +967,16 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
 # Attachments — upload / list / download / delete (#35338)
 # ---------------------------------------------------------------------------
 
-# Cap a single upload so a runaway request can't fill the disk. 25 MB
-# comfortably covers PDFs, images, and source docs — the kanban use case.
-_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
-
-
-def _safe_attachment_name(raw: str) -> str:
-    """Reduce a client-supplied filename to a safe basename.
-
-    Strips any directory components (``os.path.basename`` on both
-    separators) so a malicious ``../../etc/passwd`` or ``C:\\x`` collapses
-    to its leaf. Rejects empty / dotfile-only names. The result is only
-    ever joined under the per-task attachments dir, never used verbatim
-    as a path from the client.
-    """
-    name = (raw or "").replace("\\", "/").split("/")[-1].strip()
-    # Drop control chars and leading dots so we never write a dotfile or
-    # a name with embedded NULs/newlines.
-    name = "".join(ch for ch in name if ch.isprintable() and ch not in '\x00').strip()
-    name = name.lstrip(".").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="invalid attachment filename")
-    return name[:200]
+# The size cap, filename sanitiser, and collision resolver now live in
+# ``kanban_db`` so the dashboard, the agent toolset, and the CLI share one
+# implementation and cannot drift. ``_safe_attachment_name`` raises a plain
+# ``ValueError`` there; the upload handler's ``except ValueError`` below maps
+# it to a 400, preserving the previous response.
+from hermes_cli.kanban_db import (  # noqa: E402
+    KANBAN_ATTACHMENT_MAX_BYTES,
+    _collision_free_path,
+    _safe_attachment_name,
+)
 
 
 @router.get("/tasks/{task_id}/attachments")
@@ -819,11 +984,14 @@ def list_task_attachments(task_id: str, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if kanban_db.get_task(conn, task_id) is None:
+        task = kanban_db.get_task(conn, task_id)
+        if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        sanitize_workflow = _is_openbrain_workflow_task(task)
         return {
             "attachments": [
-                _attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)
+                _attachment_dict(a, sanitize_workflow=sanitize_workflow)
+                for a in kanban_db.list_attachments(conn, task_id)
             ]
         }
     finally:
@@ -846,8 +1014,10 @@ async def upload_task_attachment(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if kanban_db.get_task(conn, task_id) is None:
+        task = kanban_db.get_task(conn, task_id)
+        if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        sanitize_workflow = _is_openbrain_workflow_task(task)
 
         safe_name = _safe_attachment_name(file.filename or "")
 
@@ -857,13 +1027,8 @@ async def upload_task_attachment(
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         # Resolve name collisions: foo.pdf → foo (1).pdf, foo (2).pdf, …
-        stem, dot, ext = safe_name.partition(".")
-        candidate = safe_name
-        n = 1
-        while (dest_dir / candidate).exists():
-            candidate = f"{stem} ({n}){dot}{ext}"
-            n += 1
-        dest_path = dest_dir / candidate
+        dest_path = _collision_free_path(dest_dir, safe_name)
+        candidate = dest_path.name
 
         total = 0
         try:
@@ -873,13 +1038,13 @@ async def upload_task_attachment(
                     if not chunk:
                         break
                     total += len(chunk)
-                    if total > _MAX_ATTACHMENT_BYTES:
+                    if total > KANBAN_ATTACHMENT_MAX_BYTES:
                         out.close()
                         dest_path.unlink(missing_ok=True)
                         raise HTTPException(
                             status_code=413,
                             detail=(
-                                f"attachment exceeds {_MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB limit"
+                                f"attachment exceeds {KANBAN_ATTACHMENT_MAX_BYTES // (1024 * 1024)} MB limit"
                             ),
                         )
                     out.write(chunk)
@@ -898,7 +1063,7 @@ async def upload_task_attachment(
             uploaded_by=(uploaded_by or "dashboard"),
         )
         att = kanban_db.get_attachment(conn, att_id)
-        return {"attachment": _attachment_dict(att) if att else None}
+        return {"attachment": _attachment_dict(att, sanitize_workflow=sanitize_workflow) if att else None}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -923,10 +1088,19 @@ def download_attachment(attachment_id: int, board: Optional[str] = Query(None)):
             raise HTTPException(status_code=404, detail="attachment file unavailable")
         if not stored.is_file():
             raise HTTPException(status_code=404, detail="attachment file missing on disk")
+        download_filename = att.filename
+        media_type = att.content_type or "application/octet-stream"
+        task = kanban_db.get_task(conn, att.task_id)
+        if task is not None and _is_openbrain_workflow_task(task):
+            # Keep the attachment-id URL and file bytes usable, but do not
+            # reflect workflow-controlled filename/content-type strings into
+            # browser download headers.
+            download_filename = f"attachment-{att.id}"
+            media_type = "application/octet-stream"
         return FileResponse(
             path=str(stored),
-            filename=att.filename,
-            media_type=att.content_type or "application/octet-stream",
+            filename=download_filename,
+            media_type=media_type,
         )
     finally:
         conn.close()
@@ -1112,13 +1286,23 @@ def _parents_blocking_ready(
     parents, or all parents already done).
     """
     rows = conn.execute(
-        "SELECT t.id, t.title, t.status FROM tasks t "
+        "SELECT t.id, t.title, t.status, t.workflow_template_id, "
+        "       t.current_step_key "
+        "FROM tasks t "
         "JOIN task_links l ON l.parent_id = t.id "
         "WHERE l.child_id = ? AND t.status != 'done'",
         (task_id,),
     ).fetchall()
     return [
-        {"id": r["id"], "title": r["title"], "status": r["status"]}
+        {
+            "id": r["id"],
+            "title": _operator_visible_task_title(
+                r["title"],
+                workflow_template_id=r["workflow_template_id"],
+                current_step_key=r["current_step_key"],
+            ),
+            "status": r["status"],
+        }
         for r in rows
     ]
 
@@ -1450,7 +1634,12 @@ def list_diagnostics(
         rows = {
             r["id"]: r
             for r in conn.execute(
-                f"SELECT id, title, status, assignee FROM tasks WHERE id IN ({placeholders})",
+                f"""
+                SELECT id, title, status, assignee, workflow_template_id,
+                       current_step_key
+                FROM tasks
+                WHERE id IN ({placeholders})
+                """,
                 tuple(ids),
             ).fetchall()
         }
@@ -1460,7 +1649,11 @@ def list_diagnostics(
             r = rows.get(tid)
             out.append({
                 "task_id": tid,
-                "task_title": r["title"] if r else None,
+                "task_title": _operator_visible_task_title(
+                    r["title"] if r else None,
+                    workflow_template_id=r["workflow_template_id"] if r else None,
+                    current_step_key=r["current_step_key"] if r else None,
+                ),
                 "task_status": r["status"] if r else None,
                 "task_assignee": r["assignee"] if r else None,
                 "diagnostics": dl,
@@ -1519,6 +1712,8 @@ def list_active_workers(
                 t.title       AS task_title,
                 t.status      AS task_status,
                 t.assignee    AS task_assignee,
+                t.workflow_template_id,
+                t.current_step_key,
                 r.profile,
                 r.worker_pid,
                 r.started_at,
@@ -1538,7 +1733,11 @@ def list_active_workers(
             {
                 "run_id": row["run_id"],
                 "task_id": row["task_id"],
-                "task_title": row["task_title"],
+                "task_title": _operator_visible_task_title(
+                    row["task_title"],
+                    workflow_template_id=row["workflow_template_id"],
+                    current_step_key=row["current_step_key"],
+                ),
                 "task_status": row["task_status"],
                 "task_assignee": row["task_assignee"],
                 "profile": row["profile"],
@@ -1573,7 +1772,13 @@ def get_run_endpoint(
         r = kanban_db.get_run(conn, run_id)
         if r is None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
-        return {"run": _run_dict(r)}
+        task = kanban_db.get_task(conn, r.task_id)
+        return {
+            "run": _run_dict(
+                r,
+                sanitize_workflow=bool(task and _is_openbrain_workflow_task(task)),
+            )
+        }
     finally:
         conn.close()
 
@@ -2128,6 +2333,7 @@ class CreateBoardBody(BaseModel):
     description: Optional[str] = None
     icon: Optional[str] = None
     color: Optional[str] = None
+    default_workdir: Optional[str] = None
     switch: bool = False
 
 
@@ -2136,6 +2342,9 @@ class RenameBoardBody(BaseModel):
     description: Optional[str] = None
     icon: Optional[str] = None
     color: Optional[str] = None
+    # Board-level default project directory for new tasks. ``None`` =
+    # leave unchanged; empty string = clear; a path = validate + set.
+    default_workdir: Optional[str] = None
 
 
 def _board_counts(slug: str) -> dict[str, int]:
@@ -2156,6 +2365,17 @@ def _board_counts(slug: str) -> dict[str, int]:
         return {}
 
 
+def _default_workspace_kind(board: dict[str, Any]) -> str:
+    """Recommend a non-destructive task workspace from board metadata."""
+    workdir = str(board.get("default_workdir") or "").strip()
+    if not workdir:
+        return "scratch"
+    try:
+        return "worktree" if kanban_db._git_toplevel(Path(workdir)) else "dir"
+    except (OSError, ValueError):
+        return "dir"
+
+
 @router.get("/boards")
 def list_boards(include_archived: bool = Query(False)):
     """Return every board on disk with task counts and the active slug."""
@@ -2165,12 +2385,36 @@ def list_boards(include_archived: bool = Query(False)):
         b["is_current"] = (b["slug"] == current)
         b["counts"] = _board_counts(b["slug"])
         b["total"] = sum(b["counts"].values())
+        b["default_workspace_kind"] = _default_workspace_kind(b)
     return {"boards": boards, "current": current}
+
+
+def _validate_workdir(raw: str) -> str:
+    """Validate a board default_workdir value; return the resolved path.
+
+    Raises :class:`HTTPException` (400) for relative or non-directory
+    paths — mirroring the create-board contract.
+    """
+    requested = Path(raw).expanduser()
+    if not requested.is_absolute():
+        raise HTTPException(
+            status_code=400,
+            detail="Project directory must be an absolute path.",
+        )
+    if not requested.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail="Project directory must be an existing directory.",
+        )
+    return str(requested.resolve())
 
 
 @router.post("/boards")
 def create_board_endpoint(payload: CreateBoardBody):
     """Create a new board. Idempotent — ``slug`` collision returns existing."""
+    default_workdir = None
+    if payload.default_workdir:
+        default_workdir = _validate_workdir(payload.default_workdir)
     try:
         meta = kanban_db.create_board(
             payload.slug,
@@ -2178,6 +2422,7 @@ def create_board_endpoint(payload: CreateBoardBody):
             description=payload.description,
             icon=payload.icon,
             color=payload.color,
+            default_workdir=default_workdir,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -2186,25 +2431,34 @@ def create_board_endpoint(payload: CreateBoardBody):
             kanban_db.set_current_board(meta["slug"])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+    meta["default_workspace_kind"] = _default_workspace_kind(meta)
     return {"board": meta, "current": kanban_db.get_current_board()}
 
 
 @router.patch("/boards/{slug}")
 def rename_board(slug: str, payload: RenameBoardBody):
-    """Update a board's display metadata (slug is immutable — create a new one to rename the directory)."""
+    """Update a board's display metadata + default project directory (slug is immutable — create a new one to rename the directory)."""
     try:
         normed = kanban_db._normalize_board_slug(slug)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not normed or not kanban_db.board_exists(normed):
         raise HTTPException(status_code=404, detail=f"board {slug!r} does not exist")
+    # default_workdir: None = leave unchanged; "" = clear; path = validate + set.
+    # write_board_metadata treats a falsy value as "clear", so pass "" through.
+    default_workdir: Optional[str] = None
+    if payload.default_workdir is not None:
+        raw = payload.default_workdir.strip()
+        default_workdir = _validate_workdir(raw) if raw else ""
     meta = kanban_db.write_board_metadata(
         normed,
         name=payload.name,
         description=payload.description,
         icon=payload.icon,
         color=payload.color,
+        default_workdir=default_workdir,
     )
+    meta["default_workspace_kind"] = _default_workspace_kind(meta)
     return {"board": meta}
 
 

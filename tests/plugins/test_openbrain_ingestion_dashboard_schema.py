@@ -152,7 +152,7 @@ def test_producer_info_is_bounded_forbids_extras_and_artifacts_are_basenames():
             "run_root_label": "/mnt/d/private/panning-run-20260621",
             "artifacts": [
                 "/mnt/d/private/source-items.jsonl",
-                "C:\\Users\\Ken\\Private\\capture-candidates.jsonl",
+                "C:\\Users\\Example\\Private\\capture-candidates.jsonl",
                 "https://localhost/private/skip.jsonl",
             ],
         }
@@ -237,12 +237,12 @@ def test_embedded_private_paths_with_spaces_are_fully_redacted_in_text_fields():
                 {
                     "id": "source-unit-path-redaction",
                     "label": "see /mnt/d/private/My Folder/file.md for context",
-                    "subtitle": "also see C:\\Users\\Ken\\Private Folder\\file.md before review",
+                    "subtitle": "also see C:\\Users\\Example\\Private Folder\\file.md before review",
                     "thoughts": [
                         {
                             "lineage_id": "lineage-path-redaction",
                             "title": "Title with /mnt/d/private/My Folder/file.md embedded",
-                            "summary": "Windows path C:\\Users\\Ken\\Private Folder\\file.md embedded",
+                            "summary": "Windows path C:\\Users\\Example\\Private Folder\\file.md embedded",
                             "final_memory_text": "ordinary note remains after /mnt/d/private/My Folder/file.md",
                         }
                     ],
@@ -269,9 +269,9 @@ def test_embedded_private_paths_with_spaces_are_fully_redacted_in_text_fields():
             ("/mnt/d/private", "My Folder", "Folder for context"),
         ),
         (
-            "see C:\\Users\\Ken\\Private Folder for context",
+            "see C:\\Users\\Example\\Private Folder for context",
             "[REDACTED_PATH]",
-            ("C:\\Users\\Ken", "Private Folder", "Folder for context"),
+            ("C:\\Users\\Example", "Private Folder", "Folder for context"),
         ),
         (
             "see \\\\server\\share\\Private Folder for context",
@@ -370,7 +370,7 @@ def test_source_refs_omit_absolute_paths_private_urls_and_raw_url_fields():
                     "kind": "otter_transcript",
                     "source_unit_id": "transcript-a",
                     "display_path": "/mnt/d/private/transcript.md",
-                    "absolute_path": "C:\\Users\\Ken\\secret.md",
+                    "absolute_path": "C:\\Users\\Example\\secret.md",
                     "url": "http://localhost:9123/private",
                     "link": "file:///mnt/d/private/raw.txt",
                 },

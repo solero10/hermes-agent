@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_cli.openbrain_workflow_contracts import StepStatus, WorkflowEvent, WorkflowStatus, build_heartbeat_note
+from hermes_cli.openbrain_workflow_contracts import StepHandoff, StepStatus, WorkflowEvent, WorkflowStatus, build_heartbeat_note
 
 
 def test_status_contract_accepts_minimal_running_payload():
@@ -61,3 +61,61 @@ def test_receipt_and_source_paths_remain_usable_private_pointers():
     assert status.source_folder == "/tmp/source-a/full-path"
     assert status.receipt_path == "/tmp/source-a/receipt.md"
     assert step.receipt_path == "/tmp/source-a/step-receipt.md"
+
+
+def test_monitor_ids_are_bounded_and_not_free_text():
+    too_long = "source-" + ("x" * 10000)
+    too_many_candidates = [f"cand-{index}" for index in range(501)]
+    with pytest.raises(Exception):
+        WorkflowStatus.model_validate({
+            "workflow_run_id": "obwf_x",
+            "source_unit_id": too_long,
+            "active_step": "thought_enrichment",
+            "status": "running",
+            "started_at": "2026-07-06T10:12:05Z",
+            "updated_at": "2026-07-06T10:17:05Z",
+        })
+    with pytest.raises(Exception):
+        WorkflowStatus.model_validate({
+            "workflow_run_id": "obwf_x",
+            "source_unit_id": "source-a",
+            "current_candidate_id": too_long,
+            "active_step": "thought_enrichment",
+            "status": "running",
+            "started_at": "2026-07-06T10:12:05Z",
+            "updated_at": "2026-07-06T10:17:05Z",
+        })
+    with pytest.raises(Exception):
+        WorkflowEvent.model_validate({
+            "workflow_run_id": "obwf_x",
+            "source_unit_id": too_long,
+            "event_type": "candidate_completed",
+            "created_at": "2026-07-06T10:17:05Z",
+        })
+    with pytest.raises(Exception):
+        WorkflowEvent.model_validate({
+            "workflow_run_id": "obwf_x",
+            "source_unit_id": "source-a",
+            "event_type": "candidate_completed",
+            "created_at": "2026-07-06T10:17:05Z",
+            "candidate_id": too_long,
+        })
+    with pytest.raises(Exception):
+        StepStatus(status="done", candidate_ids=[too_long])
+    with pytest.raises(Exception):
+        StepStatus(status="done", candidate_ids=too_many_candidates)
+    with pytest.raises(Exception):
+        StepHandoff(
+            workflow_run_id="obwf_x",
+            source_unit_id=too_long,
+            step_key="thought_enrichment",
+            step_name="Thought Enrichment",
+        )
+    with pytest.raises(Exception):
+        StepHandoff(
+            workflow_run_id="obwf_x",
+            source_unit_id="source-a",
+            step_key="thought_enrichment",
+            step_name="Thought Enrichment",
+            candidate_ids=[too_long],
+        )

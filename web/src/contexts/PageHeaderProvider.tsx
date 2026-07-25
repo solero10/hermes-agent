@@ -1,16 +1,7 @@
-import {
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { PageHeaderContext } from "./page-header-context";
-import {
-  formatBrowserPageTitle,
-  resolvePageTitle,
-} from "@/lib/resolve-page-title";
+import { formatBrowserPageTitle, resolvePageTitle } from "@/lib/resolve-page-title";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
 
@@ -44,6 +35,10 @@ export function PageHeaderProvider({
   const displayTitle = titleOverride ?? defaultTitle;
 
   useEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+
     document.title = formatBrowserPageTitle(displayTitle);
   }, [displayTitle]);
 
@@ -68,7 +63,7 @@ export function PageHeaderProvider({
           className={cn(
             "z-1 w-full shrink-0",
             "box-border border-b border-current/20",
-            "bg-background-base/40 backdrop-blur-sm",
+            "bg-background-base",
             // Mobile stacks title + toolbar — fixed h-14 clips content; desktop stays one row.
             "min-h-0 overflow-x-hidden overflow-y-visible py-3 sm:h-14 sm:min-h-[3.5rem] sm:overflow-hidden sm:py-0",
           )}
@@ -101,7 +96,6 @@ export function PageHeaderProvider({
                       ? "shrink truncate"
                       : "truncate",
                 )}
-                style={{ mixBlendMode: "plus-lighter" }}
               >
                 {displayTitle}
               </h1>

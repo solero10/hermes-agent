@@ -1,8 +1,9 @@
 # Hermes Agent - Development Guide
 
 This is the always-loaded operating card for AI coding assistants working on
-this repository. Keep it short: Hermes caps loaded context files, so detailed
-reference material lives in linked docs instead of this root file.
+this repository. Keep it compact: detailed architecture, contribution, testing,
+and pitfall material lives in the linked references below so the prompt budget
+stays bounded.
 
 **Never give up on the right solution.** Fix the real problem, verify it, and
 leave the repo safer than you found it.
@@ -12,8 +13,8 @@ leave the repo safer than you found it.
 Hermes is a personal AI agent that runs the same agent core across a CLI,
 messaging gateway, TUI, Electron desktop app, API surface, scheduled jobs, and
 subagents. It learns through memory and skills, drives terminal/browser tools,
-and is extended primarily through plugins, skills, CLI commands, and MCP — not
-by expanding the core model-tool surface.
+and should grow through plugins, skills, CLI commands, and MCP before the core
+model-tool surface expands.
 
 Two design invariants shape almost every change:
 
@@ -26,20 +27,17 @@ Two design invariants shape almost every change:
 
 ## Daily Workflow
 
-1. **Gather context before editing.** Read relevant files with `read_file`, find
-   code with `search_files`, and trace symbols to definitions/usages. Do not
-   invent files, APIs, imports, or project structure.
+1. **Gather context before editing.** Read relevant files, trace symbols to
+   definitions/usages, and verify the premise against current code.
 2. **Make bounded changes.** Touch only what the task needs. Match existing
-   style. Use `patch` for edits and `write_file` for new files. Do not paste
-   code in chat instead of changing files.
-3. **Protect user state and secrets.** Never read, print, or commit secrets
-   unless explicitly asked. Do not modify other Hermes profiles' skills,
-   plugins, cron jobs, or memories unless explicitly directed.
-4. **Verify with real commands.** Run the targeted tests/lints/builds that prove
-   the change. If a command fails, diagnose the real blocker instead of claiming
-   success.
-5. **Report evidence.** Summaries should name changed files, commands run, and
-   any remaining risks or follow-ups.
+   style. Do not paste code in chat instead of changing files.
+3. **Protect user state and secrets.** Never print or commit secrets. Do not
+   modify another Hermes profile's skills, plugins, cron jobs, or memories
+   unless explicitly directed.
+4. **Verify with real commands.** Run targeted tests/lints/builds that prove the
+   change. If a command fails, diagnose the blocker instead of claiming success.
+5. **Report evidence.** Name changed files, commands run, and remaining risks or
+   follow-ups.
 
 ## Setup and Test Commands
 
@@ -47,12 +45,12 @@ Two design invariants shape almost every change:
 # Prefer .venv; fall back to venv if that is what the checkout has.
 source .venv/bin/activate   # or: source venv/bin/activate
 
-# Always prefer the wrapper. It matches CI better than direct pytest.
+# Always prefer the wrapper. It matches CI and uses per-file subprocess isolation.
 scripts/run_tests.sh                                  # full suite
 scripts/run_tests.sh tests/gateway/                   # focused directory
 scripts/run_tests.sh tests/agent/test_foo.py          # focused file
-scripts/run_tests.sh tests/agent/test_foo.py -- -k test_x  # focused test/filter
-scripts/run_tests.sh tests/agent/test_foo.py -- -q --tb=long  # pytest flags after --
+scripts/run_tests.sh tests/agent/test_foo.py -- -k test_x
+scripts/run_tests.sh tests/agent/test_foo.py -- -q --tb=long
 scripts/run_tests.sh -j 4 tests/agent/                # cap parallelism
 ```
 
@@ -66,6 +64,8 @@ Testing rules:
   model names, config-version literals, provider counts, or catalog snapshots.
 - For config, routing, security, file/network I/O, providers, and prompt/schema
   behavior, prefer real-path tests over mocks.
+- Do not write tests that regex-read source code; extract logic and test it for
+  real instead.
 
 Full testing details: [`TESTING.md`](TESTING.md).
 
@@ -94,7 +94,9 @@ tests/                        pytest suite
 website/                      Docusaurus docs
 ```
 
-Detailed architecture notes: [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Detailed architecture notes: [`ARCHITECTURE.md`](ARCHITECTURE.md). Desktop work
+also requires [`apps/desktop/AGENTS.md`](apps/desktop/AGENTS.md) and
+[`apps/desktop/DESIGN.md`](apps/desktop/DESIGN.md).
 
 ## Contribution and Design Rules
 
@@ -113,12 +115,12 @@ Other high-value rules:
 - Preserve message role alternation and prompt-cache stability.
 - Keep non-secret settings in `config.yaml`; `.env` is for API keys, tokens,
   passwords, and other secrets only.
-- New dependencies need bounded versions; security-sensitive pins need the
-  rules in `CONTRIBUTING.md`.
+- New dependencies need bounded versions; security-sensitive pins need the rules
+  in `CONTRIBUTING.md`.
 - Plugins must not special-case themselves by modifying core files. Widen a
   generic plugin surface instead.
-- For profile-aware state paths, use `get_hermes_home()`; for user-facing
-  path text, use `display_hermes_home()`.
+- For profile-aware state paths, use `get_hermes_home()`; for user-facing path
+  text, use `display_hermes_home()`.
 
 Full contribution/review policy: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
@@ -150,8 +152,11 @@ full profile section.
 - Do not hardcode cross-tool references in schema descriptions; toolsets vary.
 - Gateway control/approval commands must bypass both message guards.
 - Do not wire dead code into live paths without E2E validation.
-- Before squash-merging stale branches, rebase/reset to current `main` and
-  inspect the resulting diff for accidental reverts.
+- Before squash-merging stale branches, rebase/reset and inspect the diff for
+  accidental reverts.
+- Preserve deterministic tool-call IDs when projecting/replaying events.
+- Gateway tests often use bare `object.__new__` doubles; guard optional attrs.
+- Do not read source code in tests; test behavior through executable seams.
 
 Full pitfall notes: [`PITFALLS.md`](PITFALLS.md).
 
@@ -162,9 +167,10 @@ Full pitfall notes: [`PITFALLS.md`](PITFALLS.md).
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): project layout, agent loop, CLI, TUI,
   desktop, tools, plugins, skills, cron, kanban, profiles.
 - [`TESTING.md`](TESTING.md): test wrapper, subprocess isolation, CI-parity
-  reasons, change-detector examples.
+  reasons, change-detector and source-regex-test rules.
 - [`PITFALLS.md`](PITFALLS.md): historical hazards and sharp edges.
 
-This first-pass split is docs-only: Hermes currently loads only the root
-`AGENTS.md` from the working directory. If you add subsystem-specific docs later,
-keep pointers here or update the loader deliberately with tests.
+Hermes loads this root context at session start and can discover nested context
+files as work moves into subdirectories. Keep this file compact; put expanded
+repo guidance in the linked references and update `tests/test_repo_context_docs.py`
+if the contract changes.

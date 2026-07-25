@@ -85,6 +85,23 @@ This isn't a quality bar — it's a coupling-and-maintenance decision. Memory pr
 
 ---
 
+## Third-Party Product Integrations: Ship as a Standalone Plugin
+
+The same rule extends to **any plugin that integrates someone else's product or project** — observability/metrics backends, vendor SaaS connectors, analytics dashboards, paid-service tie-ins, and similar third-party integrations. **These do not land in this repo.**
+
+The reason is maintenance load, not quality. Every external product absorbed into the core tree becomes ours to keep working against a fast-moving codebase, for a backend we don't own and can't control. Hermes ships a lot and the core moves quickly; coupling third-party products into it creates an open-ended burden on the maintainers.
+
+Publish these as a **standalone plugin repo** instead:
+
+- Implement the relevant ABC and use the existing plugin discovery path (`~/.hermes/plugins/`, project `.hermes/plugins/`, or a pip entry point) — see [Build a Hermes Plugin](https://hermes-agent.nousresearch.com/docs/guides/build-a-hermes-plugin)
+- Register lifecycle hooks (`pre_tool_call`, `post_tool_call`, `pre_llm_call`, `post_llm_call`, `on_session_start`, `on_session_end`), tools (`ctx.register_tool`), and CLI subcommands (`ctx.register_cli_command`) through the surface we already expose — no core changes needed
+- If your plugin needs a capability the framework doesn't expose, that's a feature request to **widen the generic plugin surface** (a new hook or `ctx` method) — never special-case your plugin in core
+- Promote it in the [Nous Research Discord](https://discord.gg/NousResearch) `#plugins-skills-and-skins` channel so users can find and install it
+
+A well-built third-party-product plugin can clear automated review and still be closed for this reason — it's a placement decision, not a verdict on the code. PRs that add such a directory under `plugins/` will be closed with a pointer to publish it as its own repo.
+
+---
+
 ## Development Setup
 
 ### Prerequisites
@@ -92,7 +109,7 @@ This isn't a quality bar — it's a coupling-and-maintenance decision. Memory pr
 | Requirement | Notes |
 |-------------|-------|
 | **Git** | With the `git-lfs` extension installed |
-| **Python 3.11+** | uv will install it if missing |
+| **Python 3.11–3.13** | uv will install it if missing |
 | **uv** | Fast Python package manager ([install](https://docs.astral.sh/uv/)) |
 | **Node.js 20+** | Optional — needed for browser tools and WhatsApp bridge (matches root `package.json` engines) |
 
@@ -132,13 +149,20 @@ this way, make sure you run the `hermes` entrypoint from this venv; running the
 system `python3 -m hermes_cli.main` can pick up unrelated system Python
 packages.
 
+Create the venv **outside** the cloned source tree. A venv that lives inside
+the directory the agent operates from can be wiped by a relative-path command
+the agent runs against its own checkout (`rm -rf venv`, `uv venv venv`, etc.),
+which silently destroys the running runtime mid-session. Keeping it outside the
+tree means no relative path from the workspace resolves to it.
+
 ```bash
 git clone https://github.com/NousResearch/hermes-agent.git
 cd hermes-agent
 
-# Create venv with Python 3.11
-uv venv venv --python 3.11
-export VIRTUAL_ENV="$(pwd)/venv"
+# Create venv with Python 3.11, OUTSIDE the source tree
+uv venv ~/.hermes/venvs/hermes-dev --python 3.11
+export VIRTUAL_ENV="$HOME/.hermes/venvs/hermes-dev"
+export PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # Install with all extras (messaging, cron, CLI menus, dev tools)
 uv pip install -e ".[all,dev]"
@@ -177,12 +201,12 @@ ln -sf "$(pwd)/venv/bin/hermes" ~/.local/bin/hermes
 ### Run tests
 
 ```bash
-# Preferred — matches CI (hermetic env, per-file subprocess isolation); see AGENTS.md
+# Preferred — matches CI (hermetic env, per-file subprocess isolation); see TESTING.md
 scripts/run_tests.sh
 
-# Alternative (activate the venv first). The wrapper is still recommended
-# for parity with GitHub Actions before you open a PR:
-pytest tests/ -v
+# Direct pytest is only for narrow local debugging. Before a PR, rerun
+# the relevant scope through scripts/run_tests.sh for CI parity:
+python -m pytest tests/agent/test_prompt_builder.py -q
 ```
 
 ---
@@ -374,7 +398,7 @@ add it in `toolsets.py` and wire it into the relevant platform presets.
 See the root [`AGENTS.md` Profile-Safe Paths section](AGENTS.md#profile-safe-paths)
 for profile-aware paths, and this document's
 [Footprint Ladder](#the-footprint-ladder-new-capability-decision) for plugin
-vs. core guidance.
+vs core guidance.
 
 ---
 
@@ -587,7 +611,7 @@ Every new or modernized skill — bundled, optional, or contributed — must mee
 
 6. **Scripts go in `scripts/`, references in `references/`, templates in `templates/`.** Don't expect the model to inline-write parsers, XML walkers, or non-trivial logic every call — ship a helper script. Reference scripts from SKILL.md by path relative to the skill directory.
 
-7. **Tests live at `tests/skills/test_<skill>_skill.py`** and use only stdlib + pytest + `unittest.mock`. No live network calls. Run via `scripts/run_tests.sh tests/skills/test_<skill>_skill.py -- -q`. Must pass under the hermetic CI env (no API keys leaking through). Use `monkeypatch` and `tmp_path` for any env-var or filesystem dependencies.
+7. **Tests live at `tests/skills/test_<skill>_skill.py`** and use only stdlib + pytest + `unittest.mock`. No live network calls. Run via `scripts/run_tests.sh tests/skills/test_<skill>_skill.py -q`. Must pass under the hermetic CI env (no API keys leaking through). Use `monkeypatch` and `tmp_path` for any env-var or filesystem dependencies.
 
 8. **`.env.example` additions are isolated to a clearly delimited block.** Don't touch the surrounding file — contributor-supplied `.env.example` versions are usually stale, and edits outside the skill's own block will be dropped during salvage. Comment all values with `#` (it's documentation, not live config).
 
@@ -907,90 +931,12 @@ After the [litellm supply chain compromise](https://github.com/BerriAI/litellm/i
 
 ---
 
-## Pull Request Process
-
-### Branch naming
-
-```
-fix/description        # Bug fixes
-feat/description       # New features
-docs/description       # Documentation
-test/description       # Tests
-refactor/description   # Code restructuring
-```
-
-### Before submitting
-
-1. **Run tests**: `scripts/run_tests.sh` (recommended; same as CI) or `pytest tests/ -v` with the project venv activated
-2. **Test manually**: Run `hermes` and exercise the code path you changed
-3. **Check cross-platform impact**: If you touch file I/O, process management, or terminal handling, consider macOS, Linux, and WSL2
-4. **Keep PRs focused**: One logical change per PR. Don't mix a bug fix with a refactor with a new feature.
-
-### PR description
-
-Include:
-- **What** changed and **why**
-- **How to test** it (reproduction steps for bugs, usage examples for features)
-- **What platforms** you tested on
-- Reference any related issues
-
-### Commit messages
-
-We use [Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-<type>(<scope>): <description>
-```
-
-| Type | Use for |
-|------|---------|
-| `fix` | Bug fixes |
-| `feat` | New features |
-| `docs` | Documentation |
-| `test` | Tests |
-| `refactor` | Code restructuring (no behavior change) |
-| `chore` | Build, CI, dependency updates |
-
-Scopes: `cli`, `gateway`, `tools`, `skills`, `agent`, `install`, `whatsapp`, `security`, etc.
-
-Examples:
-```
-fix(cli): prevent crash in save_config_value when model is a string
-feat(gateway): add WhatsApp multi-user session isolation
-fix(security): prevent shell injection in sudo password piping
-test(tools): add unit tests for file_operations
-```
-
----
-
-## Reporting Issues
-
-- Use [GitHub Issues](https://github.com/NousResearch/hermes-agent/issues)
-- Include: OS, Python version, Hermes version (`hermes version`), full error traceback
-- Include steps to reproduce
-- Check existing issues before creating duplicates
-- For security vulnerabilities, please report privately
-
----
-
-## Community
-
-- **Discord**: [discord.gg/NousResearch](https://discord.gg/NousResearch) — for questions, showcasing projects, and sharing skills
-- **GitHub Discussions**: For design proposals and architecture discussions
-- **Skills Hub**: Upload specialized skills to a registry and share them with the community
-
----
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
-
----
-
 ## AI Agent Contribution and Review Policy
 
 The sections below are the agent-facing contribution and review policy moved
-out of the root `AGENTS.md` so the always-loaded prompt stays compact.
+out of the root `AGENTS.md` so the always-loaded prompt stays compact. Earlier
+sections in this file remain contributor onboarding; when wording overlaps, use
+this policy as the maintainer-facing rule set.
 
 ## Contribution Rubric — What We Want / What We Don't
 
@@ -1089,6 +1035,17 @@ conservative at the waist.
   without E2E proof, and plugins that touch core files.** Plugins live in their
   own directory and work within the ABCs/hooks we provide; if a plugin needs
   more, widen the generic plugin surface, don't special-case it in core.
+- **Third-party products / other people's projects integrated into the core
+  tree.** Observability backends, vendor SaaS integrations, analytics dashboards,
+  and similar "someone else's product" plugins do NOT land under `plugins/` in
+  this repo. They place an ongoing maintenance burden on us to keep them working
+  against a fast-moving core, for a backend we don't own. Ship them as a
+  **standalone plugin repo** users install into `~/.hermes/plugins/` (or via a
+  pip entry point), and promote them in the Nous Research Discord
+  (`#plugins-skills-and-skins`). This is a coupling-and-maintenance decision, not
+  a quality bar — the plugin can be excellent and still be a close. PRs that add
+  such a directory to the tree are closed with a pointer to publish it as its own
+  repo.
 
 ### Before you call it a bug — verify the premise (and when NOT to close)
 
@@ -1329,3 +1286,85 @@ in config.yaml (or `HERMES_BACKGROUND_NOTIFICATIONS` env var):
 - `result` — only the final completion message
 - `error` — only the final message when exit code != 0
 - `off` — no watcher messages at all
+
+---
+
+---
+
+## Pull Request Process
+
+### Branch naming
+
+```
+fix/description        # Bug fixes
+feat/description       # New features
+docs/description       # Documentation
+test/description       # Tests
+refactor/description   # Code restructuring
+```
+
+### Before submitting
+
+1. **Run tests**: `scripts/run_tests.sh` for CI parity. Use direct pytest only for narrow local debugging, then rerun the wrapper before opening a PR.
+2. **Test manually**: Run `hermes` and exercise the code path you changed
+3. **Check cross-platform impact**: If you touch file I/O, process management, or terminal handling, consider macOS, Linux, and WSL2
+4. **Keep PRs focused**: One logical change per PR. Don't mix a bug fix with a refactor with a new feature.
+
+### PR description
+
+Include:
+- **What** changed and **why**
+- **How to test** it (reproduction steps for bugs, usage examples for features)
+- **What platforms** you tested on
+- Reference any related issues
+
+### Commit messages
+
+We use [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<scope>): <description>
+```
+
+| Type | Use for |
+|------|---------|
+| `fix` | Bug fixes |
+| `feat` | New features |
+| `docs` | Documentation |
+| `test` | Tests |
+| `refactor` | Code restructuring (no behavior change) |
+| `chore` | Build, CI, dependency updates |
+
+Scopes: `cli`, `gateway`, `tools`, `skills`, `agent`, `install`, `whatsapp`, `security`, etc.
+
+Examples:
+```
+fix(cli): prevent crash in save_config_value when model is a string
+feat(gateway): add WhatsApp multi-user session isolation
+fix(security): prevent shell injection in sudo password piping
+test(tools): add unit tests for file_operations
+```
+
+---
+
+## Reporting Issues
+
+- Use [GitHub Issues](https://github.com/NousResearch/hermes-agent/issues)
+- Include: OS, Python version, Hermes version (`hermes version`), full error traceback
+- Include steps to reproduce
+- Check existing issues before creating duplicates
+- For security vulnerabilities, please report privately
+
+---
+
+## Community
+
+- **Discord**: [discord.gg/NousResearch](https://discord.gg/NousResearch) — for questions, showcasing projects, and sharing skills
+- **GitHub Discussions**: For design proposals and architecture discussions
+- **Skills Hub**: Upload specialized skills to a registry and share them with the community
+
+---
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).

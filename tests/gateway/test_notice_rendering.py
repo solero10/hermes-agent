@@ -107,6 +107,11 @@ def _make_source(platform_value="telegram", chat_id="555", user_id="u1"):
     src.platform = plat
     src.chat_id = chat_id
     src.user_id = user_id
+    # Real SessionSource.profile is None (single-profile) or a str; a MagicMock
+    # auto-attribute would read as a truthy "stamped profile" and trip the
+    # fail-closed path in _adapter_for_source (see PITFALLS.md, "Bare test
+    # doubles skip __init__").
+    src.profile = None
     return src
 
 

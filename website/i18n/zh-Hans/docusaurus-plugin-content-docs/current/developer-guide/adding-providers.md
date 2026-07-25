@@ -338,18 +338,16 @@ Prompt（提示词）缓存和 provider 专属的调节项很容易出现回归�
 - `provider:model` 解析
 - 任何适配器专属的消息转换
 
-使用禁用 xdist 的方式运行测试：
+通过与 CI 一致的 wrapper 运行聚焦的 provider 测试：
 
 ```bash
-source venv/bin/activate
-python -m pytest tests/test_runtime_provider_resolution.py tests/test_cli_provider_resolution.py tests/test_cli_model_command.py tests/test_setup_model_selection.py -n0 -q
+scripts/run_tests.sh tests/hermes_cli/test_runtime_provider_resolution.py tests/cli/test_cli_provider_resolution.py tests/hermes_cli/test_setup_model_provider.py tests/run_agent/test_provider_parity.py -- -q
 ```
 
 对于更深层的修改，在推送前运行完整测试套件：
 
 ```bash
-source venv/bin/activate
-python -m pytest tests/ -n0 -q
+scripts/run_tests.sh
 ```
 
 ## 第 9 步：实时验证
