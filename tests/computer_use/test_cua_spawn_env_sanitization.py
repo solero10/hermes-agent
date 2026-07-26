@@ -63,6 +63,31 @@ def test_resolve_mcp_invocation_sanitizes_env(monkeypatch):
     _assert_sanitized(captured)
 
 
+def test_resolve_mcp_invocation_keeps_wsl_path_for_windows_manifest(monkeypatch):
+    """A Windows-native manifest path is not spawnable by a WSL Python host."""
+    from tools.computer_use import cua_backend
+
+    driver_cmd = "/mnt/c/Users/test/.cua-driver/current/cua-driver.exe"
+    manifest = json.dumps({
+        "mcp_invocation": {
+            "command": r"C:\Users\test\.cua-driver\current\cua-driver.exe",
+            "args": ["mcp"],
+        }
+    })
+    monkeypatch.setattr(
+        cua_backend.subprocess,
+        "run",
+        _capture_run({}, stdout=manifest),
+    )
+    monkeypatch.setattr(cua_backend.os.path, "exists", lambda path: False)
+    monkeypatch.setattr(cua_backend.shutil, "which", lambda command: None)
+
+    cmd, args = cua_backend._resolve_mcp_invocation(driver_cmd)
+
+    assert cmd == driver_cmd
+    assert args == ["mcp"]
+
+
 def test_update_check_sanitizes_env(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")

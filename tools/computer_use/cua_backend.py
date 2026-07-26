@@ -256,6 +256,14 @@ def _resolve_mcp_invocation(
         # The driver knows the subcommand but didn't surface its own path.
         # Keep our resolved driver_cmd; the args are still authoritative.
         return driver_cmd, args
+    # A cross-OS executable can report a native path that the host process
+    # cannot spawn directly.  The important case is Hermes in WSL invoking the
+    # Windows cua-driver: its manifest returns ``C:\...\cua-driver.exe``, while
+    # the working caller path is ``/mnt/c/.../cua-driver.exe``.  Preserve the
+    # caller's executable when the manifest command is not runnable from this
+    # host; otherwise MCP startup silently falls back to an empty Linux desktop.
+    if command != driver_cmd and not os.path.exists(command) and shutil.which(command) is None:
+        return driver_cmd, args
     return command, args
 
 # Regex to parse element lines from get_window_state AX tree markdown.
