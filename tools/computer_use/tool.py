@@ -151,6 +151,24 @@ _session_auto_approve: Dict[str, bool] = {}
 _always_allow: Dict[str, set] = {}
 
 
+def _auto_approve_background_enabled() -> bool:
+    """Return whether routine background desktop actions skip approval.
+
+    This is deliberately narrower than global YOLO/``approvals.mode: off``:
+    foreground delivery can steal focus and must still be approved, while the
+    hard blocks for dangerous typed text and key combinations run before this
+    policy is consulted.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        cu = cfg.get("computer_use") or {}
+        return bool(cu.get("auto_approve_background", False))
+    except Exception:
+        return False
+
+
 def _get_backend() -> ComputerUseBackend:
     global _backend
     with _backend_lock:
@@ -325,6 +343,8 @@ def _request_approval(action: str, args: Dict[str, Any],
     unlocks into one another.
     """
     is_foreground = args.get("delivery_mode") == "foreground"
+    if not is_foreground and _auto_approve_background_enabled():
+        return None
     scope_key = (action, "foreground" if is_foreground else "background")
     with _approval_lock:
         if _session_auto_approve.get(session_id):

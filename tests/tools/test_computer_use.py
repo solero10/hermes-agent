@@ -160,6 +160,50 @@ class TestDispatch:
         parsed = json.loads(out)
         assert "error" in parsed
 
+    def test_background_action_can_be_narrowly_auto_approved(self, noop_backend):
+        from tools.computer_use import tool as cu_tool
+
+        deny = MagicMock(return_value="deny")
+        cu_tool.set_approval_callback(deny)
+        try:
+            with patch(
+                "tools.computer_use.tool._auto_approve_background_enabled",
+                return_value=True,
+            ):
+                out = cu_tool.handle_computer_use(
+                    {"action": "double_click", "element": 3},
+                    session_id="auto-bg",
+                )
+            assert "error" not in json.loads(out)
+            deny.assert_not_called()
+        finally:
+            cu_tool.set_approval_callback(None)
+
+    def test_foreground_action_still_requires_approval_when_background_is_auto_approved(
+        self, noop_backend
+    ):
+        from tools.computer_use import tool as cu_tool
+
+        deny = MagicMock(return_value="deny")
+        cu_tool.set_approval_callback(deny)
+        try:
+            with patch(
+                "tools.computer_use.tool._auto_approve_background_enabled",
+                return_value=True,
+            ):
+                out = cu_tool.handle_computer_use(
+                    {
+                        "action": "click",
+                        "element": 3,
+                        "delivery_mode": "foreground",
+                    },
+                    session_id="auto-bg",
+                )
+            assert json.loads(out)["error"] == "denied by user"
+            deny.assert_called_once()
+        finally:
+            cu_tool.set_approval_callback(None)
+
     def test_unknown_action_returns_error(self):
         from tools.computer_use.tool import handle_computer_use
         out = handle_computer_use({"action": "nope"})

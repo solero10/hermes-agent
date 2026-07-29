@@ -3444,6 +3444,10 @@ DEFAULT_CONFIG = {
         # every invocation (MCP backend, status, doctor, install). Set true
         # to let cua-driver use its own default (telemetry on).
         "cua_telemetry": False,
+        # Auto-approve only background desktop input. Foreground delivery still
+        # requires approval because it raises a window / changes focus. Hard
+        # blocks for dangerous typed text and key combinations remain active.
+        "auto_approve_background": False,
     },
 
     # Hermes Desktop (Electron app) launch options. These only affect
