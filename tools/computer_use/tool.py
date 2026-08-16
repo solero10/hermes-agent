@@ -169,6 +169,23 @@ def _auto_approve_background_enabled() -> bool:
         return False
 
 
+def _persistent_blanket_approval_enabled() -> bool:
+    """Return whether Ken permanently approved all Computer Use actions.
+
+    This remains scoped to Computer Use; other Hermes approval gates are not
+    changed. Hard-blocked keys and dangerous typed-text patterns still run
+    before this policy is consulted.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        cu = cfg.get("computer_use") or {}
+        return bool(cu.get("always_approve", False))
+    except Exception:
+        return False
+
+
 def _get_backend() -> ComputerUseBackend:
     global _backend
     with _backend_lock:
@@ -342,6 +359,9 @@ def _request_approval(action: str, args: Dict[str, Any],
     operation. State is keyed on session_id so concurrent runs don't leak
     unlocks into one another.
     """
+    if _persistent_blanket_approval_enabled():
+        return None
+
     is_foreground = args.get("delivery_mode") == "foreground"
     if not is_foreground and _auto_approve_background_enabled():
         return None
